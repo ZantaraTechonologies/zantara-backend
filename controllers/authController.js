@@ -54,9 +54,9 @@ const register = async (req, res) => {
         // session.endSession()
 
         // Send verification link and token
-        const verifyToken = generateToken(user, '1d')
-        const verifyLink = `${process.env.CLIENT_URL}/verify-email/${verifyToken}`
-        await sendEmail(email, 'Verify your email', `<a href="${verifyLink}">Verify</a>`)
+        // const verifyToken = generateToken(user, '1d')
+        // const verifyLink = `${process.env.CLIENT_URL}/verify-email/${verifyToken}`
+        // await sendEmail(email, 'Verify your email', `<a href="${verifyLink}">Verify</a>`)
 
         sendToken(user, res)
     } catch (error) {
@@ -91,7 +91,7 @@ const login = async (req, res) => {
         const match = await bcrypt.compare(password, user.password)
         if (!match) return res.status(400).json({ message: 'Invalid credentials' })
 
-        if (!user.status) return res.status(403).json({ message: 'Account not verified. Please verify your email.' })
+        // if (!user.status) return res.status(403).json({ message: 'Account not verified. Please verify your email.' })
 
         sendToken(user, res)
     } catch (error) {
