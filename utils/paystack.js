@@ -24,6 +24,4 @@ const initializePayment = async (email, amount, metadata = {}) => {
     }
 }
 
-module.exports = {
-    initializePayment
-}
+module.exports = { initializePayment }

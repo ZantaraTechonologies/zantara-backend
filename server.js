@@ -48,9 +48,14 @@ app.use('/api/transaction-logs', transactionRoutes)
 app.use('/api/services', servicesRoutes)
 app.use(errorHandler)
 
+app.get('/', (req, res) => {
+    res.send('API is live');
+});
+
 // Define the port number from the environment or default to 7000
 const PORT = process.env.PORT || 7000
 const MONGOURI = process.env.MONGO_URI
+
 
 // Start the server and listen on the specified port
 mongoose.connect(MONGOURI).then(() => {

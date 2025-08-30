@@ -10,12 +10,12 @@ const sendAirtimeRequest = async ({ request_id, serviceID, phone, amount }) => {
                 password: process.env.VTU_PASSWORD
             }
         },
-        {
-            request_id,
-            serviceID,
-            phone,
-            amount
-        })
+            {
+                request_id,
+                serviceID,
+                phone,
+                amount
+            })
 
         return res.data
     } catch (err) {
@@ -33,13 +33,13 @@ const sendDataPurchase = async ({ request_id, serviceID, billersCode, variation_
                 password: process.env.VTU_PASSWORD
             }
         },
-        {
-            request_id,
-            serviceID,
-            billersCode,
-            variation_code,
-            phone
-        })
+            {
+                request_id,
+                serviceID,
+                billersCode,
+                variation_code,
+                phone
+            })
 
         return res.data
     } catch (err) {
@@ -73,12 +73,12 @@ const verifyMeterWithProvider = async ({ billersCode, serviceID, type }) => {
                 password: process.env.VTU_PASSWORD
             }
         },
-        {
-            billersCode,
-            serviceID,
-            type
-        })
-    
+            {
+                billersCode,
+                serviceID,
+                type
+            })
+
         return res.data
     } catch (err) {
         return { status: 'failed', error: err.message }
@@ -95,14 +95,14 @@ const payBillToProvider = async ({ request_id, serviceID, billersCode, variation
                 password: process.env.VTU_PASSWORD
             }
         },
-        {
-            request_id,
-            serviceID,
-            billersCode,
-            variation_code,
-            amount,
-            phone
-        })
+            {
+                request_id,
+                serviceID,
+                billersCode,
+                variation_code,
+                amount,
+                phone
+            })
 
         return res.data
     } catch (err) {
@@ -120,8 +120,8 @@ const queryTransaction = async request_id => {
                 password: process.env.VTU_PASSWORD
             }
         },
-        { request_id })
-        
+            { request_id })
+
         return res.data
     } catch (err) {
         return { status: 'failed', error: err.message }
@@ -140,13 +140,13 @@ const sendCableRecharge = async ({ request_id, serviceID, billersCode, variation
                 password: process.env.VTU_PASSWORD
             }
         },
-        {
-            request_id,
-            serviceID,
-            billersCode,
-            variation_code,
-            amount
-        })
+            {
+                request_id,
+                serviceID,
+                billersCode,
+                variation_code,
+                amount
+            })
 
         return res.data
     } catch (err) {
@@ -163,16 +163,43 @@ const fetchExamPin = async ({ request_id, variation_code, amount, quantity, phon
                 password: process.env.VTU_PASSWORD
             }
         },
-        {
-            request_id,
-            variation_code,
-            amount,
-            quantity,
-            phone
-        })
-    
+            {
+                request_id,
+                variation_code,
+                amount,
+                quantity,
+                phone
+            })
+
         return res.data
     } catch (err) {
+        return { status: 'failed', error: err.message }
+    }
+}
+
+const Log = require('../models/Log');
+
+exports.sendAirtimeRequest = async ({ network, phone, amount }) => {
+    try {
+        const res = await axios.post(API_URL, { network, phone, amount })
+        return res.data
+    } catch (err) {
+        await Log.create({
+            level: 'error',
+            message: 'Airtime request failed',
+            context: { network, phone, amount },
+            stackTrace: err.stack,
+        })
+
+        // Save failed transaction for retry
+        await TransactionStatus.create({
+            refId: `airtime-${Date.now()}`,
+            type: 'airtime',
+            status: 'failed',
+            retries: 0,
+            errorMessage: err.message,
+        })
+
         return { status: 'failed', error: err.message }
     }
 }
