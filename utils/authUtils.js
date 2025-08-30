@@ -18,7 +18,7 @@ const sendToken = (user, res) => {
         maxAge: 7 * 24 * 60 * 60 * 1000
     })
 
-    res.json({ success: true, user })
+    res.json({ success: true, token, user })
 }
 
 module.exports = {
