@@ -177,8 +177,6 @@ const fetchExamPin = async ({ request_id, variation_code, amount, quantity, phon
     }
 }
 
-const Log = require('../models/Log');
-
 exports.sendAirtimeRequest = async ({ network, phone, amount }) => {
     try {
         const res = await axios.post(API_URL, { network, phone, amount })
