@@ -3,9 +3,6 @@ const express = require('express')
 
 const mongoose = require('mongoose')
 
-// Import CORS middleware to handle Cross-Origin Resource Sharing
-const cors = require('cors')
-
 // Import Morgan middleware to log HTTP requests in the console
 const morgan = require('morgan')
 
