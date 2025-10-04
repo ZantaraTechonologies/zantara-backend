@@ -11,7 +11,6 @@ const morgan = require('morgan')
 
 // Load environment variables from a .env file into process.env
 require('dotenv').config()
-const cookieParser = require('cookie-parser')
 
 // Create an instance of an Express application
 const app = express()
