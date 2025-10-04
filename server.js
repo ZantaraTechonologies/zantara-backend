@@ -13,16 +13,32 @@ const morgan = require('morgan')
 require('dotenv').config()
 const cookieParser = require('cookie-parser')
 
-
 // Create an instance of an Express application
 const app = express()
+
+app.set("trust proxy", 1);
+const rateLimit = require("express-rate-limit");
+
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 100,
+    standardHeaders: true,
+    legacyHeaders: false,
+    // Ensure we key by Express' computed client IP (honors trust proxy):
+    keyGenerator: (req) => req.ip,
+
+    // If you absolutely cannot set trust proxy (not your case), you could disable this validation:
+    // validate: { xForwardedForHeader: false }, // <-- not recommended; prefer trust proxy
+});
+
+app.use(limiter);
 
 app.use(cookieParser())
 
 // Enable CORS for all incoming requests
 app.use(cors({
-  origin: ["http://localhost:5173", "https://your-frontend-domain.com"], // no "*"
-  credentials: true,  // <-- required
+    origin: ["http://localhost:5173", "https://your-frontend-domain.com"], // no "*"
+    credentials: true,  // <-- required
 }));
 
 // Body parser middleware
