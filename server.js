@@ -15,15 +15,20 @@ const cookieParser = require('cookie-parser')
 
 // Create an instance of an Express application
 const app = express()
-app.set("trust proxy", 1);
 
-app.use(cookieParser())
+app.set('trust proxy', 1); // you're on Render
 
-// Enable CORS for all incoming requests
+const cookieParser = require('cookie-parser');
+app.use(cookieParser());
+
+// If you use the Vite proxy in dev, CORS is not needed for dev.
+// Keep CORS for production if frontend is a different origin:
+const cors = require('cors');
 app.use(cors({
-    origin: ["http://localhost:5173", "https://your-frontend-domain.com"], // no "*"
-    credentials: true,  // <-- required
+  origin: ['http://localhost:5173', 'https://your-frontend-domain.com'],
+  credentials: true,
 }));
+
 
 // Body parser middleware
 app.use(express.json()) // To parse JSON
