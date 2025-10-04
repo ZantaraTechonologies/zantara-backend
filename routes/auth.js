@@ -17,7 +17,7 @@ const upload = multer() // Multer for form-data without files
 
 router.post('/register', upload.none(), register)
 router.post('/login', loginLimiter, login)
-router.get('/profile', verifyJWT, profile)
+router.get('/me', verifyJWT, profile)
 router.put('/users/:id', verifyJWT, updateUser)
 router.get('/verify-email/:token', verifyEmail)
 router.post('/forgot-password', forgotPassword)
