@@ -20,7 +20,10 @@ const app = express()
 app.use(cookieParser())
 
 // Enable CORS for all incoming requests
-app.use(cors())
+app.use(cors({
+  origin: ["http://localhost:5173", "https://your-frontend-domain.com"], // no "*"
+  credentials: true,  // <-- required
+}));
 
 // Body parser middleware
 app.use(express.json()) // To parse JSON
