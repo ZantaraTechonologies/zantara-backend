@@ -21,7 +21,20 @@ const sendToken = (user, res) => {
     res.json({ success: true, token, user })
 }
 
+const cookieOpts = () => {
+    const isProd = process.env.NODE_ENV === "production";
+    return {
+        httpOnly: true,
+        secure: isProd,              // Render/HTTPS => true
+        sameSite: isProd ? "none" : "lax",
+        path: "/",                   // must match your login cookie path
+        // If you set a domain when logging in, include it here too:
+        // domain: ".yourdomain.com",
+    };
+}
+
 module.exports = {
     generateToken,
-    sendToken
+    sendToken,
+    cookieOpts
 }

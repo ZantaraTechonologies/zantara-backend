@@ -7,7 +7,8 @@ const {
     updateUser,
     verifyEmail,
     forgotPassword,
-    resetPassword
+    resetPassword,
+    logout
 } = require('../controllers/authController')
 const { verifyJWT } = require('../middlewares/auth')
 const { loginLimiter } = require('../middlewares/limiter')
@@ -22,5 +23,6 @@ router.put('/users/:id', verifyJWT, updateUser)
 router.get('/verify-email/:token', verifyEmail)
 router.post('/forgot-password', forgotPassword)
 router.put('/reset-password/:token', resetPassword)
+router.post('/logout', logout)
 
 module.exports = router;

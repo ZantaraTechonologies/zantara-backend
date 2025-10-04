@@ -4,7 +4,7 @@ const mongoose = require('mongoose')
 const bcrypt = require('bcryptjs')
 const crypto = require('crypto')
 const jwt = require('jsonwebtoken')
-const { generateToken, sendToken } = require('../utils/authUtils')
+const { generateToken, sendToken, cookieOpts } = require('../utils/authUtils')
 const { sendEmail } = require('../utils/mailer')
 
 const register = async (req, res) => {
@@ -191,6 +191,11 @@ const resetPassword = async (req, res) => {
     }
 }
 
+const logout = (req, res) => {
+    res.clearCookie("token", cookieOpts());
+    return res.json({ ok: true });
+};
+
 module.exports = {
     register,
     login,
@@ -198,5 +203,6 @@ module.exports = {
     updateUser,
     forgotPassword,
     resetPassword,
-    verifyEmail
+    verifyEmail,
+    logout
 }
