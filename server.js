@@ -21,8 +21,8 @@ app.use(cookieParser());
 // Keep CORS for production if frontend is a different origin:
 const cors = require('cors');
 app.use(cors({
-  origin: ['http://localhost:5173', 'https://your-frontend-domain.com'],
-  credentials: true,
+    origin: ['http://localhost:5173', 'https://your-frontend-domain.com'],
+    credentials: true,
 }));
 
 
@@ -32,6 +32,15 @@ app.use(express.urlencoded({ extended: true })) // To parse form data
 
 // Use Morgan to log HTTP requests in 'dev' format (method, URL, status, response time)
 app.use(morgan('dev'))
+
+app.set('etag', false); // avoid 304s based on ETag
+
+app.use((req, res, next) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    next();
+});
 
 const index = require('./routes/index')
 const analyticsRoutes = require('./routes/analytics')
