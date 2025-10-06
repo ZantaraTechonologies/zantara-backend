@@ -19,6 +19,8 @@ const initializePayment = async (email, amount, metadata = {}, reference, channe
         ...(channels ? { channels } : {})
     }
 
+    console.log(body)
+
     const res = await axios.post(`${process.env.PAYSTACK_BASE_URL}/transaction/initialize`, body, config)
     return res.data
 }
