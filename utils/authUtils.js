@@ -2,7 +2,7 @@
 const jwt = require('jsonwebtoken');
 
 const generateToken = (user, expiresIn = '7d') =>
-    jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET, { expiresIn });
+    jwt.sign({ id: user._id, role: user.role, email: user.email }, process.env.JWT_SECRET, { expiresIn });
 
 const cookieOpts = () => {
     const isProd = process.env.NODE_ENV === 'production';
