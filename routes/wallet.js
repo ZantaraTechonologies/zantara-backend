@@ -15,7 +15,7 @@ router.get('/unfreeze', verifyJWT, walletController.unfreezeWallet)
 // Important: Paystack webhook must see raw body for signature
 router.post('/paystack/webhook', require('express').raw({ type: '*/*' }), webhook)
 
-router.post('/wallet/fund', verifyJWT, fundWallet)
-router.get('/wallet/verify', verifyJWT, verifyFunding)
+router.post('/fund', verifyJWT, fundWallet)
+router.get('/verify', verifyJWT, verifyFunding)
 
 module.exports = router
