@@ -13,6 +13,9 @@ const fundWallet = async (req, res) => {
         // (model has unique refId + status enum) :contentReference[oaicite:9]{index=9}
 
         const init = await initializePayment(req.user.email, amount, { userId, refId: reference }, reference, channels)
+        console.log("After Init")
+        console.log(init)
+        
         res.json({ authorization_url: init.data.authorization_url, reference: reference })
     } catch (err) {
         res.status(500).json({ error: 'Paystack init failed: ' + err.message })
