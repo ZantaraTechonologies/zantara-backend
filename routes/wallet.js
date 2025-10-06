@@ -2,7 +2,7 @@ const express = require('express')
 const walletController = require('../controllers/walletController')
 const { verifyJWT } = require('../middlewares/auth')
 const { fundWallet, verifyFunding } = require('../controllers/walletFundingController')
-const { webhook } = require('../controllers/paystackWebhookController')
+const { webhook } = require('../controllers/paystackController')
 
 const router = express.Router()
 
