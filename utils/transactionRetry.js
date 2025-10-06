@@ -1,5 +1,7 @@
+const axios = require('axios')
 const TransactionStatus = require('../models/TransactionStatus')
 const { sendAirtimeRequest, sendDataPurchase, sendCableRecharge } = require('./vtuService')
+const Wallet = require('../models/Wallet')
 
 const retryTransaction = async refId => {
     const transactionStatus = await TransactionStatus.findOne({ refId })
@@ -40,4 +42,23 @@ const retryTransaction = async refId => {
     return response
 }
 
-module.exports = { retryTransaction }
+async function retryFunding(refId) {
+    const secret = process.env.PAYSTACK_SECRET_KEY
+    const base = process.env.PAYSTACK_BASE_URL
+    const txs = await TransactionStatus.findOne({ refId })
+    if (!txs || txs.status !== 'failed') return
+
+    const verify = await axios.get(`${base}/transaction/verify/${refId}`, {
+        headers: { Authorization: `Bearer ${secret}` }
+    })
+
+    if (verify.data?.data?.status === 'success') {
+        await TransactionStatus.updateOne({ refId }, { $set: { status: 'success' }, $inc: { retries: 1 } })
+        const userId = verify.data.data.metadata?.userId
+        if (userId) await Wallet.updateOne({ userId }, { $inc: { balance: verify.data.data.amount / 100 } })
+    } else {
+        await TransactionStatus.updateOne({ refId }, { $set: { status: 'failed' }, $inc: { retries: 1 } })
+    }
+}
+
+module.exports = { retryTransaction, retryFunding }
