@@ -5,7 +5,7 @@ const TransactionStatus = require('../models/TransactionStatus')
 const fundWallet = async (req, res) => {
     try {
         const { amount, channels } = req.body
-        const userId = req.user._id
+        const userId = req.user.id
         const reference = `WALLET_${userId}_${Date.now()}`
 
         // Record "pending" for idempotency & polling
