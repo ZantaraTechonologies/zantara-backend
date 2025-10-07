@@ -25,6 +25,12 @@ app.use(cors({
     credentials: true,
 }));
 
+const { rawBodySaver } = require('./utils/paystack')
+
+app.post('/webhooks/paystack',
+    express.raw({ type: 'application/json', verify: rawBodySaver }),
+    paystackController.webhook
+);
 
 // Body parser middleware
 app.use(express.json()) // To parse JSON
