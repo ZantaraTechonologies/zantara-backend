@@ -14,7 +14,7 @@ app.use(cookieParser());
 
 const cors = require('cors');
 app.use(cors({
-    origin: ['http://localhost:5173', 'https://your-frontend-domain.com'],
+    origin: ['http://localhost:5173','https://dahavtu.netlify.app'],
     credentials: true,
 }));
 
