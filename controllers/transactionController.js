@@ -2,7 +2,7 @@ const Transaction = require('../models/Transaction')
 const User = require('../models/User')
 
 const getUserTransactions = async (req, res) => {
-    const transactions = await Transaction.find({ userId: req.user._id }).sort({ timestamp: -1 })
+    const transactions = await Transaction.find({ userId: req.user.id }).sort({ timestamp: -1 })
     console.log(transactions)
     res.json(transactions)
 }
