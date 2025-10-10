@@ -14,8 +14,10 @@ app.use(cookieParser());
 
 const cors = require('cors');
 app.use(cors({
-    origin: ['http://localhost:5173','https://dahavtu.netlify.app'],
+    origin: ['http://localhost:5173', 'https://dahavtu.netlify.app'],
     credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"]
 }));
 
 // ---- PAYSTACK WEBHOOK (RAW BODY) — MUST BE BEFORE express.json() ----
@@ -42,6 +44,7 @@ app.use((req, res, next) => {
 const index = require('./routes/index');
 const analyticsRoutes = require('./routes/analytics');
 const authRoutes = require('./routes/auth');
+const adminRoutes = require('./routes/adminAuth');
 const walletRoutes = require('./routes/wallet');
 const paystackRoutes = require('./routes/paystack');
 const transactionRoutes = require('./routes/transaction');
@@ -50,6 +53,7 @@ const errorHandler = require('./middlewares/errorHandler');
 
 app.use('/api', index);
 app.use('/api/auth', authRoutes);
+app.use('/api/admin/auth', adminRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/admin/stats', analyticsRoutes);
 app.use('/api/paystack', paystackRoutes);

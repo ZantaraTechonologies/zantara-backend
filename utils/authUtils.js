@@ -1,8 +1,23 @@
-// auth.utils.js
+// utils/authUtils.js
 const jwt = require('jsonwebtoken');
 
-const generateToken = (user, expiresIn = '7d') =>
-    jwt.sign({ id: user._id, role: user.role, email: user.email }, process.env.JWT_SECRET, { expiresIn });
+const generateToken = (user, expiresIn = '7d') => {
+    // roles: always an array (fallback to ['user'] if missing)
+    const roles = Array.isArray(user.roles)
+        ? user.roles
+        : user.role
+            ? [user.role]
+            : ['user'];
+
+    // OPTIONAL: pull perms from user if you add later
+    const perms = user.perms ?? undefined;
+
+    return jwt.sign(
+        { id: String(user._id), email: user.email, roles, ...(perms ? { perms } : {}) },
+        process.env.JWT_SECRET,
+        { expiresIn }
+    );
+};
 
 const cookieOpts = () => {
     const isProd = process.env.NODE_ENV === 'production';
@@ -18,7 +33,9 @@ const cookieOpts = () => {
 const sendToken = (user, res, status = 200) => {
     const token = generateToken(user);
     res.cookie('token', token, cookieOpts());
-    return res.status(status).json({ ok: true, user: { id: user._id, role: user.role, email: user.email } });
+    // return roles array to the client
+    const roles = Array.isArray(user.roles) ? user.roles : (user.role ? [user.role] : ['user']);
+    return res.status(status).json({ ok: true, user: { id: String(user._id), email: user.email, roles } });
 };
 
 const clearAuthCookie = (res) => res.clearCookie('token', cookieOpts());

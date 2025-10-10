@@ -1,12 +1,12 @@
 const express = require('express')
-const { verifyJWT, checkRole } = require('../middlewares/auth')
+const { verifyJWT, checkRoles } = require('../middlewares/auth')
 const { getUserTransactions, getFilteredTransactions, getAllUsers, getAllTransactions } = require('../controllers/transactionController')
 
 const router = express.Router()
 
 router.get('/', verifyJWT, getUserTransactions)
-router.get('/admin/users', verifyJWT, checkRole('admin'), getAllUsers)
-router.get('/admin/transactions/all', verifyJWT, checkRole('admin'), getAllTransactions)
-router.get('/admin/transactions', verifyJWT, checkRole('admin'), getFilteredTransactions)
+router.get('/admin/users', verifyJWT, checkRoles('admin'), getAllUsers)
+router.get('/admin/transactions/all', verifyJWT, checkRoles('admin'), getAllTransactions)
+router.get('/admin/transactions', verifyJWT, checkRoles('admin'), getFilteredTransactions)
 
 module.exports = router

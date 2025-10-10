@@ -7,6 +7,65 @@ const jwt = require('jsonwebtoken')
 const { generateToken, sendToken, cookieOpts, clearAuthCookie } = require('../utils/authUtils')
 const { sendEmail } = require('../utils/mailer')
 
+// const register = async (req, res) => {
+//     const { name, email, phone, password, referrerCode, role } = req.body
+
+//     if (!name || !email || !phone || !password) {
+//         return res.status(400).json({ message: "Name, email, phone and password are required" });
+//     }
+
+//     // const session = await mongoose.startSession()
+//     // session.startTransaction()
+
+//     try {
+//         const phoneExists = await checkPhone(phone)
+//         if (phoneExists) {
+//             // await session.abortTransaction()
+//             // session.endSession()
+//             return res.status(409).json({ message: "Phone number already in use" })
+//         }
+
+//         const emailExists = await checkEmail(email)
+//         if (emailExists) {
+//             // await session.abortTransaction()
+//             // session.endSession()
+//             return res.status(409).json({ message: "Email address already in use" })
+//         }
+
+//         const myReferralCode = await generateUniqueReferralCode()
+
+//         const hashed = await bcrypt.hash(password, 12)
+
+//         const userData = {
+//             name, email, phone, password: hashed, referrerCode, myReferralCode, role
+//         }
+//         if (role) userData.role = role
+
+
+//         // const myReferralCode = phone
+//         const user = await User.create(userData)
+
+
+//         // Auto-create wallet with 0 balance
+//         await Wallet.create({ userId: user._id })
+
+//         // // Commit transaction
+//         // await session.commitTransaction()
+//         // session.endSession()
+
+//         // Send verification link and token
+//         // const verifyToken = generateToken(user, '1d')
+//         // const verifyLink = `${process.env.CLIENT_URL}/verify-email/${verifyToken}`
+//         // await sendEmail(email, 'Verify your email', `<a href="${verifyLink}">Verify</a>`)
+
+//         sendToken(user, res)
+//     } catch (error) {
+//         // await session.abortTransaction()
+//         // session.endSession()
+//         res.status(500).json({ message: "Registration failed", error: error.message })
+//     }
+// }
+
 const register = async (req, res) => {
     const { name, email, phone, password, referrerCode, role } = req.body
 
@@ -14,54 +73,27 @@ const register = async (req, res) => {
         return res.status(400).json({ message: "Name, email, phone and password are required" });
     }
 
-    // const session = await mongoose.startSession()
-    // session.startTransaction()
-
     try {
         const phoneExists = await checkPhone(phone)
-        if (phoneExists) {
-            // await session.abortTransaction()
-            // session.endSession()
-            return res.status(409).json({ message: "Phone number already in use" })
-        }
+        if (phoneExists) return res.status(409).json({ message: "Phone number already in use" })
 
         const emailExists = await checkEmail(email)
-        if (emailExists) {
-            // await session.abortTransaction()
-            // session.endSession()
-            return res.status(409).json({ message: "Email address already in use" })
-        }
+        if (emailExists) return res.status(409).json({ message: "Email address already in use" })
 
         const myReferralCode = await generateUniqueReferralCode()
-
         const hashed = await bcrypt.hash(password, 12)
 
-        const userData = {
-            name, email, phone, password: hashed, referrerCode, myReferralCode, role
-        }
-        if (role) userData.role = role
+        // ⬇️ CHANGED: normalize to roles[]
+        const roles = role ? [role] : ['user'];
 
+        const user = await User.create({
+            name, email, phone, password: hashed, referrerCode, myReferralCode,
+            roles // <-- store array
+        })
 
-        // const myReferralCode = phone
-        const user = await User.create(userData)
-
-
-        // Auto-create wallet with 0 balance
         await Wallet.create({ userId: user._id })
-
-        // // Commit transaction
-        // await session.commitTransaction()
-        // session.endSession()
-
-        // Send verification link and token
-        // const verifyToken = generateToken(user, '1d')
-        // const verifyLink = `${process.env.CLIENT_URL}/verify-email/${verifyToken}`
-        // await sendEmail(email, 'Verify your email', `<a href="${verifyLink}">Verify</a>`)
-
         sendToken(user, res)
     } catch (error) {
-        // await session.abortTransaction()
-        // session.endSession()
         res.status(500).json({ message: "Registration failed", error: error.message })
     }
 }
