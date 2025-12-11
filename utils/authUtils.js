@@ -33,9 +33,21 @@ const cookieOpts = () => {
 const sendToken = (user, res, status = 200) => {
     const token = generateToken(user);
     res.cookie('token', token, cookieOpts());
+
     // return roles array to the client
-    const roles = Array.isArray(user.roles) ? user.roles : (user.role ? [user.role] : ['user']);
-    return res.status(status).json({ ok: true, user: { id: String(user._id), email: user.email, roles } });
+    const roles = Array.isArray(user.roles) 
+        ? user.roles 
+        : (user.role ? [user.role] : ['user']);
+
+    return res.status(status).json({ 
+        ok: true, 
+        token,
+        user: { 
+            id: String(user._id), 
+            email: user.email, 
+            roles 
+        } 
+    });
 };
 
 const clearAuthCookie = (res) => res.clearCookie('token', cookieOpts());
