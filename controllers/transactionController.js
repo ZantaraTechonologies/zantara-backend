@@ -7,7 +7,7 @@ const getUserTransactions = async (req, res) => {
 }
 
 const getUserTransaction = async (req, res) => {
-    const transaction = await Transaction.find({ userId: req.user.id, id: req.params.id }).sort({ timestamp: -1 })
+    const transaction = await Transaction.find({ userId: req.user.id, _id: req.params.id }).sort({ timestamp: -1 })
     res.json(transaction)
 }
 
