@@ -7,8 +7,16 @@ const getUserTransactions = async (req, res) => {
 }
 
 const getUserTransaction = async (req, res) => {
-    const transaction = await Transaction.find({ userId: req.user.id, _id: req.params.id }).sort({ timestamp: -1 })
-    res.json(transaction)
+    try {
+        const transaction = await Transaction.findOne({ userId: req.user.id, _id: req.params.id });
+        if (!transaction) {
+            return res.status(404).json({ message: 'Transaction not found' });
+        }
+        res.json(transaction);
+    } catch (error) {
+        console.error('Error fetching transaction:', error);
+        res.status(500).json({ message: 'Server error' });
+    }
 }
 
 const getFilteredTransactions = async (req, res) => {
