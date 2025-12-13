@@ -6,6 +6,11 @@ const getUserTransactions = async (req, res) => {
     res.json(transactions)
 }
 
+const getUserTransaction = async (req, res) => {
+    const transaction = await Transaction.find({ userId: req.user.id, id: req.params.id }).sort({ timestamp: -1 })
+    res.json(transaction)
+}
+
 const getFilteredTransactions = async (req, res) => {
     try {
         const { type, userId, startDate, endDate, status } = req.query
@@ -58,6 +63,7 @@ const getAllTransactions = async (req, res) => {
 
 module.exports = {
     getUserTransactions,
+    getUserTransaction,
     getFilteredTransactions,
     getAllUsers,
     getAllTransactions
