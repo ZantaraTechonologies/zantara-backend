@@ -6,6 +6,7 @@ const crypto = require('crypto')
 const jwt = require('jsonwebtoken')
 const { generateToken, sendToken, cookieOpts, clearAuthCookie } = require('../utils/authUtils')
 const { sendEmail } = require('../utils/mailer')
+const ActivityLog = require('../models/ActivityLog')
 
 // const register = async (req, res) => {
 //     const { name, email, phone, password, referrerCode, role } = req.body
@@ -92,6 +93,9 @@ const register = async (req, res) => {
         })
 
         await Wallet.create({ userId: user._id })
+
+        await ActivityLog.create({ userId: user._id, action: 'REGISTER', ipAddress: req.ip, device: req.headers['user-agent'] })
+
         sendToken(user, res)
     } catch (error) {
         res.status(500).json({ message: "Registration failed", error: error.message })
@@ -124,6 +128,8 @@ const login = async (req, res) => {
         if (!match) return res.status(400).json({ message: 'Invalid credentials' })
 
         // if (!user.status) return res.status(403).json({ message: 'Account not verified. Please verify your email.' })
+
+        await ActivityLog.create({ userId: user._id, action: 'LOGIN', ipAddress: req.ip, device: req.headers['user-agent'] })
 
         sendToken(user, res)
     } catch (error) {
@@ -191,6 +197,14 @@ const updateUser = async (req, res) => {
             updateFields,
             { new: true, runValidators: true }
         );
+
+        await ActivityLog.create({
+            userId: req.user.id,
+            action: 'UPDATE_PROFILE',
+            ipAddress: req.ip,
+            device: req.headers['user-agent'],
+            details: { targetUserId: id, updates: Object.keys(updateFields) }
+        })
 
         if (!updatedUser) {
             return res.status(404).json({ message: "User not found." })

@@ -2,7 +2,10 @@ const Transaction = require('../models/Transaction')
 const User = require('../models/User')
 
 const getUserTransactions = async (req, res) => {
-    const transactions = await Transaction.find({ userId: req.user.id }).sort({ timestamp: -1 })
+    const limit = parseInt(req.query.limit) || 20;
+    const transactions = await Transaction.find({ userId: req.user.id })
+        .sort({ createdAt: -1 })
+        .limit(limit)
     res.json(transactions)
 }
 

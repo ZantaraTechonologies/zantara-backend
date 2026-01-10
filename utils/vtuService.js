@@ -177,30 +177,7 @@ const fetchExamPin = async ({ request_id, variation_code, amount, quantity, phon
     }
 }
 
-exports.sendAirtimeRequest = async ({ network, phone, amount }) => {
-    try {
-        const res = await axios.post(API_URL, { network, phone, amount })
-        return res.data
-    } catch (err) {
-        await Log.create({
-            level: 'error',
-            message: 'Airtime request failed',
-            context: { network, phone, amount },
-            stackTrace: err.stack,
-        })
 
-        // Save failed transaction for retry
-        await TransactionStatus.create({
-            refId: `airtime-${Date.now()}`,
-            type: 'airtime',
-            status: 'failed',
-            retries: 0,
-            errorMessage: err.message,
-        })
-
-        return { status: 'failed', error: err.message }
-    }
-}
 
 module.exports = {
     sendAirtimeRequest,

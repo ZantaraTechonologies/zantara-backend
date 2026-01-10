@@ -12,6 +12,8 @@ const {
     sendCableRecharge,
     fetchExamPin
 } = require('../utils/vtuService')
+const { processReferralBonus } = require('../utils/referral')
+const { calculateServicePrice } = require('../utils/pricing')
 
 const purchaseAirtime = async (req, res) => {
     const { network, phone, amount } = req.body
@@ -23,8 +25,9 @@ const purchaseAirtime = async (req, res) => {
 
     try {
         const wallet = await Wallet.findOne({ userId })
+        const finalAmount = await calculateServicePrice(req.user.roles, amount);
 
-        if (!wallet || wallet.balance < amount) {
+        if (!wallet || wallet.balance < finalAmount) {
             return res.status(400).json({ message: 'Insufficient wallet balance' })
         }
 
@@ -32,11 +35,14 @@ const purchaseAirtime = async (req, res) => {
         const vtuResponse = await sendAirtimeRequest({ request_id, network, phone, amount })
 
         if (vtuResponse.status !== 'success') {
+            await logTransaction({
+                userId, refId: request_id, type: 'airtime', service: network, amount, status: 'failed', response: vtuResponse
+            })
             return res.status(500).json({ message: 'VTU provider failed', error: vtuResponse })
         }
 
         // 2. Debit wallet
-        wallet.balance -= amount
+        wallet.balance -= finalAmount
         await wallet.save()
 
         // 3. Log transaction
@@ -50,10 +56,17 @@ const purchaseAirtime = async (req, res) => {
             response: vtuResponse
         })
 
+
+        // 4. Referral Bonus
+        processReferralBonus(userId, amount, vtuResponse.ref || vtuResponse.reference || vtuResponse.requestId || request_id)
+
         res.status(200).json({ message: 'Airtime sent successfully', data: vtuResponse })
 
     } catch (err) {
         console.error(err)
+        await logTransaction({
+            userId, refId: 'ERR-' + Date.now(), type: 'airtime', service: network, amount, status: 'failed', response: { error: err.message }
+        })
         res.status(500).json({ message: 'Server error', error: err.message })
     }
 }
@@ -68,8 +81,9 @@ const purchaseData = async (req, res) => {
 
     try {
         const wallet = await Wallet.findOne({ userId })
+        const finalAmount = await calculateServicePrice(req.user.roles, amount);
 
-        if (!wallet || wallet.balance < amount) {
+        if (!wallet || wallet.balance < finalAmount) {
             return res.status(400).json({ message: 'Insufficient wallet balance' })
         }
 
@@ -77,25 +91,33 @@ const purchaseData = async (req, res) => {
         const vtuResponse = await sendDataPurchase({ request_id, serviceID, billersCode, variation_code, phone })
 
         if (vtuResponse.status !== 'success') {
+            await logTransaction({
+                userId, refId: request_id, type: 'data', service: serviceID, amount, status: 'failed', response: vtuResponse
+            })
             return res.status(502).json({ message: 'VTU provider failed', error: vtuResponse })
         }
 
-        wallet.balance -= amount;
+        wallet.balance -= finalAmount;
         await wallet.save();
 
         await logTransaction({
             userId,
             refId: vtuResponse.ref || vtuResponse.reference || 'N/A',
             type: 'data',
-            service: network,
+            service: serviceID,
             amount,
             status: 'success',
             response: vtuResponse
         })
 
+        processReferralBonus(userId, amount, vtuResponse.ref || vtuResponse.reference || 'N/A')
+
         res.status(200).json({ message: 'Data purchase successful', data: vtuResponse })
     } catch (err) {
         console.error('Data purchase error:', err)
+        await logTransaction({
+            userId, refId: 'ERR-' + Date.now(), type: 'data', service: serviceID, amount, status: 'failed', response: { error: err.message }
+        })
         res.status(500).json({ message: 'Server error', error: err.message })
     }
 }
@@ -132,29 +154,35 @@ const payElectricityBill = async (req, res) => {
 
     try {
         const wallet = await Wallet.findOne({ userId })
+        const finalAmount = await calculateServicePrice(req.user.roles, amount);
 
-        if (!wallet || wallet.balance < amount) {
+        if (!wallet || wallet.balance < finalAmount) {
             return res.status(400).json({ message: 'Insufficient wallet balance' })
         }
 
         const vtuResponse = await payBillToProvider({ request_id, serviceID, meter_number, meter_type, amount, phone })
 
         if (vtuResponse.status !== 'success') {
+            await logTransaction({
+                userId, refId: request_id, type: 'electricity', service: serviceID, amount, status: 'failed', response: vtuResponse
+            })
             return res.status(502).json({ message: 'VTU provider failed', error: vtuResponse })
         }
 
-        wallet.balance -= amount;
+        wallet.balance -= finalAmount;
         await wallet.save();
 
         await logTransaction({
             userId,
             refId: vtuResponse.ref || vtuResponse.reference || 'N/A',
             type: 'electricity',
-            service: disco,
+            service: serviceID,
             amount,
             status: 'success',
             response: vtuResponse
         })
+
+        processReferralBonus(userId, amount, vtuResponse.ref || vtuResponse.reference || 'N/A')
 
         res.status(200).json({ message: 'Electricity bill paid successfully', data: vtuResponse })
 
@@ -181,7 +209,7 @@ const checkTransaction = async (req, res) => {
 
 const rechargeCable = async (req, res) => {
     const { serviceID, billersCode, variation_code, amount } = req.body
-    
+
     const userId = req.user.id
 
     if (!serviceID || !billersCode || !variation_code || !amount) {
@@ -190,29 +218,35 @@ const rechargeCable = async (req, res) => {
 
     try {
         const wallet = await Wallet.findOne({ userId })
+        const finalAmount = await calculateServicePrice(req.user.roles, amount);
 
-        if (!wallet || wallet.balance < amount) {
+        if (!wallet || wallet.balance < finalAmount) {
             return res.status(400).json({ message: 'Insufficient wallet balance' })
         }
 
         const response = await sendCableRecharge({ request_id, serviceID, billersCode, variation_code, amount })
 
         if (response.status !== 'success') {
+            await logTransaction({
+                userId, refId: request_id, type: 'cable', service: serviceID, amount, status: 'failed', response
+            })
             return res.status(502).json({ message: 'Recharge failed', error: response })
         }
 
-        wallet.balance -= amount
+        wallet.balance -= finalAmount
         await wallet.save()
 
         await logTransaction({
             userId,
             refId: response.ref || response.reference || 'N/A',
             type: 'cable',
-            service: provider,
+            service: serviceID,
             amount,
             status: 'success',
             response
         })
+
+        processReferralBonus(userId, amount, response.ref || response.reference || 'N/A')
 
         res.status(200).json({ message: 'Cable subscription successful', data: response })
 
@@ -223,21 +257,27 @@ const rechargeCable = async (req, res) => {
 
 const purchaseExamPin = async (req, res) => {
     const { variation_code, amount, quantity, phone } = req.body
+    const service = variation_code // For logging purposes
     const userId = req.user.id
 
     try {
         const wallet = await Wallet.findOne({ userId })
-        if (!wallet || wallet.balance < amount) {
+        const finalAmount = await calculateServicePrice(req.user.roles, amount);
+
+        if (!wallet || wallet.balance < finalAmount) {
             return res.status(400).json({ message: 'Insufficient balance' })
         }
 
         const response = await fetchExamPin({ request_id, variation_code, amount, quantity, phone })
 
         if (!response.success || !response.pin) {
+            await logTransaction({
+                userId, refId: request_id, type: 'pin', service, amount, status: 'failed', response
+            })
             return res.status(502).json({ message: 'PIN purchase failed', error: response })
         }
 
-        wallet.balance -= amount
+        wallet.balance -= finalAmount
         await wallet.save()
 
         await Pin.create({
@@ -257,6 +297,8 @@ const purchaseExamPin = async (req, res) => {
             status: 'success',
             response
         })
+
+        processReferralBonus(userId, amount, response.ref)
 
         res.status(200).json({
             message: 'PIN purchased successfully',

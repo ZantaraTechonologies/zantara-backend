@@ -29,4 +29,61 @@ const getFilteredTransactions = async (req, res) => {
     }
 }
 
-module.exports = getFilteredTransactions
+const getAllUsers = async (req, res) => {
+    try {
+        const users = await require('../models/User').find().select('-password').sort({ createdAt: -1 });
+        res.json({ success: true, data: users });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+};
+
+const updateUserRole = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { role, status } = req.body; // status for block/unblock
+
+        const update = {};
+        if (role) update.role = role;
+        if (status !== undefined) update.status = status;
+
+        const user = await require('../models/User').findByIdAndUpdate(id, update, { new: true });
+        res.json({ success: true, data: user });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+};
+
+const getSettings = async (req, res) => {
+    try {
+        const settings = await require('../models/Setting').find();
+        // Convert array to object for frontend convenience
+        const settingsMap = {};
+        settings.forEach(s => settingsMap[s.key] = s.value);
+        res.json({ success: true, data: settingsMap });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+};
+
+const updateSetting = async (req, res) => {
+    try {
+        const { key, value } = req.body;
+        await require('../models/Setting').findOneAndUpdate(
+            { key },
+            { key, value },
+            { upsert: true, new: true }
+        );
+        res.json({ success: true, message: 'Setting updated' });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+};
+
+module.exports = {
+    getFilteredTransactions,
+    getAllUsers,
+    updateUserRole,
+    getSettings,
+    updateSetting
+}
