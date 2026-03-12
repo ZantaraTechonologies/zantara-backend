@@ -1,183 +1,34 @@
-const axios = require('axios')
+/**
+ * BACKWARD COMPATIBILITY LAYER
+ * This file now delegates all calls to the ProviderService and standardized adapters.
+ * This prevents breaking existing controllers while we migrate them to use services directly.
+ */
+const providerService = require('../services/provider.service');
 
-const sendAirtimeRequest = async ({ request_id, serviceID, phone, amount }) => {
-    const VTU_URL = `${process.env.VTU_API_URI}/pay`
+const sendAirtimeRequest = async (data) => providerService.purchaseAirtime(data);
+const sendDataPurchase = async (data) => providerService.purchaseData(data);
+const payBillToProvider = async (data) => providerService.purchaseElectricity(data);
+const sendCableRecharge = async (data) => providerService.purchaseCable(data);
+const fetchExamPin = async (data) => providerService.purchaseExamPin(data);
+const queryTransaction = async (refId) => providerService.queryTransaction(refId);
 
-    try {
-        const res = await axios.post(VTU_URL, {
-            auth: {
-                username: process.env.VTU_USERNAME,
-                password: process.env.VTU_PASSWORD
-            }
-        },
-            {
-                request_id,
-                serviceID,
-                phone,
-                amount
-            })
-
-        return res.data
-    } catch (err) {
-        return { status: 'failed', error: err.message }
-    }
-}
-
-const sendDataPurchase = async ({ request_id, serviceID, billersCode, variation_code, phone }) => {
-    const VTU_URL = `${process.env.VTU_API_URI}/pay`
-
-    try {
-        const res = await axios.post(VTU_URL, {
-            auth: {
-                username: process.env.VTU_USERNAME,
-                password: process.env.VTU_PASSWORD
-            }
-        },
-            {
-                request_id,
-                serviceID,
-                billersCode,
-                variation_code,
-                phone
-            })
-
-        return res.data
-    } catch (err) {
-        return { status: 'failed', error: err.message }
-    }
-}
-
+// Plans and Meter verification still handled here or moved if provider-specific
+const axios = require('axios');
 const fetchPlans = async (network) => {
     const VTU_URL = `${process.env.VTU_API_URI}/service-variations?serviceID=${network}`
-
-    try {
-        const res = await axios.get(VTU_URL, {
-            auth: {
-                username: process.env.VTU_USERNAME,
-                password: process.env.VTU_PASSWORD
-            }
-        })
-        return res.data
-    } catch (err) {
-        return { status: 'failed', error: err.message }
-    }
+    const res = await axios.get(VTU_URL, {
+        auth: { username: process.env.VTU_USERNAME, password: process.env.VTU_PASSWORD }
+    });
+    return res.data;
 }
 
 const verifyMeterWithProvider = async ({ billersCode, serviceID, type }) => {
     const URL = `${process.env.VTU_API_URI}/merchant-verify`
-
-    try {
-        const res = await axios.post(URL, {
-            auth: {
-                username: process.env.VTU_USERNAME,
-                password: process.env.VTU_PASSWORD
-            }
-        },
-            {
-                billersCode,
-                serviceID,
-                type
-            })
-
-        return res.data
-    } catch (err) {
-        return { status: 'failed', error: err.message }
-    }
+    const res = await axios.post(URL, {
+        auth: { username: process.env.VTU_USERNAME, password: process.env.VTU_PASSWORD }
+    }, { billersCode, serviceID, type });
+    return res.data;
 }
-
-const payBillToProvider = async ({ request_id, serviceID, billersCode, variation_code, amount, phone }) => {
-    const URL = `${process.env.VTU_API_URI}/pay`
-
-    try {
-        const res = await axios.post(URL, {
-            auth: {
-                username: process.env.VTU_USERNAME,
-                password: process.env.VTU_PASSWORD
-            }
-        },
-            {
-                request_id,
-                serviceID,
-                billersCode,
-                variation_code,
-                amount,
-                phone
-            })
-
-        return res.data
-    } catch (err) {
-        return { status: 'failed', error: err.message }
-    }
-}
-
-const queryTransaction = async request_id => {
-    const URL = `${process.env.VTU_API_URI}/requery`
-
-    try {
-        const res = await axios.post(URL, {
-            auth: {
-                username: process.env.VTU_USERNAME,
-                password: process.env.VTU_PASSWORD
-            }
-        },
-            { request_id })
-
-        return res.data
-    } catch (err) {
-        return { status: 'failed', error: err.message }
-    }
-
-}
-
-const sendCableRecharge = async ({ request_id, serviceID, billersCode, variation_code, amount }) => {
-    const URL = `${process.env.VTU_API_URI}/pay`
-    console.log(request_id)
-
-    try {
-        const res = await axios.post(URL, {
-            auth: {
-                username: process.env.VTU_USERNAME,
-                password: process.env.VTU_PASSWORD
-            }
-        },
-            {
-                request_id,
-                serviceID,
-                billersCode,
-                variation_code,
-                amount
-            })
-
-        return res.data
-    } catch (err) {
-        return { status: 'failed', error: err.message }
-    }
-}
-
-const fetchExamPin = async ({ request_id, variation_code, amount, quantity, phone }) => {
-
-    try {
-        const res = await axios.post(`${process.env.VTU_API_URI}/pay`, {
-            auth: {
-                username: process.env.VTU_USERNAME,
-                password: process.env.VTU_PASSWORD
-            }
-        },
-            {
-                request_id,
-                variation_code,
-                amount,
-                quantity,
-                phone
-            })
-
-        return res.data
-    } catch (err) {
-        return { status: 'failed', error: err.message }
-    }
-}
-
-
 
 module.exports = {
     sendAirtimeRequest,
