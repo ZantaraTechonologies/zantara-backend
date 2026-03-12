@@ -4,13 +4,14 @@ const Wallet = require('../models/Wallet')
 const Pin = require('../models/Pin')
 const request_id = require('../utils/generateID')
 const { fetchPlans, verifyMeterWithProvider } = require('../utils/vtuService')
+const { sendResponse } = require('../utils/response')
 
 const purchaseAirtime = async (req, res) => {
     const { network, phone, amount } = req.body
     const userId = req.user.id
 
     if (!network || !phone || !amount) {
-        return res.status(400).json({ message: 'Missing required fields' })
+        return sendResponse(res, { status: 400, success: false, message: 'Missing required fields' })
     }
 
     try {
@@ -22,10 +23,12 @@ const purchaseAirtime = async (req, res) => {
             providerCall: (refId) => providerService.purchaseAirtime({ request_id: refId, serviceID: network, phone, amount })
         })
 
-        if (!result.success) return res.status(500).json({ message: result.message, error: result.error })
-        res.status(200).json({ message: 'Airtime sent successfully', data: result.data })
+        if (!result.success) {
+            return sendResponse(res, { status: 500, success: false, message: result.message, error: result.error })
+        }
+        return sendResponse(res, { message: 'Airtime sent successfully', data: result.data })
     } catch (err) {
-        res.status(500).json({ message: 'Server error', error: err.message })
+        return sendResponse(res, { status: 500, success: false, message: 'Server error', error: err })
     }
 }
 
@@ -34,7 +37,7 @@ const purchaseData = async (req, res) => {
     const userId = req.user.id
 
     if (!serviceID || !billersCode || !variation_code || !phone || !amount) {
-        return res.status(400).json({ message: 'Missing required fields' })
+        return sendResponse(res, { status: 400, success: false, message: 'Missing required fields' })
     }
 
     try {
@@ -46,21 +49,23 @@ const purchaseData = async (req, res) => {
             providerCall: (refId) => providerService.purchaseData({ request_id: refId, serviceID, billersCode, variation_code, phone })
         })
 
-        if (!result.success) return res.status(502).json({ message: result.message, error: result.error })
-        res.status(200).json({ message: 'Data purchase successful', data: result.data })
+        if (!result.success) {
+            return sendResponse(res, { status: 502, success: false, message: result.message, error: result.error })
+        }
+        return sendResponse(res, { message: 'Data purchase successful', data: result.data })
     } catch (err) {
-        res.status(500).json({ message: 'Server error', error: err.message })
+        return sendResponse(res, { status: 500, success: false, message: 'Server error', error: err })
     }
 }
 
 const getPlans = async (req, res) => {
     try {
         const { network } = req.query;
-        if (!network) return res.status(400).json({ message: 'Network query required' });
+        if (!network) return sendResponse(res, { status: 400, success: false, message: 'Network query required' });
         const plans = await fetchPlans(network);
-        res.status(200).json(plans);
+        return sendResponse(res, { data: plans });
     } catch (err) {
-        res.status(500).json({ message: 'Error fetching plans', error: err.message });
+        return sendResponse(res, { status: 500, success: false, message: 'Error fetching plans', error: err });
     }
 }
 
@@ -68,9 +73,9 @@ const verifyMeter = async (req, res) => {
     try {
         const { billersCode, serviceID, type } = req.body;
         const result = await verifyMeterWithProvider({ billersCode, serviceID, type });
-        res.status(200).json(result);
+        return sendResponse(res, { data: result });
     } catch (err) {
-        res.status(500).json({ message: 'Meter verification failed', error: err.message });
+        return sendResponse(res, { status: 500, success: false, message: 'Meter verification failed', error: err });
     }
 }
 
@@ -79,7 +84,7 @@ const payElectricityBill = async (req, res) => {
     const userId = req.user.id
 
     if (!serviceID || !meter_number || !meter_type || !amount || !phone) {
-        return res.status(400).json({ message: 'Missing required fields' })
+        return sendResponse(res, { status: 400, success: false, message: 'Missing required fields' })
     }
 
     try {
@@ -91,10 +96,12 @@ const payElectricityBill = async (req, res) => {
             providerCall: (refId) => providerService.purchaseElectricity({ request_id: refId, serviceID, billersCode: meter_number, variation_code: meter_type, amount, phone })
         })
 
-        if (!result.success) return res.status(502).json({ message: result.message, error: result.error })
-        res.status(200).json({ message: 'Electricity bill paid successfully', data: result.data })
+        if (!result.success) {
+            return sendResponse(res, { status: 502, success: false, message: result.message, error: result.error })
+        }
+        return sendResponse(res, { message: 'Electricity bill paid successfully', data: result.data })
     } catch (err) {
-        res.status(500).json({ message: 'Server error', error: err.message })
+        return sendResponse(res, { status: 500, success: false, message: 'Server error', error: err })
     }
 }
 
@@ -103,7 +110,7 @@ const rechargeCable = async (req, res) => {
     const userId = req.user.id
 
     if (!serviceID || !billersCode || !variation_code || !amount) {
-        return res.status(400).json({ message: 'Missing required fields' })
+        return sendResponse(res, { status: 400, success: false, message: 'Missing required fields' })
     }
 
     try {
@@ -115,10 +122,12 @@ const rechargeCable = async (req, res) => {
             providerCall: (refId) => providerService.purchaseCable({ request_id: refId, serviceID, billersCode, variation_code, amount })
         })
 
-        if (!result.success) return res.status(502).json({ message: result.message, error: result.error })
-        res.status(200).json({ message: 'Cable subscription successful', data: result.data })
+        if (!result.success) {
+            return sendResponse(res, { status: 502, success: false, message: result.message, error: result.error })
+        }
+        return sendResponse(res, { message: 'Cable subscription successful', data: result.data })
     } catch (err) {
-        res.status(500).json({ message: 'Server error', error: err.message })
+        return sendResponse(res, { status: 500, success: false, message: 'Server error', error: err })
     }
 }
 
@@ -135,7 +144,9 @@ const purchaseExamPin = async (req, res) => {
             providerCall: (refId) => providerService.purchaseExamPin({ request_id: refId, variation_code, amount, quantity, phone })
         })
 
-        if (!result.success) return res.status(502).json({ message: result.message, error: result.error })
+        if (!result.success) {
+            return sendResponse(res, { status: 502, success: false, message: result.message, error: result.error })
+        }
 
         // Special handling for PIN storage
         await Pin.create({
@@ -146,15 +157,15 @@ const purchaseExamPin = async (req, res) => {
             status: 'delivered'
         })
 
-        res.status(200).json({ message: 'PIN purchased successfully', pin: result.data.pin })
+        return sendResponse(res, { message: 'PIN purchased successfully', data: { pin: result.data.pin } })
     } catch (err) {
-        res.status(500).json({ message: 'Server error', error: err.message })
+        return sendResponse(res, { status: 500, success: false, message: 'Server error', error: err })
     }
 }
 
 const getPurchasedPins = async (req, res) => {
     const pins = await Pin.find({ userId: req.user._id }).sort({ createdAt: -1 })
-    res.json({ pins })
+    return sendResponse(res, { data: { pins } })
 }
 
 module.exports = {
