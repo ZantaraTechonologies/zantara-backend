@@ -4,6 +4,7 @@ const walletService = require('./wallet.service');
 const refundService = require('./refund.service');
 const providerService = require('./provider.service');
 const pinService = require('./pin.service');
+const notificationService = require('./notification.service');
 const { processReferralBonus } = require('../utils/referral');
 const { calculateServicePrice } = require('../utils/pricing');
 
@@ -52,6 +53,14 @@ class PurchaseService {
             transaction.response = response.raw;
             await transaction.save();
 
+            // Notify user of success
+            await notificationService.sendInApp(userId, {
+                title: `${type.toUpperCase()} Purchase Successful`,
+                message: `Your purchase of ${serviceId} for ${finalAmount} was successful.`,
+                type: 'transaction',
+                metadata: { transactionId: transaction._id }
+            });
+
             // 6. Referral Bonus
             processReferralBonus(userId, referralAmount || amount, transaction.refId);
 
@@ -62,6 +71,13 @@ class PurchaseService {
             if (transaction && transaction.status === 'pending') {
                 try {
                     await refundService.processRefund(transaction._id, err.message);
+                    // Notify user of failure
+                    await notificationService.sendInApp(userId, {
+                        title: `${type.toUpperCase()} Purchase Failed`,
+                        message: `Your purchase of ${serviceId} failed: ${err.message}. Your wallet has been refunded.`,
+                        type: 'transaction',
+                        metadata: { transactionId: transaction._id }
+                    });
                 } catch (refundErr) {
                     console.error('CRITICAL: Refund failed after error:', refundErr.message);
                 }

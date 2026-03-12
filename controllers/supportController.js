@@ -1,4 +1,5 @@
 const Ticket = require('../models/Ticket');
+const notificationService = require('../services/notification.service');
 const { sendResponse } = require('../utils/response');
 
 const createTicket = async (req, res) => {
@@ -48,8 +49,18 @@ const replyToTicket = async (req, res) => {
         }
 
         ticket.responses.push({ sender: userId, message });
+        let notificationTitle = 'New Support Reply';
+        let notificationMessage = `You have a new reply to your ticket: ${ticket.subject}`;
+
         if (req.user.roles.includes('admin') || req.user.roles.includes('superAdmin')) {
             ticket.status = 'in-progress';
+            // Notify the user of admin reply
+            await notificationService.sendInApp(ticket.userId, {
+                title: notificationTitle,
+                message: notificationMessage,
+                type: 'support',
+                metadata: { ticketId: ticket._id }
+            });
         }
         await ticket.save();
 
@@ -75,6 +86,15 @@ const resolveTicket = async (req, res) => {
         const { status } = req.body; // e.g., 'resolved' or 'closed'
 
         const ticket = await Ticket.findByIdAndUpdate(id, { status }, { new: true });
+        
+        // Notify user of ticket resolution
+        await notificationService.sendInApp(ticket.userId, {
+            title: 'Support Ticket Update',
+            message: `Your ticket "${ticket.subject}" has been marked as ${status}.`,
+            type: 'support',
+            metadata: { ticketId: ticket._id }
+        });
+
         return sendResponse(res, { message: `Ticket ${status} successfully`, data: ticket });
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: err.message });

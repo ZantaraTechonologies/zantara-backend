@@ -64,6 +64,7 @@ const transactionRoutes = require('./routes/transaction');
 const servicesRoutes = require('./routes/services');
 const kycRoutes = require('./routes/kyc');
 const supportRoutes = require('./routes/support');
+const notificationRoutes = require('./routes/notification');
 const errorHandler = require('./middlewares/errorHandler');
 
 app.use('/api', index);
@@ -80,6 +81,7 @@ app.use('/api/transaction-logs', transactionRoutes);
 app.use('/api/services', servicesRoutes);
 app.use('/api/kyc', kycRoutes);
 app.use('/api/support', supportRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // Global error handler (keep last)
 app.use(errorHandler);
