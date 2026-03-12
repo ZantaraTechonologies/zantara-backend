@@ -2,6 +2,7 @@ const purchaseService = require('../services/purchase.service')
 const providerService = require('../services/provider.service')
 const Wallet = require('../models/Wallet')
 const Pin = require('../models/Pin')
+const Transaction = require('../models/Transaction')
 const request_id = require('../utils/generateID')
 const { fetchPlans, verifyMeterWithProvider } = require('../utils/vtuService')
 const { sendResponse } = require('../utils/response')
@@ -175,6 +176,30 @@ const purchaseExamPin = async (req, res) => {
 const getPurchasedPins = async (req, res) => {
     const pins = await Pin.find({ userId: req.user._id }).sort({ createdAt: -1 })
     return sendResponse(res, { data: { pins } })
+}
+
+const checkTransaction = async (req, res) => {
+    const { refId } = req.body
+    if (!refId) {
+        return sendResponse(res, { status: 400, success: false, message: 'Reference ID is required' })
+    }
+
+    try {
+        // Verification: Ensure the transaction exists and belongs to the user
+        const localTx = await Transaction.findOne({ 
+            $or: [{ refId: refId }, { transactionId: refId }], 
+            userId: req.user.id 
+        })
+        
+        if (!localTx) {
+            return sendResponse(res, { status: 404, success: false, message: 'Transaction record not found in local database' })
+        }
+
+        const result = await providerService.queryTransaction(localTx.refId || refId)
+        return sendResponse(res, { success: true, data: result })
+    } catch (err) {
+        return sendResponse(res, { status: 500, success: false, message: 'Error checking transaction status', error: err.message })
+    }
 }
 
 module.exports = {
