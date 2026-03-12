@@ -8,7 +8,9 @@ const {
     verifyEmail,
     forgotPassword,
     resetPassword,
-    logout
+    logout,
+    sendOTP,
+    verifyOTP
 } = require('../controllers/authController')
 const { setPin, changePin } = require('../controllers/pinController')
 const { verifyJWT } = require('../middlewares/auth')
@@ -27,5 +29,8 @@ router.put('/reset-password/:token', resetPassword)
 router.post('/logout', logout)
 router.post('/set-pin', verifyJWT, pinLimiter, setPin)
 router.post('/change-pin', verifyJWT, pinLimiter, changePin)
+
+router.post('/send-otp', verifyJWT, sendOTP)
+router.post('/verify-otp', verifyJWT, verifyOTP)
 
 module.exports = router;

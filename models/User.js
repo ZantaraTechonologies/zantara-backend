@@ -4,8 +4,8 @@ const ALLOWED_ROLES = ['user', 'admin', 'superAdmin']; // extend anytime
 
 const userSchema = new mongoose.Schema({
     name: String,
-    email: { type: String, unique: true },
-    phone: { type: String, unique: true },
+    email: { type: String, sparse: true, unique: true }, // Optional but must be unique if provided
+    phone: { type: String, unique: true, required: true }, // Primary identifier
     password: String,
     roles: {
         type: [String],
@@ -22,7 +22,10 @@ const userSchema = new mongoose.Schema({
     resellerEarnings: { type: Number, default: 0 },
     transactionPin: { type: String, select: false }, // Hashed PIN
     isPinSet: { type: Boolean, default: false },
-    kycLevel: { type: Number, default: 1 } // Tier 1, 2, 3
+    kycLevel: { type: Number, default: 1 }, // Tier 1, 2, 3
+    otp: { type: String, select: false },
+    otpExpires: Date,
+    isPhoneVerified: { type: Boolean, default: false }
 }, { timestamps: true })
 
 userSchema.post('findOneAndDelete', async function (doc) {

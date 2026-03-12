@@ -6,6 +6,7 @@ const crypto = require('crypto')
 const jwt = require('jsonwebtoken')
 const { generateToken, sendToken, cookieOpts, clearAuthCookie } = require('../utils/authUtils')
 const { sendEmail } = require('../utils/mailer')
+const { sendSMS } = require('../utils/sms')
 const ActivityLog = require('../models/ActivityLog')
 
 // const register = async (req, res) => {
@@ -70,26 +71,33 @@ const ActivityLog = require('../models/ActivityLog')
 const register = async (req, res) => {
     const { name, email, phone, password, referrerCode, role } = req.body
 
-    if (!name || !email || !phone || !password) {
-        return res.status(400).json({ message: "Name, email, phone and password are required" });
+    // Email is now optional, Phone is REQUIRED
+    if (!name || !phone || !password) {
+        return res.status(400).json({ message: "Name, phone and password are required" });
     }
 
     try {
         const phoneExists = await checkPhone(phone)
         if (phoneExists) return res.status(409).json({ message: "Phone number already in use" })
 
-        const emailExists = await checkEmail(email)
-        if (emailExists) return res.status(409).json({ message: "Email address already in use" })
+        if (email) {
+            const emailExists = await checkEmail(email)
+            if (emailExists) return res.status(409).json({ message: "Email address already in use" })
+        }
 
         const myReferralCode = await generateUniqueReferralCode()
         const hashed = await bcrypt.hash(password, 12)
 
-        // ⬇️ CHANGED: normalize to roles[]
         const roles = role ? [role] : ['user'];
 
         const user = await User.create({
-            name, email, phone, password: hashed, referrerCode, myReferralCode,
-            roles // <-- store array
+            name, 
+            email: email || undefined, // Store as undefined if not provided for sparse index
+            phone, 
+            password: hashed, 
+            referrerCode, 
+            myReferralCode,
+            roles 
         })
 
         await Wallet.create({ userId: user._id })
@@ -114,20 +122,24 @@ const verifyEmail = async (req, res) => {
 }
 
 const login = async (req, res) => {
-    const { email, password } = req.body
+    const { identifier, email, phone, password } = req.body // Support 'identifier' or specific fields
 
-    if (!email || !password) {
-        return res.status(400).json({ message: 'Email and password are required' })
+    const loginId = identifier || email || phone;
+
+    if (!loginId || !password) {
+        return res.status(400).json({ message: 'Login ID and password are required' })
     }
 
     try {
-        const user = await User.findOne({ email })
+        // Search by email OR phone
+        const user = await User.findOne({ 
+            $or: [{ email: loginId }, { phone: loginId }] 
+        })
+        
         if (!user) return res.status(400).json({ message: 'Invalid credentials' })
 
         const match = await bcrypt.compare(password, user.password)
         if (!match) return res.status(400).json({ message: 'Invalid credentials' })
-
-        // if (!user.status) return res.status(403).json({ message: 'Account not verified. Please verify your email.' })
 
         await ActivityLog.create({ userId: user._id, action: 'LOGIN', ipAddress: req.ip, device: req.headers['user-agent'] })
 
@@ -242,6 +254,49 @@ const logout = (req, res) => {
     return res.json({ ok: true })
 };
 
+const sendOTP = async (req, res) => {
+    try {
+        const user = await User.findById(req.user.id);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+        await User.findByIdAndUpdate(user._id, { otp, otpExpires });
+
+        await sendSMS(user.phone, `Your Zantara verification code is: ${otp}. Valid for 10 minutes.`);
+
+        res.json({ success: true, message: 'OTP sent successfully' });
+    } catch (error) {
+        res.status(500).json({ message: 'Error sending OTP', error: error.message });
+    }
+};
+
+const verifyOTP = async (req, res) => {
+    try {
+        const { otp } = req.body;
+        if (!otp) return res.status(400).json({ message: 'OTP is required' });
+
+        const user = await User.findById(req.user.id).select('+otp');
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        if (user.otp !== otp || user.otpExpires < Date.now()) {
+            return res.status(400).json({ message: 'Invalid or expired OTP' });
+        }
+
+        await User.findByIdAndUpdate(user._id, { 
+            isPhoneVerified: true, 
+            otp: null, 
+            otpExpires: null,
+            status: true // Auto-verify account status on phone success
+        });
+
+        res.json({ success: true, message: 'Phone verified successfully' });
+    } catch (error) {
+        res.status(500).json({ message: 'Error verifying OTP', error: error.message });
+    }
+};
+
 module.exports = {
     register,
     login,
@@ -250,5 +305,7 @@ module.exports = {
     forgotPassword,
     resetPassword,
     verifyEmail,
-    logout
+    logout,
+    sendOTP,
+    verifyOTP
 }

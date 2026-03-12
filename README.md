@@ -344,14 +344,14 @@ If a provider fails, a **wallet refund is automatically issued**.
 - **Purpose**: Registers a new user and auto-creates a wallet.
 - **Method**: `POST` | **Path**: `/register`
 - **Headers**: `Content-Type: application/json`
-- **Request Body**: `{ "name": "...", "email": "...", "phone": "...", "password": "..." }`
+- **Request Body**: `{ "name": "...", "phone": "...", "password": "...", "email": "..." (optional) }`
 - **Expected Response**: `{ "success": true, "token": "..." }`
-- **Notes**: Immediately issues access token.
+- **Notes**: Immediately issues access token. Email is optional; Phone is the primary identifier.
 
 #### 2. User Login
-- **Purpose**: Authenticates user and returns JWT.
+- **Purpose**: Authenticates user via phone or email.
 - **Method**: `POST` | **Path**: `/login`
-- **Request Body**: `{ "email": "...", "password": "..." }`
+- **Request Body**: `{ "identifier": "...", "password": "..." }` (Identifier can be email or phone)
 - **Expected Response**: `{ "success": true, "token": "..." }`
 
 #### 3. Forget Password
@@ -376,6 +376,13 @@ If a provider fails, a **wallet refund is automatically issued**.
 - **Method**: `POST` | **Path**: `/set-pin` | `/change-pin`
 - **Request Body**: `{ "pin": "1234" }` or `{ "oldPin": "...", "newPin": "..." }`
 - **Expected Response**: `{ "success": true, "message": "PIN updated" }`
+
+#### 7. Mobile OTP Verification
+- **Purpose**: Verifies user's phone number via 6-digit code.
+- **Method**: `POST` | **Path**: `/send-otp` | `/verify-otp`
+- **Headers**: `Authorization: Bearer <token>`
+- **Request Body (/verify-otp)**: `{ "otp": "123456" }`
+- **Expected Response**: `{ "success": true, "message": "Phone verified" }`
 
 ---
 

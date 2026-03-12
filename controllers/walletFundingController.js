@@ -2,6 +2,11 @@
 const { initializePayment } = require('../utils/paystack');
 const TransactionStatus = require('../models/TransactionStatus');
 
+const { generateReference } = require('../utils/generateID');
+const axios = require('axios');
+const Wallet = require('../models/Wallet');
+const { logTransaction } = require('../utils/transaction');
+
 const ALLOWED_CHANNELS = ['card', 'ussd', 'bank_transfer'];
 const MIN_AMOUNT = 50; // ₦
 
@@ -11,11 +16,6 @@ function normalizeChannels(input) {
     const cleaned = arr.filter((c) => ALLOWED_CHANNELS.includes(String(c)));
     return cleaned.length ? cleaned : ALLOWED_CHANNELS;
 }
-
-const { generateReference } = require('../utils/generateID');
-const axios = require('axios');
-const Wallet = require('../models/Wallet');
-const { logTransaction } = require('../utils/transaction');
 
 const fundWallet = async (req, res) => {
     try {
