@@ -12,7 +12,7 @@ const {
 } = require('../controllers/authController')
 const { setPin, changePin } = require('../controllers/pinController')
 const { verifyJWT } = require('../middlewares/auth')
-const { loginLimiter } = require('../middlewares/limiter')
+const { loginLimiter, pinLimiter } = require('../middlewares/limiter')
 const multer = require('multer')
 
 const upload = multer() // Multer for form-data without files
@@ -25,7 +25,7 @@ router.get('/verify-email/:token', verifyEmail)
 router.post('/forgot-password', forgotPassword)
 router.put('/reset-password/:token', resetPassword)
 router.post('/logout', logout)
-router.post('/set-pin', verifyJWT, setPin)
-router.post('/change-pin', verifyJWT, changePin)
+router.post('/set-pin', verifyJWT, pinLimiter, setPin)
+router.post('/change-pin', verifyJWT, pinLimiter, changePin)
 
 module.exports = router;

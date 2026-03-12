@@ -52,25 +52,53 @@ const getFilteredTransactions = async (req, res) => {
 
 const getAllUsers = async (req, res) => {
     try {
-        const users = await User.find().sort({ createdAt: -1 }).select('-password')
-        res.status(200).json({ success: true, users })
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 50;
+        const skip = (page - 1) * limit;
+
+        const users = await User.find()
+            .sort({ createdAt: -1 })
+            .select('-password')
+            .skip(skip)
+            .limit(limit);
+
+        const total = await User.countDocuments();
+
+        res.status(200).json({ 
+            success: true, 
+            data: users,
+            pagination: { total, page, limit, pages: Math.ceil(total / limit) }
+        });
     } catch (error) {
-        console.error('Admin fetch users error:', error)
-        res.status(500).json({ success: false, message: 'Error fetching users' })
+        console.error('Admin fetch users error:', error);
+        res.status(500).json({ success: false, message: 'Error fetching users' });
     }
-}
+};
 
 const getAllTransactions = async (req, res) => {
     try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 50;
+        const skip = (page - 1) * limit;
+
         const transactions = await Transaction.find()
             .sort({ createdAt: -1 })
             .populate('userId', 'name email')
-        res.status(200).json({ success: true, transactions })
+            .skip(skip)
+            .limit(limit);
+
+        const total = await Transaction.countDocuments();
+
+        res.status(200).json({ 
+            success: true, 
+            data: transactions,
+            pagination: { total, page, limit, pages: Math.ceil(total / limit) }
+        });
     } catch (error) {
-        console.error('Admin fetch transactions error:', error)
-        res.status(500).json({ success: false, message: 'Error fetching transactions' })
+        console.error('Admin fetch transactions error:', error);
+        res.status(500).json({ success: false, message: 'Error fetching transactions' });
     }
-}
+};
 
 module.exports = {
     getUserTransactions,

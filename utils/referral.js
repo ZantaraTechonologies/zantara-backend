@@ -2,6 +2,7 @@ const User = require('../models/User');
 const Wallet = require('../models/Wallet');
 const Setting = require('../models/Setting');
 const { logTransaction } = require('./transaction');
+const walletService = require('../services/wallet.service');
 
 /**
  * Process referral bonus for a transaction
@@ -30,11 +31,8 @@ const processReferralBonus = async (userId, purchaseAmount, transactionRef) => {
 
         if (bonusAmount <= 0) return;
 
-        // 4. Credit Referrer Wallet
-        await Wallet.updateOne(
-            { userId: referrer._id },
-            { $inc: { balance: bonusAmount } }
-        );
+        // 4. Credit Referrer Wallet (via WalletService for Ledger)
+        await walletService.credit(referrer._id, bonusAmount, `REF-${transactionRef}`, 'referral_bonus');
 
         // 5. Update Referrer Stats
         referrer.totalReferralBonus = (referrer.totalReferralBonus || 0) + bonusAmount;

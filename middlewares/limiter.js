@@ -8,8 +8,26 @@ const loginLimiter = rateLimit({
     legacyHeaders: false
 })
 
+const pinLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    message: 'Too many PIN attempts. Please try again later.',
+    standardHeaders: true,
+    legacyHeaders: false
+})
+
+const kycLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: 3,
+    message: 'Too many KYC submissions. Please wait an hour.',
+    standardHeaders: true,
+    legacyHeaders: false
+})
+
 module.exports = {
-    loginLimiter
+    loginLimiter,
+    pinLimiter,
+    kycLimiter
 }
 // const rateLimit = require("express-rate-limit");
 

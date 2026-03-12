@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { submitKyc, getMyKyc, getAllKyc, reviewKyc } = require('../controllers/kycController');
 const { verifyJWT, checkRoles } = require('../middlewares/auth');
+const { kycLimiter } = require('../middlewares/limiter');
 const multer = require('multer');
 const path = require('path');
 
@@ -18,7 +19,7 @@ const upload = multer({ storage });
 
 // User Routes
 router.use(verifyJWT);
-router.post('/submit', upload.single('document'), submitKyc);
+router.post('/submit', kycLimiter, upload.single('document'), submitKyc);
 router.get('/my-status', getMyKyc);
 
 // Admin Routes
