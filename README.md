@@ -17,242 +17,123 @@ This backend is built on five core safety principles mandated for financial oper
 
 ## 📖 API Documentation Reference
 
-### 🔐 Authentication Module (`/api/auth`)
+### 🔐 Authentication (`/api/auth`)
 
 #### 1. Register User
 - **Purpose**: Registers a new user and auto-creates a wallet.
-- **Method**: `POST`
-- **Path**: `/register`
-- **Headers**: `Content-Type: application/json`
-- **Request Body**:
-```json
-{
-  "name": "John Doe",
-  "email": "john@example.com",
-  "phone": "08012345678",
-  "password": "SecurePassword123"
-}
-```
-- **Response**:
-```json
-{ "success": true, "message": "Registration successful", "token": "..." }
-```
-- **Notes**: Returns JWT token immediately for auto-login.
+- **Method**: `POST` | **Path**: `/register`
+- **Request Body**: `{ "name": "...", "email": "...", "phone": "...", "password": "..." }`
+- **Response**: `{ "success": true, "token": "..." }`
 
-#### 2. User Login
+#### 2. Login
 - **Purpose**: Authenticates user and returns JWT.
-- **Method**: `POST`
-- **Path**: `/login`
-- **Request Body**:
-```json
-{
-  "email": "john@example.com",
-  "password": "SecurePassword123"
-}
-```
-- **Response**:
-```json
-{ "success": true, "token": "..." }
-```
-- **Notes**: Authenticated via HTTP-only cookie or Bearer token.
+- **Method**: `POST` | **Path**: `/login`
+- **Response**: `{ "success": true, "token": "..." }`
 
-#### 3. Update User Info
-- **Purpose**: Updates profile details (name, phone).
-- **Method**: `PUT`
-- **Path**: `/users/:id`
-- **Headers**: `Authorization: Bearer <token>`
-- **Request Body**:
-```json
-{ "name": "New Name", "phone": "08012345678" }
-```
-- **Response**:
-```json
-{ "success": true, "data": { "_id": "...", "name": "New Name" } }
-```
+#### 3. Forget/Reset Password
+- **POST** `/forgot-password`: Sends recovery email.
+- **PUT** `/reset-password/:token`: Sets new password via email token.
 
-#### 4. Transaction PIN Management
-- **Purpose**: Sets or changes the 4-digit transaction safety PIN.
-- **Method**: `POST`
-- **Path**: `/set-pin` | `/change-pin`
-- **Headers**: `Authorization: Bearer <token>`
-- **Request Body (Set)**: `{ "pin": "1234" }`
-- **Response**:
-```json
-{ "success": true, "message": "PIN updated successfully" }
-```
+#### 4. Email Verification
+- **GET** `/verify-email/:token`: Activates account via email link.
+
+#### 5. PIN Management
+- **POST** `/set-pin`: Sets initial 4-digit safety PIN.
+- **POST** `/change-pin`: Updates PIN (Headers: `{ "oldPin": "...", "newPin": "..." }`).
 
 ---
 
-### 💳 Wallet Module (`/api/wallet`)
+### 💳 Wallet & Funding (`/api/wallet`)
 
-#### 1. Get Wallet Balance
-- **Purpose**: Retrieves current available and frozen funds.
-- **Method**: `GET`
-- **Path**: `/`
-- **Headers**: `Authorization: Bearer <token>`
-- **Response**:
-```json
-{ "balance": 5000.00, "frozen": 0, "currency": "NGN" }
-```
+#### 1. Balance Retrieval
+- **Purpose**: Get current available and frozen balance.
+- **Method**: `GET` | **Path**: `/`
+- **Response**: `{ "balance": 5000, "frozen": 0 }`
 
-#### 2. Fund Wallet (Initialize)
-- **Purpose**: Sets up a Paystack checkout session.
-- **Method**: `POST`
-- **Path**: `/fund`
-- **Request Body**:
-```json
-{ "amount": 1000, "channels": ["card", "ussd"] }
-```
-- **Response**:
-```json
-{ "authorization_url": "...", "reference": "WALLET_..." }
-```
+#### 2. Funding Init
+- **Purpose**: Setup Paystack session.
+- **Method**: `POST` | **Path**: `/fund`
+- **Request Body**: `{ "amount": 1000 }`
+- **Response**: `{ "authorization_url": "...", "reference": "..." }`
 
-#### 3. Verify Funding
-- **Purpose**: Manual status check for a funding reference.
-- **Method**: `GET`
-- **Path**: `/verify?reference=REF_ID`
-- **Response**:
-```json
-{ "status": "success" }
-```
+#### 3. Verification
+- **GET** `/verify`: Checks reference status manually.
 
 ---
 
-### 📲 Services Module (`/api/services`)
+### 📲 Services (`/api/services`)
 
-#### 1. Fetch Service Plans
-- **Purpose**: Get dynamic bundle codes/prices for Data, Cable, or Exams.
-- **Method**: `GET`
-- **Path**: `/plans/:network`
-- **Response**:
-```json
-{ "data": [ { "variation_code": "mtn-100mb", "name": "100MB", "amount": "100" } ] }
-```
+#### 1. Fetch Plans
+- **Purpose**: Get bundle codes for various networks.
+- **Method**: `GET` | **Path**: `/plans/:network`
+- **Response**: `{ "data": [ { "variation_code": "..." } ] }`
 
 #### 2. Purchase Airtime
-- **Purpose**: Send airtime to a specified number.
-- **Method**: `POST`
-- **Path**: `/airtime`
-- **Request Body**:
-```json
-{
-  "network": "MTN",
-  "phone": "08012345678",
-  "amount": 200,
-  "pin": "1234"
-}
-```
-- **Response**:
-```json
-{ "message": "Airtime sent successfully", "data": { "ref": "TX123", "status": "success" } }
-```
+- **Purpose**: Secure VTU top-up.
+- **Method**: `POST` | **Path**: `/airtime`
+- **Request Body**: `{ "network": "MTN", "phone": "...", "amount": 100, "pin": "1234" }`
+- **Response**: `{ "status": "success", "data": { "ref": "..." } }`
 
-#### 3. Meter Verification
-- **Purpose**: Validates meter details before electricity payment.
-- **Method**: `POST`
-- **Path**: `/electricity/verify/meter`
-- **Request Body**: `{ "billersCode": "123456", "serviceID": "ikeja-electric", "type": "prepaid" }`
-- **Response**:
-```json
-{ "data": { "name": "John Doe", "address": "...", "meterNumber": "..." } }
-```
+#### 3. Meter Validation
+- **Method**: `POST` | **Path**: `/electricity/verify/meter`
+- **Request Body**: `{ "billersCode": "...", "serviceID": "...", "type": "prepaid" }`
+- **Response**: `{ "data": { "name": "..." } }`
+
+#### 4. Bills & PINs
+- **POST** `/electricity`: Pay utility bill.
+- **POST** `/cable`: Recharge TV subscription.
+- **POST** `/purchase-pin`: Bulk buy Exam/Utility PINs.
 
 ---
 
-### 👤 KYC Module (`/api/kyc`)
+### 👤 KYC & Support (`/api/kyc` | `/api/support`)
 
-#### 1. Submit KYC
-- **Purpose**: Upload identification for account level upgrade.
-- **Method**: `POST`
-- **Path**: `/submit`
-- **Headers**: `Content-Type: multipart/form-data`
-- **Request Body**: `tier`, `documentType`, `documentNumber`, `document` (image file)
-- **Response**:
-```json
-{ "message": "KYC submitted successfully", "data": { "status": "pending" } }
-```
+#### 1. KYC Submission
+- **Method**: `POST` | **Path**: `/api/kyc/submit`
+- **Headers**: `multipart/form-data`
+- **Body**: `tier`, `documentType`, `documentNumber`, `document` (image).
 
-#### 2. Process KYC (Admin)
-- **Purpose**: Approve or Reject a user's identity submission.
-- **Method**: `POST`
-- **Path**: `/review/:id`
-- **Request Body**: `{ "status": "approved" }`
-- **Response**:
-```json
-{ "message": "KYC approved successfully" }
-```
+#### 2. Support Tickets
+- **POST** `/api/support/create`: Open new case.
+- **POST** `/api/support/reply/:id`: Respond to thread.
 
 ---
 
-### 🎫 Support Module (`/api/support`)
+### 📊 Admin Control & Analytics (`/api/admin` | `/api/analytics`)
 
-#### 1. Create Support Ticket
-- **Purpose**: Report an issue or request assistance.
-- **Method**: `POST`
-- **Path**: `/create`
-- **Request Body**:
-```json
-{
-  "subject": "Payment Delay",
-  "message": "My wallet was not credited.",
-  "priority": "high",
-  "transactionId": "TX123"
-}
-```
-- **Response**:
-```json
-{ "message": "Support ticket created", "data": { "subject": "Payment Delay" } }
-```
+#### 1. Analytics
+- **GET** `/analytics/transactions/daily`: Success count/revenue stats.
+- **GET** `/analytics/services/top-used`: Service popularity rank.
+- **GET** `/analytics/users/registrations/daily`: Growth tracking.
 
----
+#### 2. Global Audit
+- **GET** `/admin/transactions`: Global filtered transaction history.
+- **GET** `/admin/users`: Exhaustive list of all registered users.
+- **PUT** `/admin/users/:id`: Block/Unblock or change user roles.
+- **POST** `/admin/settings`: Manage global system config (Keys/Limits).
 
-### 📊 Analytics & Reporting (`/api/analytics`)
-
-#### 1. Revenue Reporting
-- **Purpose**: Aggregate successful transaction revenue per day.
-- **Method**: `GET`
-- **Path**: `/transactions/daily-revenue`
-- **Response**: `[ { "_id": "2024-06-03", "totalAmount": 5000 } ]`
-
----
-
-### 📊 Administrative Tools (`/api/admin`)
-
-#### 1. Filtered Transactions
-- **Purpose**: Global audit log of all system transactions.
-- **Method**: `GET`
-- **Path**: `/transactions`
-- **Query Params**: `type`, `status`, `userId`, `startDate`, `endDate`
-- **Response**:
-```json
-{ "success": true, "data": [ { "refId": "...", "amount": 100 } ] }
-```
+#### 3. Process Withdrawals
+- **PUT** `/api/withdrawal/:id`: Approve/Reject payout request.
 
 ---
 
 ### 💸 Withdrawal Module (`/api/withdrawal`)
 
-#### 1. Request Withdrawal
-- **Purpose**: Initiate fund payout to bank.
-- **Method**: `POST`
-- **Path**: `/`
-- **Request Body**: `{ "amount": 2000 }`
-- **Response**:
-```json
-{ "message": "Withdrawal request submitted", "request": { "status": "pending" } }
-```
-- **Notes**: This action freezes funds immediately.
+#### 1. Flow
+- **POST** `/`: Create payout request (Freezes funds).
+- **GET** `/me`: Personal request history.
 
-#### 2. Process Payout (Admin)
-- **Purpose**: Approve or reject withdrawal and finalize ledger.
-- **Method**: `PUT`
-- **Path**: `/:id`
-- **Request Body**: `{ "status": "approved", "adminNote": "Done" }`
-- **Response**:
-```json
-{ "message": "Withdrawal approved", "request": { "status": "approved" } }
-```
+---
+
+### 📜 Transaction Logs (`/api/transaction-logs`)
+
+#### 1. User History
+- **Purpose**: Personal ledger and purchase history.
+- **Method**: `GET` | **Path**: `/`
+- **Response**: `[ { "type": "airtime", "amount": 100, "status": "success" } ]`
+
+#### 2. Single Detail
+- **GET** `/:id`: Full payload status for a specific transaction ID.
 
 ---
 © 2026 Zantara Fintech Systems. All rights reserved.
