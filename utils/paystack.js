@@ -32,7 +32,7 @@ async function initializePayment(
         metadata,
         ...(reference ? { reference } : {}),  // MUST match your DB row
         ...(channels ? { channels } : {}),
-        callback_url: `${CLIENT_BASE_URL}/paystack/return`, // FRONTEND route
+        callback_url: metadata?.callback_url || `${CLIENT_BASE_URL}/paystack/return`, // Allow override
     };
 
     try {

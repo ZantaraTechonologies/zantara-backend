@@ -7,34 +7,7 @@ const walletSchema = new mongoose.Schema({
     currency: { type: String, default: 'NGN' }
 }, { timestamps: true })
 
-// Credit wallet
-walletSchema.methods.credit = function (amount) {
-    this.balance += amount
-    return this.save()
-}
-
-// Debit wallet
-walletSchema.methods.debit = function (amount) {
-    if (this.balance < amount) throw new Error('Insufficient balance')
-    this.balance -= amount
-    return this.save()
-}
-
-// Freeze balance
-walletSchema.methods.freeze = function (amount) {
-    if (this.balance < amount) throw new Error('Insufficient balance to freeze')
-    this.balance -= amount
-    this.frozen += amount
-    return this.save()
-}
-
-// Unfreeze balance
-walletSchema.methods.unfreeze = function (amount) {
-    if (this.frozen < amount) throw new Error('Insufficient frozen funds')
-    this.frozen -= amount
-    this.balance += amount
-    return this.save()
-}
+// Note: All balance mutations must go through WalletService to ensure ledger traceability.
 
 const walletModel = mongoose.model('Wallet', walletSchema)
 

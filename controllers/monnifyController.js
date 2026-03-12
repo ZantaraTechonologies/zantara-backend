@@ -23,6 +23,9 @@ const payment = async (req, res) => {
     }
 };
 
+const WebhookEvent = require('../models/WebhookEvent');
+const walletService = require('../services/wallet.service');
+
 const webhook = async (req, res) => {
     try {
         const secret = process.env.MONNIFY_SECRET_KEY;
@@ -31,46 +34,64 @@ const webhook = async (req, res) => {
         const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '', 'utf8');
         const expected = crypto.createHmac('sha512', secret).update(buf).digest('hex');
 
-        if (expected !== signature) return res.status(401).send('Invalid signature');
-
-        const event = JSON.parse(buf.toString('utf8'));
-
-        // Monnify event structure: { eventType: "SUCCESSFUL_TRANSACTION", eventData: { ... } }
-        // Or sometimes just the data? Docs say: eventType field.
-
-        if (event.eventType !== 'SUCCESSFUL_TRANSACTION') return res.sendStatus(200);
-
-        const data = event.eventData;
-        const refId = data.paymentReference;
-        const amountPaid = data.amountPaid;
-        const userId = data.metaData?.userId;
-
-        // Idempotency
-        const txn = await TransactionStatus.findOne({ refId });
-        if (txn && txn.status === 'success') {
-            return res.sendStatus(200); // Already processed
+        if (expected !== signature) {
+            console.error('Monnify webhook signature mismatch');
+            return res.status(401).send('Invalid signature');
         }
 
-        // Update or Create TransactionStatus
-        await TransactionStatus.updateOne(
-            { refId },
-            { $set: { status: 'success', service: 'Monnify', amount: amountPaid } },
-            { upsert: true }
-        );
+        const eventData = JSON.parse(buf.toString('utf8'));
+        const eventId = eventData.eventData?.transactionReference || `MNFY_${Date.now()}`;
 
-        if (userId) {
-            await Wallet.updateOne({ userId }, { $inc: { balance: amountPaid } });
-
-            await logTransaction({
-                userId,
-                refId,
-                type: 'funding',
-                service: 'Monnify',
-                amount: amountPaid,
-                status: 'success',
-                response: data
-            });
+        // 1. Idempotency Check
+        const existingEvent = await WebhookEvent.findOne({ eventId });
+        if (existingEvent) {
+            console.log(`Monnify event ${eventId} already processed.`);
+            return res.sendStatus(200);
         }
+
+        // 2. Store Event Intent
+        const webhookEvent = await WebhookEvent.create({
+            provider: 'monnify',
+            eventType: eventData.eventType,
+            eventId: eventId,
+            payload: eventData,
+            status: 'pending'
+        });
+
+        // 3. Process Logic
+        if (eventData.eventType === 'SUCCESSFUL_TRANSACTION') {
+            const data = eventData.eventData;
+            const refId = data.paymentReference;
+            const amountPaid = data.amountPaid;
+            const userId = data.metaData?.userId;
+
+            // Idempotency (TransactionStatus layer)
+            const upd = await TransactionStatus.updateOne(
+                { refId, status: 'pending' },
+                { $set: { status: 'success', service: 'Monnify', amount: amountPaid } }
+            );
+
+            if (upd.modifiedCount === 1 || (await TransactionStatus.findOne({ refId, status: 'success' }))) {
+                if (userId) {
+                    // 4. Ledger-backed Credit
+                    await walletService.credit(userId, amountPaid, refId, 'funding');
+                }
+
+                await logTransaction({
+                    userId,
+                    refId,
+                    type: 'funding',
+                    service: 'Monnify',
+                    amount: amountPaid,
+                    status: 'success',
+                    response: data
+                });
+            }
+        }
+
+        // 5. Mark Event as Processed
+        webhookEvent.status = 'processed';
+        await webhookEvent.save();
 
         return res.sendStatus(200);
     } catch (e) {

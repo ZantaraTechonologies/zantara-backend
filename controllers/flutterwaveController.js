@@ -21,74 +21,75 @@ const payment = async (req, res) => {
     }
 };
 
+const WebhookEvent = require('../models/WebhookEvent');
+const walletService = require('../services/wallet.service');
+
 const webhook = async (req, res) => {
     try {
         const secretHash = process.env.FLUTTERWAVE_HASH;
         const signature = req.headers['verif-hash'];
 
         if (!signature || (signature !== secretHash)) {
+            console.error('Flutterwave webhook signature mismatch');
             return res.status(401).send('Invalid signature');
         }
 
-        // Flutterwave sends JSON body directly. 
-        // Note: server.js uses express.json() for normal routes, BUT we might need raw body if we were verifying HMAC.
-        // For Flutterwave, it checks a static hash header, so JSON body is fine if the middleware allows it.
-        // However, we configured server.js to use raw body for specific webhook routes for Paystack.
-        // We should treat Flutterwave similarly or ensure express.json() works.
-        // If we route it via 'app.post' BEFORE express.json() with raw parser, we must parse it manually.
-
-        let event = req.body;
-        if (Buffer.isBuffer(event)) {
-            event = JSON.parse(event.toString('utf8'));
+        let eventData = req.body;
+        if (Buffer.isBuffer(eventData)) {
+            eventData = JSON.parse(eventData.toString('utf8'));
         }
 
-        if (event.status !== 'successful' && event.event !== 'charge.completed') {
+        const eventId = eventData.data?.id || `FLW_${eventData.data?.tx_ref}_${Date.now()}`;
+
+        // 1. Idempotency Check
+        const existingEvent = await WebhookEvent.findOne({ eventId });
+        if (existingEvent) {
+            console.log(`Flutterwave event ${eventId} already processed.`);
             return res.sendStatus(200);
         }
 
-        const data = event.data;
-        const refId = data.tx_ref;
-        const amountPaid = data.amount;
-        // Meta might be flattened in data or distinct
-        // FLW webhook payload varies by version. Assuming standard v3 object.
-        // Often meta is in `data.meta` (array) or just custom fields. 
-        // For init, we sent `meta: { userId }`.
-        // FLW returns it in `meta` object usually.
+        // 2. Store Event Intent
+        const webhookEvent = await WebhookEvent.create({
+            provider: 'flutterwave',
+            eventType: eventData.event || 'charge.completed',
+            eventId: eventId,
+            payload: eventData,
+            status: 'pending'
+        });
 
-        // Wait, standard FLW webhook 'data' object contains 'meta' field if passed?
-        // Let's assume we fetch transaction to verify if meta is missing, but usually it's there.
-        // Fallback: use userId from initialized logic if possible, but here we only have refId.
-        // Actually, we can just rely on user knowing their refId or best effort.
-        // BETTER: Use TransactionStatus to store the Pending transaction with userId when Initialized?
-        // Right now our code doesn't store "Pending" state on Init (bad practice in `paystackController` too?).
-        // `paystackController` doesn't seem to store Pending on Init. It relies on metadata.userId passed back.
+        // 3. Process Logic
+        if (eventData.status === 'successful' || eventData.event === 'charge.completed') {
+            const data = eventData.data;
+            const refId = data.tx_ref;
+            const amountPaid = data.amount;
+            const userId = data.meta?.userId;
 
-        const userId = data.meta?.userId;
+            const upd = await TransactionStatus.updateOne(
+                { refId, status: 'pending' },
+                { $set: { status: 'success', service: 'Flutterwave', amount: amountPaid } }
+            );
 
-        const txn = await TransactionStatus.findOne({ refId });
-        if (txn && txn.status === 'success') {
-            return res.sendStatus(200);
+            if (upd.modifiedCount === 1 || (await TransactionStatus.findOne({ refId, status: 'success' }))) {
+                if (userId) {
+                    // 4. Ledger-backed Credit
+                    await walletService.credit(userId, amountPaid, refId, 'funding');
+                }
+
+                await logTransaction({
+                    userId,
+                    refId,
+                    type: 'funding',
+                    service: 'Flutterwave',
+                    amount: amountPaid,
+                    status: 'success',
+                    response: data
+                });
+            }
         }
 
-        await TransactionStatus.updateOne(
-            { refId },
-            { $set: { status: 'success', service: 'Flutterwave', amount: amountPaid } },
-            { upsert: true }
-        );
-
-        if (userId) {
-            await Wallet.updateOne({ userId }, { $inc: { balance: amountPaid } });
-
-            await logTransaction({
-                userId,
-                refId,
-                type: 'funding',
-                service: 'Flutterwave',
-                amount: amountPaid,
-                status: 'success',
-                response: data
-            });
-        }
+        // 5. Mark Event as Processed
+        webhookEvent.status = 'processed';
+        await webhookEvent.save();
 
         return res.sendStatus(200);
     } catch (e) {

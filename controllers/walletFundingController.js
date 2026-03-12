@@ -12,6 +12,10 @@ function normalizeChannels(input) {
     return cleaned.length ? cleaned : ALLOWED_CHANNELS;
 }
 
+const axios = require('axios');
+const Wallet = require('../models/Wallet');
+const { logTransaction } = require('../utils/transaction');
+
 const fundWallet = async (req, res) => {
     try {
         const rawAmount = Number(req.body?.amount);
@@ -21,6 +25,7 @@ const fundWallet = async (req, res) => {
 
         const channels = normalizeChannels(req.body?.channels);
         const userId = req.user.id;
+        const callback_url = req.body.callback_url; // Support custom callback
 
         // Unique reference; keep it stable for idempotency
         const reference = `WALLET_${userId}_${Date.now()}`;
@@ -39,7 +44,7 @@ const fundWallet = async (req, res) => {
         const init = await initializePayment(
             req.user.email,
             rawAmount,
-            { userId, refId: reference }, // metadata
+            { userId, refId: reference, callback_url }, // metadata
             reference,
             channels
         );
@@ -50,7 +55,6 @@ const fundWallet = async (req, res) => {
         });
     } catch (err) {
         // If init fails, mark the pending row failed so the UI doesn’t spin forever
-        const userId = req.user?.id;
         const maybeRef = typeof err?.reference === 'string' ? err.reference : null;
 
         if (maybeRef) {
@@ -66,20 +70,80 @@ const fundWallet = async (req, res) => {
     }
 };
 
+const walletService = require('../services/wallet.service');
+
 const verifyFunding = async (req, res) => {
     try {
         const { reference } = req.query;
         if (!reference) return res.status(400).json({ status: 'not_found' });
 
-        const row = await TransactionStatus.findOne({ refId: reference });
+        let row = await TransactionStatus.findOne({ refId: reference });
 
-        // (Optional security): only allow the owner to query their own reference.
-        // If your schema stores userId above, uncomment the next two lines:
         if (row?.userId && String(row.userId) !== String(req.user.id))
             return res.status(403).json({ status: 'forbidden' });
 
-        return res.json({ status: row?.status || 'not_found' });
+        if (!row) return res.status(404).json({ status: 'not_found' });
+
+        // If explicitly success or failed, return immediately
+        if (row.status === 'success' || row.status === 'failed') {
+            return res.json({ status: row.status });
+        }
+
+        // --- Active Verification Logic (Fallback for Webhook) ---
+        if (row.status === 'pending') {
+            try {
+                const secret = process.env.PAYSTACK_SECRET_KEY;
+                const verify = await axios.get(`https://api.paystack.co/transaction/verify/${reference}`, {
+                    headers: { Authorization: `Bearer ${secret}` }
+                });
+
+                const data = verify?.data?.data;
+                const paystackStatus = data?.status; // 'success', 'failed', 'abandoned'
+
+                if (paystackStatus === 'success') {
+                    const amountNaira = (data.amount || 0) / 100;
+
+                    // Atomic Update: Only credit if we change from pending to success (Idempotency)
+                    const upd = await TransactionStatus.updateOne(
+                        { refId: reference, status: 'pending' },
+                        { $set: { status: 'success' } }
+                    );
+
+                    if (upd.modifiedCount === 1) {
+                        // 4. Ledger-backed Credit via Service
+                        await walletService.credit(row.userId, amountNaira, reference, 'funding');
+
+                        // Log Transaction
+                        await logTransaction({
+                            userId: row.userId,
+                            refId: reference,
+                            type: 'funding',
+                            service: 'Paystack',
+                            amount: amountNaira,
+                            status: 'success',
+                            response: data
+                        });
+
+                        return res.json({ status: 'success' });
+                    } else {
+                        // Already processed by webhook
+                        return res.json({ status: 'success' });
+                    }
+                } else if (['failed', 'abandoned'].includes(paystackStatus)) {
+                    await TransactionStatus.updateOne(
+                        { refId: reference },
+                        { $set: { status: 'failed', errorMessage: data?.gateway_response || 'Payment failed' } }
+                    );
+                    return res.json({ status: 'failed' });
+                }
+            } catch (verifyErr) {
+                console.error('Verify API error:', verifyErr.message);
+            }
+        }
+
+        return res.json({ status: row.status });
     } catch (e) {
+        console.error('Verify logic error:', e);
         return res.status(500).json({ status: 'error' });
     }
 };
