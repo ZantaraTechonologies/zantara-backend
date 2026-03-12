@@ -4,25 +4,13 @@ A high-integrity, production-ready VTU & Bill Payment backend built for speed, s
 
 ---
 
-## 🚀 Core Architecture
-
-The system follows a strict **Layered Architecture** and **Service-Adapter Pattern** to ensure maintainability and vendor flexibility:
-
--   **Routes**: Express route definitions.
--   **Controllers**: "Thin Controllers" responsible only for request validation and response formatting.
--   **Services**: Core business logic, orchestration, and financial arithmetic.
--   **Adapters**: Abstraction layer for external VTU/Payment providers (Paystack, Monnify, Vas2Nets).
--   **Models**: Mongoose schemas with indexed fields for high-performance querying.
-
----
-
 ## 🛡️ Fintech Safety & Integrity (The Golden Rules)
 
 This backend is built on five core safety principles mandated for financial operations:
 
 1.  **Zero Direct Mutation**: Wallet balances are never updated directly. All movements MUST go through `WalletService`.
 2.  **Ledger-First Architecture**: Every credit, debit, freeze, or refund is recorded in the `WalletLedger`.
-3.  **Atomic Sequence**: Financial operations follow a "Debit-First" flow to prevent over-spending.
+3.  **Atomic Sequence**: Financial operations follow a "Debit-First" flow to prevent over-spending even if external APIs fail.
 4.  **Webhook Idempotency**: All provider notifications are tracked in `WebhookEvent`.
 5.  **Secure PIN & KYC**: Sensitive operations require a hashed 4-digit Transaction PIN.
 
@@ -34,63 +22,40 @@ This backend is built on five core safety principles mandated for financial oper
 
 #### 1. Register User
 **POST** `/register`  
-Registers a new user and auto-creates a wallet.
-- **Headers**: `Content-Type: application/json`
 - **Request Body**: `{ "name": "...", "email": "...", "phone": "...", "password": "..." }`
-- **Sample Response**: `{ "success": true, "token": "..." }`
+- **Response**: `{ "success": true, "message": "Registration successful", "token": "..." }`
 
 #### 2. User Login
 **POST** `/login`  
-Authenticates user and returns JWT.
-- **Rate Limit**: 5 requests per minute.
-- **Sample Response**: `{ "success": true, "token": "..." }`
+- **Response**: `{ "success": true, "token": "..." }`
 
-#### 3. Get Profile
-**GET** `/me`  
-Retrieves authenticated user data.
-- **Auth**: `verifyJWT`
-
-#### 4. Update User info
+#### 3. Update User Info
 **PUT** `/users/:id`  
-Updates name, phone, or email.
+- **Response**: `{ "success": true, "data": { "name": "Updated" } }`
 
-#### 5. Verify Email
+#### 4. Email Verification
 **GET** `/verify-email/:token`  
-Activates account via email token.
+- **Response**: `{ "message": "Email verified successfully" }`
 
-#### 6. PIN Management
-- **POST** `/set-pin`: Sets initial 4-digit safety PIN.
-- **POST** `/change-pin`: Updates PIN (requires `oldPin`).
-- **Sample Request**: `{ "pin": "1234" }`
-
-#### 7. Forgot/Reset Password
-- **POST** `/forgot-password`: Sends reset link.
-- **PUT** `/reset-password/:token`: Sets new password.
+#### 5. PIN Management
+**POST** `/set-pin` | **POST** `/change-pin`  
+- **Response**: `{ "success": true, "message": "PIN updated successfully" }`
 
 ---
 
 ### 💳 Wallet & Funding Module (`/api/wallet`)
 
-#### 1. Get Wallet
+#### 1. Get Wallet Balance
 **GET** `/`  
-- **Response**: `{ "balance": 5000, "frozen": 0, "currency": "NGN" }`
+- **Response**: `{ "balance": 5000.00, "frozen": 0, "currency": "NGN" }`
 
 #### 2. Fund Wallet
 **POST** `/fund`  
-Initializes Paystack checkout.
-- **Request Body**: `{ "amount": 1000, "channels": ["card"] }`
-- **Response**: `{ "authorization_url": "...", "reference": "..." }`
+- **Response**: `{ "authorization_url": "...", "reference": "WALLET_..." }`
 
 #### 3. Verify Funding
 **GET** `/verify?reference=REF`  
-Triggers active verification of a reference.
-
-#### 4. Admin Wallet Operations
-- **POST** `/credit`: (Admin Only) Ledger-backed manual credit.
-- **POST** `/debit`: (Admin Only) Ledger-backed manual debit.
-
-#### 5. Funding Webhooks
-- **POST** `/paystack/webhook`: Inbound payment notifications.
+- **Response**: `{ "status": "success" }`
 
 ---
 
@@ -98,70 +63,100 @@ Triggers active verification of a reference.
 
 #### 1. Fetch Plans
 **GET** `/plans/:network`  
-Returns bundle lists for Data, Cable, or Exams.
+- **Response**: `{ "data": [ { "variation_code": "...", "name": "...", "amount": "..." } ] }`
 
 #### 2. Purchase Airtime
 **POST** `/airtime`  
-- **Params**: `network`, `phone`, `amount`, `pin`.
+- **Response**: `{ "message": "Airtime sent successfully", "data": { "ref": "...", "status": "success" } }`
 
 #### 3. Purchase Data
 **POST** `/data`  
-- **Params**: `serviceID`, `billersCode`, `variation_code`, `phone`, `amount`, `pin`.
+- **Response**: `{ "message": "Data purchase successful", "data": { "ref": "...", "status": "success" } }`
 
-#### 4. Electricity Payment
-- **POST** `/electricity`: Pay bill.
-- **POST** `/electricity/verify/meter`: Validates meter number before payment.
+#### 4. Electricity Verification
+**POST** `/electricity/verify/meter`  
+- **Response**: `{ "data": { "name": "John Customer", "meterNumber": "..." } }`
 
-#### 5. Cable TV
-**POST** `/cable`  
-- **Params**: `serviceID`, `billersCode`, `variation_code`, `amount`, `pin`.
-
-#### 6. Exam PINs
-- **POST** `/purchase-pin`: Quantity-based PIN buy.
-- **GET** `/purchased-pins`: View inventory of bought PINs.
+#### 5. Exam PINs
+**POST** `/purchase-pin` | **GET** `/purchased-pins`  
+- **Response**: `{ "message": "PIN purchased successfully", "data": { "pin": "..." } }`
 
 ---
 
 ### 👤 KYC Module (`/api/kyc`)
 
 #### 1. Submit KYC
-**POST** `/submit`  
-Uploads ID documents for verification.
-- **Headers**: `multipart/form-data`
-- **Fields**: `tier`, `documentType`, `documentNumber`, `document` (image).
+**POST** `/submit` (Form-Data)  
+- **Response**: `{ "message": "KYC submitted successfully", "data": { "status": "pending" } }`
 
-#### 2. Admin Review
-- **GET** `/all`: List all pending/processed KYC.
-- **POST** `/review/:id`: Approve/Reject submission.
+#### 2. Review KYC (Admin)
+**POST** `/review/:id`  
+- **Response**: `{ "message": "KYC approved successfully" }`
 
 ---
 
 ### 🎫 Support Module (`/api/support`)
 
-#### 1. Management
-- **POST** `/create`: Open new ticket.
-- **GET** `/my-tickets`: User ticket history.
-- **POST** `/reply/:id`: User/Admin conversation reply.
-- **POST** `/resolve/:id`: (Admin) Mark ticket as closed.
+#### 1. Create Ticket
+**POST** `/create`  
+- **Response**: `{ "message": "Support ticket created", "data": { "subject": "..." } }`
+
+#### 2. Reply to Ticket
+**POST** `/reply/:id`  
+- **Response**: `{ "message": "Reply sent successfully", "data": { "subject": "..." } }`
 
 ---
 
-### 📊 Analytics & Reporting (`/api/analytics` | `/api/transaction-logs`)
+### 📊 Analytics & Reporting (`/api/analytics`)
 
-- **GET** `/daily-transactions`: Success count/revenue per day.
-- **GET** `/revenue-per-day`: Financial trend analysis.
-- **GET** `/services/top-used`: Provider popularity stats.
-- **GET** `/api/transaction-logs/`: (User) Personal history.
-- **GET** `/api/transaction-logs/admin/transactions/all`: (Admin) Global history.
+#### 1. Daily Success count/revenue
+**GET** `/transactions/daily`  
+- **Response**: `[ { "_id": "2024-06-03", "count": 10, "revenue": 5000 } ]`
+
+#### 2. Revenue Per Day
+**GET** `/transactions/daily-revenue`  
+- **Response**: `[ { "_id": "2024-06-03", "totalAmount": 5000 } ]`
+
+#### 3. Top Used Services
+**GET** `/services/top-used`  
+- **Response**: `[ { "_id": "data", "total": 45 } ]`
+
+#### 4. Daily Registrations
+**GET** `/users/registrations/daily`  
+- **Response**: `[ { "_id": "2024-06-03", "count": 5 } ]`
+
+---
+
+### 📊 Admin Actions (`/api/admin`)
+
+#### 1. Transaction Audit Log
+**GET** `/transactions`  
+- **Response**: `{ "success": true, "data": [ { "refId": "...", "amount": 100 } ] }`
+
+#### 2. User Management
+**GET** `/users`  
+- **Response**: `{ "success": true, "data": [ { "name": "...", "email": "..." } ] }`
+
+#### 3. Update User Role/Status
+**PUT** `/users/:id`  
+- **Response**: `{ "success": true, "data": { "role": "admin" } }`
+
+#### 4. System Settings
+**GET** `/settings` | **POST** `/settings`  
+- **Response**: `{ "success": true, "message": "Setting updated" }`
 
 ---
 
 ### 💸 Withdrawal Module (`/api/withdrawal`)
 
-#### 1. Flow
-- **POST** `/`: Create request (**Safe Flow**: Freezes funds).
+#### 1. User Requests
+- **POST** `/`: Request withdrawal (Freezes funds).
 - **GET** `/me`: Personal withdrawal history.
-- **PUT** `/:id`: (Admin) Process request (**Safe Flow**: Unfreeze -> Debit).
+- **Response**: `{ "message": "Withdrawal request submitted", "request": { "status": "pending" } }`
+
+#### 2. Admin Processing
+- **PUT** `/:id`: Process withdrawal.
+- **Response**: `{ "message": "Withdrawal approved", "request": { "status": "approved" } }`
 
 ---
 
