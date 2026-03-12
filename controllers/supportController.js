@@ -87,6 +87,14 @@ const resolveTicket = async (req, res) => {
 
         const ticket = await Ticket.findByIdAndUpdate(id, { status }, { new: true });
         
+        // ⬇️ Log Admin Action
+        await require('../models/AdminLog').create({
+            adminId: req.user.id,
+            action: 'TICKET_RESOLVE',
+            targetId: ticket._id,
+            notes: `Status: ${status}`
+        });
+        
         // Notify user of ticket resolution
         await notificationService.sendInApp(ticket.userId, {
             title: 'Support Ticket Update',

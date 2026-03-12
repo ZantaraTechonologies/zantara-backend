@@ -3,22 +3,22 @@ const Wallet = require('../models/Wallet')
 const User = require('../models/User')
 const { sendEmail } = require('../utils/mailer')
 
+const walletService = require('../services/wallet.service')
+
 // User requests withdrawal
 const requestWithdrawal = async (req, res) => {
     try {
         const { amount } = req.body
-        const wallet = await Wallet.findOne({ userId: req.user.id })
+        const userId = req.user.id
+        const refId = 'WTH-' + Date.now()
 
-        if (!wallet || wallet.balance < amount) {
-            return res.status(400).json({ error: 'Insufficient balance' })
-        }
-
-        // Freeze the amount
-        await wallet.freeze(amount)
+        // Freeze the amount via WalletService (creates ledger entry)
+        await walletService.freeze(userId, amount, refId, 'withdrawal_request')
 
         const request = await Withdrawal.create({
-            userId: req.user.id,
-            amount
+            userId,
+            amount,
+            refId // store refId for tracing
         })
 
         // Send alert to admin
@@ -46,15 +46,24 @@ const processWithdrawal = async (req, res) => {
         const wallet = await Wallet.findOne({ userId: request.userId })
 
         if (status === 'approved') {
-            await wallet.unfreeze(request.amount) // unfreeze since it will be externally sent
-            await wallet.debit(request.amount) // permanently remove from balance
+            // Unfreeze and debit permanently via WalletService
+            await walletService.unfreeze(request.userId, request.amount, request.refId || request._id, 'withdrawal_approval')
+            await walletService.debit(request.userId, request.amount, request.refId || request._id, 'withdrawal_payout')
         } else if (status === 'rejected') {
-            await wallet.unfreeze(request.amount) // return funds to balance
+            // Return funds via WalletService
+            await walletService.unfreeze(request.userId, request.amount, request.refId || request._id, 'withdrawal_rejection')
         }
 
-        request.status = status
         request.adminNote = adminNote
         await request.save()
+
+        // ⬇️ Log Admin Action
+        await require('../models/AdminLog').create({
+            adminId: req.user.id,
+            action: 'WITHDRAWAL_PROCESS',
+            targetId: request._id,
+            notes: `Status: ${status} | Note: ${adminNote}`
+        });
 
         const user = await User.findById(request.userId)
         const statusMsg = status === 'approved'

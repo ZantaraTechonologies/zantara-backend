@@ -55,7 +55,11 @@ async function retryFunding(refId) {
     if (verify.data?.data?.status === 'success') {
         await TransactionStatus.updateOne({ refId }, { $set: { status: 'success' }, $inc: { retries: 1 } })
         const userId = verify.data.data.metadata?.userId
-        if (userId) await Wallet.updateOne({ userId }, { $inc: { balance: verify.data.data.amount / 100 } })
+        if (userId) {
+            const amount = verify.data.data.amount / 100
+            const walletService = require('../services/wallet.service')
+            await walletService.credit(userId, amount, refId, 'funding_retry')
+        }
     } else {
         await TransactionStatus.updateOne({ refId }, { $set: { status: 'failed' }, $inc: { retries: 1 } })
     }

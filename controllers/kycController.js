@@ -64,6 +64,14 @@ const reviewKyc = async (req, res) => {
         kyc.verifiedBy = req.user.id;
         await kyc.save();
 
+        // ⬇️ Log Admin Action
+        await require('../models/AdminLog').create({
+            adminId: req.user.id,
+            action: 'KYC_REVIEW',
+            targetId: kyc._id,
+            notes: `Status: ${status}`
+        });
+
         if (status === 'approved') {
             await User.findByIdAndUpdate(kyc.userId, { kycLevel: kyc.tier });
         }

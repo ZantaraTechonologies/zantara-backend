@@ -4,6 +4,8 @@ const { logTransaction } = require('../utils/transaction')
 // We can use a simple timestamp ref or import generator if available
 const generateRef = () => 'MAN-' + Date.now() + Math.floor(Math.random() * 1000)
 
+const walletService = require('../services/wallet.service')
+
 const getWallet = async (req, res) => {
     const wallet = await Wallet.findOne({ userId: req.user.id })
     res.json(wallet)
@@ -11,42 +13,30 @@ const getWallet = async (req, res) => {
 
 const debitWallet = async (req, res) => {
     try {
-        const wallet = await Wallet.findOne({ userId: req.user.id })
+        const userId = req.user.id
         const amount = Number(req.body.amount)
-        await wallet.debit(amount)
+        const refId = 'MAN-' + Date.now()
+        
+        await walletService.debit(userId, amount, refId, 'admin_debit')
 
-        await logTransaction({
-            userId: req.user.id,
-            refId: generateRef(),
-            type: 'withdrawal', // Admin debit treated as withdrawal
-            service: 'admin_debit',
-            amount: amount,
-            status: 'success',
-            response: { message: 'Admin debit' }
-        })
-
-        res.json({ message: 'Wallet debited', balance: wallet.balance })
+        res.json({ message: 'Wallet debited successfully', refId })
     } catch (err) {
         res.status(400).json({ error: err.message })
     }
 }
 
 const creditWallet = async (req, res) => {
-    const wallet = await Wallet.findOne({ userId: req.user.id })
-    const amount = Number(req.body.amount)
-    await wallet.credit(amount)
+    try {
+        const userId = req.user.id
+        const amount = Number(req.body.amount)
+        const refId = 'MAN-' + Date.now()
 
-    await logTransaction({
-        userId: req.user.id,
-        refId: generateRef(),
-        type: 'funding', // Admin credit treated as funding
-        service: 'admin_credit',
-        amount: amount,
-        status: 'success',
-        response: { message: 'Admin credit' }
-    })
+        await walletService.credit(userId, amount, refId, 'admin_credit')
 
-    res.json({ message: 'Wallet credited', balance: wallet.balance })
+        res.json({ message: 'Wallet credited successfully', refId })
+    } catch (err) {
+        res.status(400).json({ error: err.message })
+    }
 }
 
 const freezeWallet = async (req, res) => {
