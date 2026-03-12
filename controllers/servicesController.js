@@ -7,10 +7,10 @@ const { fetchPlans, verifyMeterWithProvider } = require('../utils/vtuService')
 const { sendResponse } = require('../utils/response')
 
 const purchaseAirtime = async (req, res) => {
-    const { network, phone, amount } = req.body
+    const { network, phone, amount, pin } = req.body
     const userId = req.user.id
 
-    if (!network || !phone || !amount) {
+    if (!network || !phone || !amount || !pin) {
         return sendResponse(res, { status: 400, success: false, message: 'Missing required fields' })
     }
 
@@ -19,6 +19,7 @@ const purchaseAirtime = async (req, res) => {
             type: 'airtime',
             serviceId: network,
             amount,
+            pin,
             details: { phone, network, request_id, roles: req.user.roles },
             providerCall: (refId) => providerService.purchaseAirtime({ request_id: refId, serviceID: network, phone, amount })
         })
@@ -33,10 +34,10 @@ const purchaseAirtime = async (req, res) => {
 }
 
 const purchaseData = async (req, res) => {
-    const { serviceID, billersCode, variation_code, phone, amount } = req.body
+    const { serviceID, billersCode, variation_code, phone, amount, pin } = req.body
     const userId = req.user.id
 
-    if (!serviceID || !billersCode || !variation_code || !phone || !amount) {
+    if (!serviceID || !billersCode || !variation_code || !phone || !amount || !pin) {
         return sendResponse(res, { status: 400, success: false, message: 'Missing required fields' })
     }
 
@@ -45,6 +46,7 @@ const purchaseData = async (req, res) => {
             type: 'data',
             serviceId: serviceID,
             amount,
+            pin,
             details: { phone, serviceID, variation_code, request_id, roles: req.user.roles },
             providerCall: (refId) => providerService.purchaseData({ request_id: refId, serviceID, billersCode, variation_code, phone })
         })
@@ -80,10 +82,10 @@ const verifyMeter = async (req, res) => {
 }
 
 const payElectricityBill = async (req, res) => {
-    const { serviceID, meter_number, meter_type, amount, phone } = req.body
+    const { serviceID, meter_number, meter_type, amount, phone, pin } = req.body
     const userId = req.user.id
 
-    if (!serviceID || !meter_number || !meter_type || !amount || !phone) {
+    if (!serviceID || !meter_number || !meter_type || !amount || !phone || !pin) {
         return sendResponse(res, { status: 400, success: false, message: 'Missing required fields' })
     }
 
@@ -92,6 +94,7 @@ const payElectricityBill = async (req, res) => {
             type: 'electricity',
             serviceId: serviceID,
             amount,
+            pin,
             details: { meter_number, meter_type, phone, request_id, roles: req.user.roles },
             providerCall: (refId) => providerService.purchaseElectricity({ request_id: refId, serviceID, billersCode: meter_number, variation_code: meter_type, amount, phone })
         })
@@ -106,10 +109,10 @@ const payElectricityBill = async (req, res) => {
 }
 
 const rechargeCable = async (req, res) => {
-    const { serviceID, billersCode, variation_code, amount } = req.body
+    const { serviceID, billersCode, variation_code, amount, pin } = req.body
     const userId = req.user.id
 
-    if (!serviceID || !billersCode || !variation_code || !amount) {
+    if (!serviceID || !billersCode || !variation_code || !amount || !pin) {
         return sendResponse(res, { status: 400, success: false, message: 'Missing required fields' })
     }
 
@@ -118,6 +121,7 @@ const rechargeCable = async (req, res) => {
             type: 'cable',
             serviceId: serviceID,
             amount,
+            pin,
             details: { serviceID, billersCode, variation_code, request_id, roles: req.user.roles },
             providerCall: (refId) => providerService.purchaseCable({ request_id: refId, serviceID, billersCode, variation_code, amount })
         })
@@ -132,14 +136,19 @@ const rechargeCable = async (req, res) => {
 }
 
 const purchaseExamPin = async (req, res) => {
-    const { variation_code, amount, quantity, phone } = req.body
+    const { variation_code, amount, quantity, phone, pin } = req.body
     const userId = req.user.id
+
+    if (!pin) {
+        return sendResponse(res, { status: 400, success: false, message: 'PIN is required' })
+    }
 
     try {
         const result = await purchaseService.processPurchase(userId, {
             type: 'pin',
             serviceId: variation_code,
             amount,
+            pin,
             details: { variation_code, quantity, phone, request_id, roles: req.user.roles },
             providerCall: (refId) => providerService.purchaseExamPin({ request_id: refId, variation_code, amount, quantity, phone })
         })

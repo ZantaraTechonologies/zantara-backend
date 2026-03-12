@@ -3,6 +3,7 @@ const Wallet = require('../models/Wallet');
 const walletService = require('./wallet.service');
 const refundService = require('./refund.service');
 const providerService = require('./provider.service');
+const pinService = require('./pin.service');
 const { processReferralBonus } = require('../utils/referral');
 const { calculateServicePrice } = require('../utils/pricing');
 
@@ -10,9 +11,12 @@ class PurchaseService {
     /**
      * Generic execution flow for all utility purchases
      */
-    async processPurchase(userId, { type, serviceId, amount, details, providerCall, referralAmount }) {
+    async processPurchase(userId, { type, serviceId, amount, details, providerCall, referralAmount, pin }) {
         let transaction;
         try {
+            // 0. Verify Transaction PIN first
+            await pinService.verifyPin(userId, pin);
+
             const wallet = await Wallet.findOne({ userId });
             const finalAmount = await calculateServicePrice(details.roles || [], amount);
 
