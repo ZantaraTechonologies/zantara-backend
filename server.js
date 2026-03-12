@@ -63,6 +63,7 @@ const flutterwaveRoutes = require('./routes/flutterwave');
 const transactionRoutes = require('./routes/transaction');
 const servicesRoutes = require('./routes/services');
 const kycRoutes = require('./routes/kyc');
+const supportRoutes = require('./routes/support');
 const errorHandler = require('./middlewares/errorHandler');
 
 app.use('/api', index);
@@ -78,6 +79,7 @@ app.use('/api/flutterwave', flutterwaveRoutes);
 app.use('/api/transaction-logs', transactionRoutes);
 app.use('/api/services', servicesRoutes);
 app.use('/api/kyc', kycRoutes);
+app.use('/api/support', supportRoutes);
 
 // Global error handler (keep last)
 app.use(errorHandler);
