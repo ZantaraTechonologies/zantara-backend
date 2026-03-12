@@ -88,6 +88,145 @@ This backend is built on five core safety principles mandated for financial oper
 
 ---
 
+## 📡 Endpoints Reference
+
+### 🔐 Authentication Module (`/api/auth`)
+
+#### 1. Register User
+**POST** `/register`  
+Registers a new user and auto-creates a wallet.
+- **Headers**: `Content-Type: multipart/form-data` (or JSON)
+- **Body**: `{ "name", "email", "phone", "password", "referrerCode" (opt) }`
+
+#### 2. Login
+**POST** `/login`  
+Authenticates user and sets HTTP-only JWT cookie.
+- **Headers**: `Content-Type: application/json`
+- **Body**: `{ "email", "password" }`
+
+#### 3. Set Transaction PIN
+**POST** `/set-pin`  
+Sets a 4-digit security PIN for financial transactions.
+- **Headers**: `Authorization: Bearer <JWT>`, `Content-Type: application/json`
+- **Body**: `{ "pin": "1234" }`
+
+#### 4. Change Transaction PIN
+**POST** `/change-pin`
+- **Body**: `{ "oldPin", "newPin" }`
+
+#### 5. Forgot/Reset Password
+**POST** `/forgot-password` | **PUT** `/reset-password/:token`
+- **Body**: `{ "email" }` | `{ "password" }`
+
+---
+
+### 💳 Wallet & Funding (`/api/wallet`)
+
+#### 1. Get Wallet
+**GET** `/`  
+- **Headers**: `Authorization: Bearer <JWT>`
+
+#### 2. Fund Wallet (Initialize)
+**POST** `/fund`  
+- **Body**: `{ "amount", "channels": ["card","ussd","bank_transfer"] }`
+- **Returns**: `authorization_url` for Paystack.
+
+#### 3. Verify Payment
+**GET** `/verify?reference=REF`  
+Manually checks payment status if webhook fails.
+
+---
+
+### 📲 Services Subscriptions (`/api/services`)
+
+#### 1. Purchase Airtime
+**POST** `/airtime`
+- **Body**: `{ "network", "phone", "amount", "pin" }`
+
+#### 2. Purchase Data
+**POST** `/data`
+- **Body**: `{ "serviceID", "billersCode", "variation_code", "phone", "amount", "pin" }`
+
+#### 3. Electricity Bill
+**POST** `/electricity`
+- **Body**: `{ "serviceID", "meter_number", "meter_type", "amount", "phone", "pin" }`
+
+#### 4. Cable TV
+**POST** `/cable`
+- **Body**: `{ "serviceID", "billersCode", "variation_code", "amount", "pin" }`
+
+#### 5. Get Plans
+**GET** `/plans/:network`  
+Fetches data bundles, cable plans, etc.
+
+---
+
+### 📁 KYC Module (`/api/kyc`)
+
+#### 1. Submit KYC
+**POST** `/submit`
+- **Headers**: `Content-Type: multipart/form-data`
+- **Body**: `{ "tier", "documentType", "documentNumber", "document" (file) }`
+
+#### 2. Get Status
+**GET** `/my-status`
+
+---
+
+### 🎫 Support Tickets (`/api/support`)
+
+#### 1. Create Ticket
+**POST** `/create`
+- **Body**: `{ "subject", "message", "priority", "transactionId" (opt) }`
+
+#### 2. Reply to Ticket
+**POST** `/reply/:id`
+- **Body**: `{ "message" }`
+
+---
+
+### 🏧 Withdrawals (`/api/withdrawal`)
+
+#### 1. Request Withdrawal
+**POST** `/`
+- **Body**: `{ "amount" }`
+
+#### 2. My Withdrawals
+**GET** `/me`
+
+---
+
+### ⚙️ Admin Actions (`/api/admin`)
+
+#### 1. Review KYC
+**POST** `/review/:id`
+- **Body**: `{ "status": "approved/rejected", "rejectionReason" }`
+
+#### 2. Process Withdrawal
+**PUT** `/api/withdrawal/:id`
+- **Body**: `{ "status": "approved/rejected", "adminNote" }`
+
+#### 3. Global Transactions
+**GET** `/transactions`  
+- **Query**: `?type=&userId=&status=&startDate=&endDate=`
+
+#### 4. Update User Role/Status
+**PUT** `/users/:id`
+- **Body**: `{ "role", "status": true/false }` (false = blocked)
+
+#### 5. App Settings
+**GET** `/settings` | **POST** `/settings`
+- **Body**: `{ "key", "value" }`
+
+---
+
+### 📊 Analytics & Notifications
+
+- **Analytics**: `/api/admin/stats/transactions/daily`, `/api/admin/stats/services/top-used`
+- **Notifications**: `/api/notifications/` (Get), `/api/notifications/read/:id` (Mark)
+
+---
+
 ## 📜 Development Guidelines
 -   **Keep Controllers Thin**: Business logic belongs in `/services`.
 -   **Use Adapters**: Never call external provider APIs directly from services.
