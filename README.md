@@ -391,11 +391,11 @@ If a provider fails, a **wallet refund is automatically issued**.
 - **Purpose**: Initializes a Paystack checkout session.
 - **Method**: `POST` | **Path**: `/fund`
 - **Request Body**: `{ "amount": 1000, "channels": ["card"] }`
-- **Expected Response**: `{ "authorization_url": "...", "reference": "..." }`
+- **Expected Response**: `{ "authorization_url": "...", "reference": "ZNT-992-XPI" }`
 
 #### 3. Verify Funding (Manual Poll)
 - **Purpose**: Checks status of a funding reference.
-- **Method**: `GET` | **Path**: `/verify?reference=REF`
+- **Method**: `GET` | **Path**: `/verify?reference=ZNT-992-XPI`
 - **Expected Response**: `{ "status": "success" }`
 
 ---
@@ -411,7 +411,7 @@ If a provider fails, a **wallet refund is automatically issued**.
 - **Purpose**: Top up phone credit via service provider.
 - **Method**: `POST` | **Path**: `/airtime`
 - **Request Body**: `{ "network": "MTN", "phone": "...", "amount": 100, "pin": "1234" }`
-- **Expected Response**: `{ "message": "Airtime sent successfully" }`
+- **Expected Response**: `{ "message": "Airtime sent successfully", "transactionId": "FT982341056" }`
 
 #### 3. Purchase Data
 - **Purpose**: Buy mobile data bundles.
@@ -451,8 +451,8 @@ If a provider fails, a **wallet refund is automatically issued**.
 #### 9. Check Transaction Status
 - **Purpose**: Manually verify status of any purchase via ref ID.
 - **Method**: `POST` | **Path**: `/transaction/status`
-- **Request Body**: `{ "refId": "..." }`
-- **Expected Response**: `{ "success": true, "status": "success" }`
+- **Request Body**: `{ "refId": "ZNT-992-XPI" }`
+- **Expected Response**: `{ "success": true, "status": "success", "transactionId": "FT982341056" }`
 
 ---
 

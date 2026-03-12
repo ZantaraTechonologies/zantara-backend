@@ -5,7 +5,7 @@ const walletService = require('./wallet.service');
 const refundService = require('./refund.service');
 const providerService = require('./provider.service');
 const pinService = require('./pin.service');
-const notificationService = require('./notification.service');
+const { generateTransactionId, generateReference } = require('../utils/generateID');
 const { processReferralBonus } = require('../utils/referral');
 const { calculateServicePrice } = require('../utils/pricing');
 
@@ -35,21 +35,25 @@ class PurchaseService {
             }
 
             // 1. Create PENDING Transaction Record
+            const transactionId = generateTransactionId();
+            const reference = details.request_id || generateReference();
+
             transaction = await Transaction.create({
                 userId,
-                refId: details.request_id || `TXN_${Date.now()}`,
+                transactionId,
+                refId: reference,
                 type,
                 service: serviceId,
                 amount: finalAmount,
                 status: 'pending',
-                details: { ...details, originalAmount: amount }
+                details: { ...details, originalAmount: amount, request_id: reference }
             });
 
             // 2. Debit Wallet FIRST (with Ledger entry)
-            await walletService.debit(userId, finalAmount, transaction.refId, `${type}_purchase`, transaction._id);
+            await walletService.debit(userId, finalAmount, reference, `${type}_purchase`, transaction._id);
 
             // 3. Call External Provider
-            const response = await providerCall(transaction.refId);
+            const response = await providerCall(reference);
 
             if (!response.success) {
                 // 4. Automated Refund if provider fails

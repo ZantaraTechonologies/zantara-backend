@@ -12,6 +12,7 @@ function normalizeChannels(input) {
     return cleaned.length ? cleaned : ALLOWED_CHANNELS;
 }
 
+const { generateReference } = require('../utils/generateID');
 const axios = require('axios');
 const Wallet = require('../models/Wallet');
 const { logTransaction } = require('../utils/transaction');
@@ -28,7 +29,7 @@ const fundWallet = async (req, res) => {
         const callback_url = req.body.callback_url; // Support custom callback
 
         // Unique reference; keep it stable for idempotency
-        const reference = `WALLET_${userId}_${Date.now()}`;
+        const reference = generateReference();
 
         // Persist pending row so /verify and the webhook have a single source of truth
         await TransactionStatus.create({
