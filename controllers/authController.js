@@ -9,65 +9,6 @@ const { sendEmail } = require('../utils/mailer')
 const { sendSMS } = require('../utils/sms')
 const ActivityLog = require('../models/ActivityLog')
 
-// const register = async (req, res) => {
-//     const { name, email, phone, password, referrerCode, role } = req.body
-
-//     if (!name || !email || !phone || !password) {
-//         return res.status(400).json({ message: "Name, email, phone and password are required" });
-//     }
-
-//     // const session = await mongoose.startSession()
-//     // session.startTransaction()
-
-//     try {
-//         const phoneExists = await checkPhone(phone)
-//         if (phoneExists) {
-//             // await session.abortTransaction()
-//             // session.endSession()
-//             return res.status(409).json({ message: "Phone number already in use" })
-//         }
-
-//         const emailExists = await checkEmail(email)
-//         if (emailExists) {
-//             // await session.abortTransaction()
-//             // session.endSession()
-//             return res.status(409).json({ message: "Email address already in use" })
-//         }
-
-//         const myReferralCode = await generateUniqueReferralCode()
-
-//         const hashed = await bcrypt.hash(password, 12)
-
-//         const userData = {
-//             name, email, phone, password: hashed, referrerCode, myReferralCode, role
-//         }
-//         if (role) userData.role = role
-
-
-//         // const myReferralCode = phone
-//         const user = await User.create(userData)
-
-
-//         // Auto-create wallet with 0 balance
-//         await Wallet.create({ userId: user._id })
-
-//         // // Commit transaction
-//         // await session.commitTransaction()
-//         // session.endSession()
-
-//         // Send verification link and token
-//         // const verifyToken = generateToken(user, '1d')
-//         // const verifyLink = `${process.env.CLIENT_URL}/verify-email/${verifyToken}`
-//         // await sendEmail(email, 'Verify your email', `<a href="${verifyLink}">Verify</a>`)
-
-//         sendToken(user, res)
-//     } catch (error) {
-//         // await session.abortTransaction()
-//         // session.endSession()
-//         res.status(500).json({ message: "Registration failed", error: error.message })
-//     }
-// }
-
 const register = async (req, res) => {
     const { name, email, phone, password, referrerCode, role } = req.body
 
@@ -91,13 +32,13 @@ const register = async (req, res) => {
         const roles = role ? [role] : ['user'];
 
         const user = await User.create({
-            name, 
+            name,
             email: email || undefined, // Store as undefined if not provided for sparse index
-            phone, 
-            password: hashed, 
-            referrerCode, 
+            phone,
+            password: hashed,
+            referrerCode,
             myReferralCode,
-            roles 
+            roles
         })
 
         await Wallet.create({ userId: user._id })
@@ -132,10 +73,10 @@ const login = async (req, res) => {
 
     try {
         // Search by email OR phone
-        const user = await User.findOne({ 
-            $or: [{ email: loginId }, { phone: loginId }] 
+        const user = await User.findOne({
+            $or: [{ email: loginId }, { phone: loginId }]
         })
-        
+
         if (!user) return res.status(400).json({ message: 'Invalid credentials' })
 
         const match = await bcrypt.compare(password, user.password)
@@ -284,9 +225,9 @@ const verifyOTP = async (req, res) => {
             return res.status(400).json({ message: 'Invalid or expired OTP' });
         }
 
-        await User.findByIdAndUpdate(user._id, { 
-            isPhoneVerified: true, 
-            otp: null, 
+        await User.findByIdAndUpdate(user._id, {
+            isPhoneVerified: true,
+            otp: null,
             otpExpires: null,
             status: true // Auto-verify account status on phone success
         });
