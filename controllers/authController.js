@@ -10,7 +10,11 @@ const { sendSMS } = require('../utils/sms')
 const ActivityLog = require('../models/ActivityLog')
 
 const register = async (req, res) => {
-    const { name, email, phone, password, referrerCode, role } = req.body
+    let { name, email, phone, password, referrerCode, role } = req.body
+    
+    // Normalize email
+    if (email) email = email.trim().toLowerCase();
+    if (phone) phone = phone.trim();
 
     // Email is now optional, Phone is REQUIRED
     if (!name || !phone || !password) {
@@ -31,23 +35,55 @@ const register = async (req, res) => {
 
         const roles = role ? [role] : ['user'];
 
-        const user = await User.create({
+        const userData = {
             name,
-            email: email || undefined, // Store as undefined if not provided for sparse index
-            phone,
+            phone: phone.trim(),
             password: hashed,
-            referrerCode,
+            referrerCode: referrerCode ? referrerCode.trim() : undefined,
             myReferralCode,
             roles
-        })
+        };
+
+        if (email && email.trim()) {
+            userData.email = email.trim().toLowerCase();
+        }
+
+        const user = await User.create(userData);
 
         await Wallet.create({ userId: user._id })
 
-        await ActivityLog.create({ userId: user._id, action: 'REGISTER', ipAddress: req.ip, device: req.headers['user-agent'] })
+        await ActivityLog.create({ 
+            userId: user._id, 
+            action: 'REGISTER', 
+            ipAddress: req.ip, 
+            device: req.headers['user-agent'] 
+        })
 
+        console.log(`Registration successful for user: ${phone}`);
         sendToken(user, res)
     } catch (error) {
-        res.status(500).json({ message: "Registration failed", error: error.message })
+        console.error("Registration fatal error:", error);
+        
+        // Handle MongoDB Duplicate Key Errors (E11000)
+        if (error.code === 11000) {
+            const field = Object.keys(error.keyPattern)[0];
+            const message = field === 'phone' 
+                ? "This phone number is already registered." 
+                : field === 'email' 
+                    ? "This email address is already in use." 
+                    : "A user with these details already exists.";
+            
+            return res.status(409).json({ 
+                success: false,
+                message: message
+            });
+        }
+
+        res.status(500).json({ 
+            success: false,
+            message: "Registration failed. Please try again later.",
+            error: error.message 
+        })
     }
 }
 
@@ -63,9 +99,9 @@ const verifyEmail = async (req, res) => {
 }
 
 const login = async (req, res) => {
-    const { identifier, email, phone, password } = req.body // Support 'identifier' or specific fields
+    let { identifier, email, phone, password } = req.body // Support 'identifier' or specific fields
 
-    const loginId = identifier || email || phone;
+    let loginId = (identifier || email || phone || "").trim().toLowerCase();
 
     if (!loginId || !password) {
         return res.status(400).json({ message: 'Login ID and password are required' })
@@ -170,7 +206,8 @@ const updateUser = async (req, res) => {
 }
 
 const forgotPassword = async (req, res) => {
-    const user = await User.findOne({ email: req.body.email })
+    const email = (req.body.email || "").trim().toLowerCase();
+    const user = await User.findOne({ email })
     if (!user) return res.status(404).json({ message: 'Email not found' })
 
     const token = generateToken(user, '15m')
