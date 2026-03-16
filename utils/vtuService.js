@@ -25,8 +25,15 @@ const fetchPlans = async (network) => {
 const verifyMeterWithProvider = async ({ billersCode, serviceID, type }) => {
     const URL = `${process.env.VTU_API_URI}/merchant-verify`
     const res = await axios.post(URL, {
-        auth: { username: process.env.VTU_USERNAME, password: process.env.VTU_PASSWORD }
-    }, { billersCode, serviceID, type });
+        billersCode,
+        serviceID,
+        type
+    }, {
+        auth: { 
+            username: process.env.VTU_USERNAME, 
+            password: process.env.VTU_PASSWORD 
+        }
+    });
     return res.data;
 }
 

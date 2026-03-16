@@ -1,13 +1,22 @@
 const jwt = require('jsonwebtoken')
 
 const verifyJWT = (req, res, next) => {
-    const token = req.cookies?.token
+    let token = req.cookies?.token
+    
+    // Support Authorization header (Bearer <token>)
+    if (!token && req.headers.authorization) {
+        if (req.headers.authorization.startsWith('Bearer ')) {
+            token = req.headers.authorization.split(' ')[1];
+        } else {
+            token = req.headers.authorization;
+        }
+    }
+
     if (!token) return res.status(401).json({ message: 'Not authenticated' })
 
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET)
         req.user = decoded
-        console.log(req.user)
         next()
     } catch (err) {
         return res.status(403).json({ message: 'Invalid or expired token' })

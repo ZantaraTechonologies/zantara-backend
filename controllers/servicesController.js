@@ -8,10 +8,12 @@ const { fetchPlans, verifyMeterWithProvider } = require('../utils/vtuService')
 const { sendResponse } = require('../utils/response')
 
 const purchaseAirtime = async (req, res) => {
-    const { network, phone, amount, pin } = req.body
+    const { network, serviceID, phone, billersCode, amount, pin } = req.body
+    const finalNetwork = network || serviceID;
+    const finalPhone = phone || billersCode;
     const userId = req.user.id
 
-    if (!network || !phone || !amount || !pin) {
+    if (!finalNetwork || !finalPhone || !amount || !pin) {
         return sendResponse(res, { status: 400, success: false, message: 'Missing required fields' })
     }
 
@@ -35,10 +37,25 @@ const purchaseAirtime = async (req, res) => {
 }
 
 const purchaseData = async (req, res) => {
-    const { serviceID, billersCode, variation_code, phone, amount, pin } = req.body
+    const { 
+        serviceID, 
+        network, 
+        billersCode, 
+        phone, 
+        variation_code, 
+        amount: reqAmount, 
+        pin 
+    } = req.body
+    
+    // Support both formats (mobile vs older backend)
+    const finalServiceID = serviceID || network;
+    const finalBillersCode = billersCode || phone;
+    const finalPhone = phone || billersCode;
+    const amount = reqAmount; // Must be passed from frontend now
+
     const userId = req.user.id
 
-    if (!serviceID || !billersCode || !variation_code || !phone || !amount || !pin) {
+    if (!finalServiceID || !finalBillersCode || !variation_code || !finalPhone || !amount || !pin) {
         return sendResponse(res, { status: 400, success: false, message: 'Missing required fields' })
     }
 
@@ -63,8 +80,8 @@ const purchaseData = async (req, res) => {
 
 const getPlans = async (req, res) => {
     try {
-        const { network } = req.query;
-        if (!network) return sendResponse(res, { status: 400, success: false, message: 'Network query required' });
+        const { network } = req.params;
+        if (!network) return sendResponse(res, { status: 400, success: false, message: 'Network parameter required' });
         const plans = await fetchPlans(network);
         return sendResponse(res, { data: plans });
     } catch (err) {
@@ -83,10 +100,15 @@ const verifyMeter = async (req, res) => {
 }
 
 const payElectricityBill = async (req, res) => {
-    const { serviceID, meter_number, meter_type, amount, phone, pin } = req.body
+    const { serviceID, network, meter_number, billersCode, meter_type, variation_code, amount, phone, pin } = req.body
+    const finalServiceID = serviceID || network;
+    const finalMeterNumber = meter_number || billersCode;
+    const finalMeterType = meter_type || variation_code;
+    const finalPhone = phone || finalMeterNumber;
+
     const userId = req.user.id
 
-    if (!serviceID || !meter_number || !meter_type || !amount || !phone || !pin) {
+    if (!finalServiceID || !finalMeterNumber || !finalMeterType || !amount || !finalPhone || !pin) {
         return sendResponse(res, { status: 400, success: false, message: 'Missing required fields' })
     }
 
@@ -110,10 +132,14 @@ const payElectricityBill = async (req, res) => {
 }
 
 const rechargeCable = async (req, res) => {
-    const { serviceID, billersCode, variation_code, amount, pin } = req.body
+    const { serviceID, network, billersCode, phone, variation_code, amount, pin } = req.body
+    const finalServiceID = serviceID || network;
+    const finalBillersCode = billersCode || phone;
+    const finalPhone = phone || finalBillersCode;
+
     const userId = req.user.id
 
-    if (!serviceID || !billersCode || !variation_code || !amount || !pin) {
+    if (!finalServiceID || !finalBillersCode || !variation_code || !amount || !pin) {
         return sendResponse(res, { status: 400, success: false, message: 'Missing required fields' })
     }
 

@@ -25,7 +25,19 @@ const userSchema = new mongoose.Schema({
     kycLevel: { type: Number, default: 1 }, // Tier 1, 2, 3
     otp: { type: String, select: false },
     otpExpires: Date,
-    isPhoneVerified: { type: Boolean, default: false }
+    isPhoneVerified: { type: Boolean, default: false },
+    linkedAccounts: [{
+        bankName: String,
+        bankCode: String,
+        accountName: String,
+        accountNumber: String,
+        isDefault: { type: Boolean, default: false }
+    }],
+    virtualAccounts: [{
+        bankName: String,
+        accountName: String,
+        accountNumber: String
+    }]
 }, { timestamps: true })
 
 userSchema.post('findOneAndDelete', async function (doc) {

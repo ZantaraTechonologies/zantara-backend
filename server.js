@@ -65,6 +65,7 @@ const servicesRoutes = require('./routes/services');
 const kycRoutes = require('./routes/kyc');
 const supportRoutes = require('./routes/support');
 const notificationRoutes = require('./routes/notification');
+const bankAccountRoutes = require('./routes/bankAccount');
 const errorHandler = require('./middlewares/errorHandler');
 
 app.use('/api', index);
@@ -73,6 +74,7 @@ app.get('/api/admin/auth/me', adminAuthRoutes); // maintain backward compat if n
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);
 app.use('/api/wallet', walletRoutes);
+app.use('/api/bank-accounts', bankAccountRoutes);
 app.use('/api/admin/stats', analyticsRoutes);
 app.use('/api/paystack', paystackRoutes);
 app.use('/api/monnify', monnifyRoutes);

@@ -1,7 +1,6 @@
-// controllers/walletFundingController.js
-const { initializePayment } = require('../utils/paystack');
+const { initializePayment: initializePaystack } = require('../utils/paystack');
+const { initializePayment: initializeMonnify } = require('../utils/monnify');
 const TransactionStatus = require('../models/TransactionStatus');
-
 const { generateReference } = require('../utils/generateID');
 const axios = require('axios');
 const Wallet = require('../models/Wallet');
@@ -20,54 +19,61 @@ function normalizeChannels(input) {
 const fundWallet = async (req, res) => {
     try {
         const rawAmount = Number(req.body?.amount);
+        const provider = req.body?.provider || 'paystack'; // default to paystack
+        
+        console.log(`Funding Requested: Amount=${rawAmount}, Provider=${provider}`);
+        
         if (!rawAmount || rawAmount < MIN_AMOUNT) {
             return res.status(400).json({ message: `Minimum amount is ₦${MIN_AMOUNT}` });
         }
 
         const channels = normalizeChannels(req.body?.channels);
         const userId = req.user.id;
-        const callback_url = req.body.callback_url; // Support custom callback
+        const callback_url = req.body.callback_url;
 
-        // Unique reference; keep it stable for idempotency
-        const reference = generateReference();
+        // Unique reference
+        const reference = provider === 'paystack' ? generateReference() : `MNFY_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
 
-        // Persist pending row so /verify and the webhook have a single source of truth
+        // Persist pending row
         await TransactionStatus.create({
             refId: reference,
             type: 'funding',
             status: 'pending',
-            userId,                 // (schema can ignore unknown fields if not declared)
-            amount: rawAmount,      // store for reporting (webhook uses Paystack’s verified amount)
+            userId,
+            amount: rawAmount,
             channels,
+            service: provider.charAt(0).toUpperCase() + provider.slice(1)
         });
 
-        // Initialize Paystack with the SAME reference
-        const init = await initializePayment(
-            req.user.email,
-            rawAmount,
-            { userId, refId: reference, callback_url }, // metadata
-            reference,
-            channels
-        );
-
-        return res.json({
-            authorization_url: init?.data?.authorization_url,
-            reference,
-        });
-    } catch (err) {
-        // If init fails, mark the pending row failed so the UI doesn’t spin forever
-        const maybeRef = typeof err?.reference === 'string' ? err.reference : null;
-
-        if (maybeRef) {
-            await TransactionStatus.updateOne(
-                { refId: maybeRef, status: 'pending' },
-                { $set: { status: 'failed', errorMessage: 'Init failed before checkout' } }
+        let init;
+        if (provider === 'monnify') {
+            init = await initializeMonnify(
+                req.user.email,
+                rawAmount,
+                { userId, refId: reference },
+                reference
+            );
+        } else {
+            // Default to Paystack
+            init = await initializePaystack(
+                req.user.email,
+                rawAmount,
+                { userId, refId: reference, callback_url },
+                reference,
+                channels
             );
         }
 
+        return res.json({
+            authorization_url: init?.data?.authorization_url || init?.authorization_url,
+            reference,
+            provider
+        });
+    } catch (err) {
+        console.error('Funding init error:', err);
         return res
             .status(500)
-            .json({ message: 'Paystack init failed', detail: err?.message || String(err) });
+            .json({ message: 'Funding initialization failed', detail: err?.message || String(err) });
     }
 };
 
