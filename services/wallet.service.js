@@ -6,11 +6,11 @@ class WalletService {
     /**
      * Credit a user's wallet and record a ledger entry.
      */
-    static async credit(userId, amount, reference, source, transactionId = null) {
+    static async credit(userId, amount, reference, source, transactionId = null, existingSession = null) {
         if (amount <= 0) throw new Error('Amount must be greater than zero');
 
-        const session = await mongoose.startSession();
-        session.startTransaction();
+        const session = existingSession || await mongoose.startSession();
+        if (!existingSession) session.startTransaction();
 
         try {
             const wallet = await Wallet.findOne({ userId }).session(session);
@@ -35,24 +35,24 @@ class WalletService {
                 balanceAfter
             }], { session });
 
-            await session.commitTransaction();
+            if (!existingSession) await session.commitTransaction();
             return { balance: balanceAfter };
         } catch (error) {
-            await session.abortTransaction();
+            if (!existingSession) await session.abortTransaction();
             throw error;
         } finally {
-            session.endSession();
+            if (!existingSession) session.endSession();
         }
     }
 
     /**
      * Debit a user's wallet and record a ledger entry.
      */
-    static async debit(userId, amount, reference, source, transactionId = null) {
+    static async debit(userId, amount, reference, source, transactionId = null, existingSession = null) {
         if (amount <= 0) throw new Error('Amount must be greater than zero');
 
-        const session = await mongoose.startSession();
-        session.startTransaction();
+        const session = existingSession || await mongoose.startSession();
+        if (!existingSession) session.startTransaction();
 
         try {
             const wallet = await Wallet.findOne({ userId }).session(session);
@@ -79,13 +79,13 @@ class WalletService {
                 balanceAfter
             }], { session });
 
-            await session.commitTransaction();
+            if (!existingSession) await session.commitTransaction();
             return { balance: balanceAfter };
         } catch (error) {
-            await session.abortTransaction();
+            if (!existingSession) await session.abortTransaction();
             throw error;
         } finally {
-            session.endSession();
+            if (!existingSession) session.endSession();
         }
     }
 

@@ -1,4 +1,6 @@
 const Wallet = require('../models/Wallet')
+const User = require('../models/User')
+const Transaction = require('../models/Transaction')
 
 const { logTransaction } = require('../utils/transaction')
 // We can use a simple timestamp ref or import generator if available
@@ -47,11 +49,69 @@ const unfreezeWallet = async (req, res) => {
     res.json("Wallet UnFreeze")
 }
 
+const redeemEarnings = async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    try {
+        const userId = req.user.id;
+        const amount = Number(req.body.amount);
+
+        if (!amount || amount <= 0) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({ message: 'Invalid amount' });
+        }
+
+        const user = await User.findById(userId).session(session);
+        if (!user || (user.referralBalance || 0) < amount) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({ message: 'Insufficient referral balance' });
+        }
+
+        const refId = 'RED-' + Date.now();
+
+        // 1. Debit Referral Balance
+        user.referralBalance -= amount;
+        await user.save({ session });
+
+        // 2. Credit Main Wallet
+        await walletService.credit(userId, amount, refId, 'referral_redemption', null, session);
+
+        // 3. Log Transaction
+        await Transaction.create([{
+            userId,
+            transactionId: refId,
+            refId,
+            type: 'referral_redeem',
+            service: 'Referral',
+            amount,
+            status: 'success',
+            details: { message: 'Referral earnings redemption' }
+        }], { session });
+
+        await session.commitTransaction();
+        session.endSession();
+
+        res.json({ 
+            success: true, 
+            message: 'Earnings redeemed successfully', 
+            newBalance: user.referralBalance 
+        });
+    } catch (err) {
+        await session.abortTransaction();
+        session.endSession();
+        console.error('Redeem error:', err);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+}
+
 
 module.exports = {
     getWallet,
     debitWallet,
     creditWallet,
     freezeWallet,
-    unfreezeWallet
+    unfreezeWallet,
+    redeemEarnings
 }

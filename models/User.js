@@ -19,6 +19,7 @@ const userSchema = new mongoose.Schema({
     referrerCode: String,
     myReferralCode: String,
     totalReferralBonus: { type: Number, default: 0 },
+    referralBalance: { type: Number, default: 0 },
     resellerEarnings: { type: Number, default: 0 },
     transactionPin: { type: String, select: false }, // Hashed PIN
     isPinSet: { type: Boolean, default: false },

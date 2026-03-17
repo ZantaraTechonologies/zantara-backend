@@ -31,11 +31,15 @@ const processReferralBonus = async (userId, purchaseAmount, transactionRef) => {
 
         if (bonusAmount <= 0) return;
 
-        // 4. Credit Referrer Wallet (via WalletService for Ledger)
-        await walletService.credit(referrer._id, bonusAmount, `REF-${transactionRef}`, 'referral_bonus');
+// 4. Credit Referrer Referral Balance (separately from main wallet)
+// We still use WalletService for ledger (if we want it there) or just update the user model.
+// The user requested a separate "referral wallet" experience.
+// Let's update the user model's referralBalance.
+// Note: We'll still log it as a transaction for visibility.
 
-        // 5. Update Referrer Stats
+        // 5. Update Referrer Stats and Balance
         referrer.totalReferralBonus = (referrer.totalReferralBonus || 0) + bonusAmount;
+        referrer.referralBalance = (referrer.referralBalance || 0) + bonusAmount;
         await referrer.save();
 
         // 6. Log Transaction for Referrer
