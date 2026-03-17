@@ -1,6 +1,7 @@
 const Wallet = require('../models/Wallet')
 const User = require('../models/User')
 const Transaction = require('../models/Transaction')
+const mongoose = require('mongoose')
 
 const { logTransaction } = require('../utils/transaction')
 // We can use a simple timestamp ref or import generator if available
