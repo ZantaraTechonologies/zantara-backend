@@ -8,16 +8,34 @@ const walletService = require('../services/wallet.service')
 // User requests withdrawal
 const requestWithdrawal = async (req, res) => {
     try {
-        const { amount } = req.body
+        const { amount, bankName, accountNumber, accountName, pin } = req.body
         const userId = req.user.id
         const refId = 'WTH-' + Date.now()
 
-        // Freeze the amount via WalletService (creates ledger entry)
+        if (!amount || amount <= 0) return res.status(400).json({ message: 'Invalid amount' })
+        if (!bankName || !accountNumber || !accountName) return res.status(400).json({ message: 'Missing bank details' })
+
+        // 1. PIN Validation
+        const user = await User.findById(userId).select('+transactionPin');
+        if (!user.isPinSet) {
+            return res.status(400).json({ message: 'Transaction PIN not set' });
+        }
+        
+        const bcrypt = require('bcryptjs');
+        const isMatch = await bcrypt.compare(pin, user.transactionPin);
+        if (!isMatch) {
+            return res.status(400).json({ message: 'Invalid transaction PIN' });
+        }
+
+        // 2. Freeze the amount via WalletService (creates ledger entry)
         await walletService.freeze(userId, amount, refId, 'withdrawal_request')
 
         const request = await Withdrawal.create({
             userId,
             amount,
+            bankName,
+            accountNumber,
+            accountName,
             refId // store refId for tracing
         })
 
@@ -25,7 +43,7 @@ const requestWithdrawal = async (req, res) => {
         await sendEmail(
             process.env.ADMIN_EMAIL,
             'New Withdrawal Request',
-            `<p>User ID: ${req.user.id}<br>Amount: ₦${amount}<br>Status: Pending</p>`
+            `<p>User: ${user.name} (${user.phone})<br>Amount: ₦${amount}<br>Bank: ${bankName} (${accountNumber})<br>Status: Pending</p>`
         )
 
         res.json({ message: 'Withdrawal request submitted', request })
