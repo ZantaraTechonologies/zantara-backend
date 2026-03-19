@@ -32,7 +32,7 @@ const purchaseAirtime = async (req, res) => {
         }
         return sendResponse(res, { message: 'Airtime sent successfully', data: result.data })
     } catch (err) {
-        return sendResponse(res, { status: 500, success: false, message: 'Server error', error: err })
+        return sendResponse(res, { status: 500, success: false, message: err.message || 'Server error', error: err })
     }
 }
 
@@ -74,7 +74,7 @@ const purchaseData = async (req, res) => {
         }
         return sendResponse(res, { message: 'Data purchase successful', data: result.data })
     } catch (err) {
-        return sendResponse(res, { status: 500, success: false, message: 'Server error', error: err })
+        return sendResponse(res, { status: 500, success: false, message: err.message || 'Server error', error: err })
     }
 }
 
@@ -127,7 +127,7 @@ const payElectricityBill = async (req, res) => {
         }
         return sendResponse(res, { message: 'Electricity bill paid successfully', data: result.data })
     } catch (err) {
-        return sendResponse(res, { status: 500, success: false, message: 'Server error', error: err })
+        return sendResponse(res, { status: 500, success: false, message: err.message || 'Server error', error: err })
     }
 }
 
@@ -158,7 +158,7 @@ const rechargeCable = async (req, res) => {
         }
         return sendResponse(res, { message: 'Cable subscription successful', data: result.data })
     } catch (err) {
-        return sendResponse(res, { status: 500, success: false, message: 'Server error', error: err })
+        return sendResponse(res, { status: 500, success: false, message: err.message || 'Server error', error: err })
     }
 }
 
@@ -195,7 +195,7 @@ const purchaseExamPin = async (req, res) => {
 
         return sendResponse(res, { message: 'PIN purchased successfully', data: { pin: result.data.pin } })
     } catch (err) {
-        return sendResponse(res, { status: 500, success: false, message: 'Server error', error: err })
+        return sendResponse(res, { status: 500, success: false, message: err.message || 'Server error', error: err })
     }
 }
 
