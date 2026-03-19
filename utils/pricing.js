@@ -14,7 +14,7 @@ const calculateServicePrice = async (roles, baseAmount) => {
 
     // Fetch Agent Discount Percentage
     const discountSetting = await Setting.findOne({ key: 'agent_discount_percentage' });
-    const discount = discountSetting ? Number(discountSetting.value) : 0; // Default 0%
+    const discount = discountSetting ? Number(discountSetting.value) : 1; // Default 1% for resellers if not set
 
     if (discount <= 0) return baseAmount;
 
@@ -22,4 +22,17 @@ const calculateServicePrice = async (roles, baseAmount) => {
     return baseAmount - discountAmount;
 };
 
-module.exports = { calculateServicePrice };
+/**
+ * Get the wholesale cost of a service from settings or provider mapping
+ * @param {string} serviceId 
+ * @param {number} amount 
+ */
+const getProviderCost = async (serviceId, amount) => {
+    // For now, assume a global provider margin or check specific service margin setting
+    const marginSetting = await Setting.findOne({ key: `margin_${serviceId}` }) || await Setting.findOne({ key: 'default_provider_margin_percentage' });
+    const marginPercent = marginSetting ? Number(marginSetting.value) : 2; // Default 2% margin if not found
+
+    return amount * (1 - (marginPercent / 100));
+};
+
+module.exports = { calculateServicePrice, getProviderCost };

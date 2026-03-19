@@ -1,4 +1,4 @@
-const Withdrawal = require('../models/WithdrawalRequest')
+const Withdrawal = require('../models/Withdrawal')
 const Wallet = require('../models/Wallet')
 const User = require('../models/User')
 const { sendEmail } = require('../utils/mailer')
@@ -76,12 +76,14 @@ const processWithdrawal = async (req, res) => {
         await request.save()
 
         // ⬇️ Log Admin Action
-        await require('../models/AdminLog').create({
-            adminId: req.user.id,
-            action: 'WITHDRAWAL_PROCESS',
-            targetId: request._id,
-            notes: `Status: ${status} | Note: ${adminNote}`
-        });
+        const { logAction } = require('./auditController');
+        await logAction(
+            req.user.id,
+            req.user.name,
+            'WITHDRAWAL_PROCESS',
+            `Withdrawal ID: ${request._id}`,
+            { status, adminNote }
+        );
 
         const user = await User.findById(request.userId)
         const statusMsg = status === 'approved'

@@ -7,7 +7,8 @@ const providerService = require('./provider.service');
 const pinService = require('./pin.service');
 const { generateTransactionId, generateReference } = require('../utils/generateID');
 const { processReferralBonus } = require('../utils/referral');
-const { calculateServicePrice } = require('../utils/pricing');
+const { calculateServicePrice, getProviderCost } = require('../utils/pricing');
+const notificationService = require('./notification.service');
 
 class PurchaseService {
     /**
@@ -37,6 +38,10 @@ class PurchaseService {
             // 1. Create PENDING Transaction Record
             const transactionId = generateTransactionId();
             const reference = details.request_id || generateReference();
+            
+            // Calculate business metrics
+            const costPrice = await getProviderCost(serviceId, amount);
+            const profit = finalAmount - costPrice;
 
             transaction = await Transaction.create({
                 userId,
@@ -45,6 +50,10 @@ class PurchaseService {
                 type,
                 service: serviceId,
                 amount: finalAmount,
+                costPrice,
+                salePrice: finalAmount,
+                profit,
+                provider: 'VTPass', // Default primary provider for now
                 status: 'pending',
                 details: { ...details, originalAmount: amount, request_id: reference }
             });

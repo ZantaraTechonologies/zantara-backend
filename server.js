@@ -42,7 +42,20 @@ app.post('/webhooks/flutterwave', flutterwaveWebhook);
 // --------------------------------------------------------------------
 
 // Logging, caching headers, etc.
-app.use(morgan('dev'));
+const isProduction = process.env.NODE_ENV === 'production';
+app.use(morgan(isProduction ? 'combined' : 'dev'));
+
+// ---- MAINTENANCE MODE MIDDLEWARE ----
+app.use((req, res, next) => {
+    if (process.env.MAINTENANCE_MODE === 'true' && req.path !== '/') {
+        return res.status(503).json({ 
+            error: 'System Maintenance', 
+            message: 'Zantara is currently undergoing a scheduled update. Please try again later.' 
+        });
+    }
+    next();
+});
+
 app.set('etag', false); // avoid 304s based on ETag
 app.use((req, res, next) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -67,6 +80,8 @@ const kycRoutes = require('./routes/kyc');
 const supportRoutes = require('./routes/support');
 const notificationRoutes = require('./routes/notification');
 const bankAccountRoutes = require('./routes/bankAccount');
+const businessRoutes = require('./routes/business');
+const auditRoutes = require('./routes/audit');
 const errorHandler = require('./middlewares/errorHandler');
 
 app.use('/api', index);
@@ -85,6 +100,8 @@ app.use('/api/services', servicesRoutes);
 app.use('/api/kyc', kycRoutes);
 app.use('/api/support', supportRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/admin/business', businessRoutes);
+app.use('/api/admin/audit-logs', auditRoutes);
 
 // Global error handler (keep last)
 app.use(errorHandler);

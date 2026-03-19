@@ -50,21 +50,38 @@ const unfreezeWallet = async (req, res) => {
     res.json("Wallet UnFreeze")
 }
 
+const bcrypt = require('bcryptjs')
+
 const redeemEarnings = async (req, res) => {
     const session = await mongoose.startSession();
     session.startTransaction();
     try {
         const userId = req.user.id;
-        const amount = Number(req.body.amount);
+        const { amount, pin } = req.body;
+        const amountNum = Number(amount);
 
-        if (!amount || amount <= 0) {
+        if (!amountNum || amountNum <= 0) {
             await session.abortTransaction();
             session.endSession();
             return res.status(400).json({ message: 'Invalid amount' });
         }
 
-        const user = await User.findById(userId).session(session);
-        if (!user || (user.referralBalance || 0) < amount) {
+        // Verify PIN
+        const user = await User.findById(userId).select('+transactionPin').session(session);
+        if (!user || !user.isPinSet) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({ message: 'Transaction PIN not set' });
+        }
+
+        const pinMatch = await bcrypt.compare(pin, user.transactionPin);
+        if (!pinMatch) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({ message: 'Invalid transaction PIN' });
+        }
+
+        if ((user.referralBalance || 0) < amountNum) {
             await session.abortTransaction();
             session.endSession();
             return res.status(400).json({ message: 'Insufficient referral balance' });
@@ -73,11 +90,11 @@ const redeemEarnings = async (req, res) => {
         const refId = 'RED-' + Date.now();
 
         // 1. Debit Referral Balance
-        user.referralBalance -= amount;
+        user.referralBalance -= amountNum;
         await user.save({ session });
 
         // 2. Credit Main Wallet
-        await walletService.credit(userId, amount, refId, 'referral_redemption', null, session);
+        await walletService.credit(userId, amountNum, refId, 'referral_redemption', null, session);
 
         // 3. Log Transaction
         await Transaction.create([{
@@ -86,7 +103,7 @@ const redeemEarnings = async (req, res) => {
             refId,
             type: 'referral_redeem',
             service: 'Referral',
-            amount,
+            amount: amountNum,
             status: 'success',
             details: { message: 'Referral earnings redemption' }
         }], { session });
