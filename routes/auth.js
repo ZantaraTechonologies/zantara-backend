@@ -11,6 +11,8 @@ const {
     logout,
     sendOTP,
     verifyOTP,
+    sendEmailOTP,
+    verifyEmailOTP,
     getReferralStats
 } = require('../controllers/authController')
 const { setPin, changePin } = require('../controllers/pinController')
@@ -33,6 +35,8 @@ router.post('/change-pin', verifyJWT, pinLimiter, changePin)
 
 router.post('/send-otp', verifyJWT, sendOTP)
 router.post('/verify-otp', verifyJWT, verifyOTP)
+router.post('/email/send-otp', verifyJWT, sendEmailOTP)
+router.post('/email/verify-otp', verifyJWT, verifyEmailOTP)
 router.get('/referrals', verifyJWT, getReferralStats)
 
 module.exports = router;

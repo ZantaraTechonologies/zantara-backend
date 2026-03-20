@@ -27,6 +27,9 @@ const userSchema = new mongoose.Schema({
     otp: { type: String, select: false },
     otpExpires: Date,
     isPhoneVerified: { type: Boolean, default: false },
+    isEmailVerified: { type: Boolean, default: false },
+    emailOtp: { type: String, select: false },
+    emailOtpExpires: Date,
     linkedAccounts: [{
         bankName: String,
         bankCode: String,

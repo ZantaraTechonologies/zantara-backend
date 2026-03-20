@@ -274,6 +274,60 @@ const verifyOTP = async (req, res) => {
         res.status(500).json({ message: 'Error verifying OTP', error: error.message });
     }
 };
+
+const sendEmailOTP = async (req, res) => {
+    try {
+        const user = await User.findById(req.user.id);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+        if (!user.email) return res.status(400).json({ message: 'No email address associated with your account' });
+
+        const emailOtp = Math.floor(100000 + Math.random() * 900000).toString();
+        const emailOtpExpires = new Date(Date.now() + 10 * 60 * 1000);
+
+        await User.findByIdAndUpdate(user._id, { emailOtp, emailOtpExpires });
+
+        const html = `
+            <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
+                <h2>Confirm Your Email</h2>
+                <p>Hello ${user.name || 'User'},</p>
+                <p>Your Zantara verification code is:</p>
+                <h1 style="color: #136A63; letter-spacing: 5px;">${emailOtp}</h1>
+                <p>This code is valid for 10 minutes. Please do not share this code with anyone.</p>
+                <br />
+                <p>Regards,<br>The Zantara Team</p>
+            </div>
+        `;
+        await sendEmail(user.email, 'Your Zantara Verification Code', html);
+
+        res.json({ success: true, message: 'OTP sent to email successfully' });
+    } catch (error) {
+        res.status(500).json({ message: 'Error sending email OTP', error: error.message });
+    }
+};
+
+const verifyEmailOTP = async (req, res) => {
+    try {
+        const { otp } = req.body;
+        if (!otp) return res.status(400).json({ message: 'OTP is required' });
+
+        const user = await User.findById(req.user.id).select('+emailOtp');
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        if (user.emailOtp !== otp || user.emailOtpExpires < Date.now()) {
+            return res.status(400).json({ message: 'Invalid or expired OTP' });
+        }
+
+        await User.findByIdAndUpdate(user._id, {
+            isEmailVerified: true,
+            emailOtp: null,
+            emailOtpExpires: null
+        });
+
+        res.json({ success: true, message: 'Email verified successfully' });
+    } catch (error) {
+        res.status(500).json({ message: 'Error verifying email OTP', error: error.message });
+    }
+};
  
 const getReferralStats = async (req, res) => {
     try {
@@ -312,5 +366,7 @@ module.exports = {
     logout,
     sendOTP,
     verifyOTP,
+    sendEmailOTP,
+    verifyEmailOTP,
     getReferralStats
 }
