@@ -87,7 +87,7 @@ class PurchaseService {
             // 6. Referral Bonus
             processReferralBonus(userId, referralAmount || amount, transaction.refId);
 
-            return { success: true, data: response.raw, transactionId: transaction._id };
+            return { success: true, data: response, transactionId: transaction._id };
 
         } catch (err) {
             console.error(`${type} purchase service error:`, err.message);

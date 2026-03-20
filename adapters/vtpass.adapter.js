@@ -162,12 +162,20 @@ class VTPassAdapter extends BaseAdapter {
         const isSuccess = code === '000';
         const isPending = code === '099';
         const status = isSuccess ? 'success' : isPending ? 'pending' : 'failed';
+
+        // Extract token/PIN from various possible VTPass response fields
+        // Electricity: data.purchased_code (e.g. "Token : 1234...") or data.token
+        // Exam PINs: data.purchased_code or data.Pin
+        const rawToken = data?.purchased_code || data?.token || data?.Pin || (data?.tokens?.[0]);
+        // Clean up "Token : " prefix if present
+        const cleanToken = typeof rawToken === 'string' ? rawToken.replace(/^(Token|Pin)\s*:\s*/i, '') : rawToken;
+
         return {
             success: isSuccess,
             status,
             message: data?.response_description || data?.content?.errors?.error || 'Transaction processed',
-            transactionId: data?.content?.transactions?.transactionId,
-            token: data?.content?.transactions?.token,  // for electricity
+            transactionId: data?.content?.transactions?.transactionId || data?.requestId,
+            token: cleanToken,  
             raw: data,
         };
     }

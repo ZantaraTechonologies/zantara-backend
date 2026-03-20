@@ -188,12 +188,12 @@ const purchaseExamPin = async (req, res) => {
         await Pin.create({
             userId,
             service: variation_code,
-            code: result.data.pin,
-            refId: result.data.ref,
+            code: result.data.token,
+            refId: result.data.transactionId,
             status: 'delivered'
         })
 
-        return sendResponse(res, { message: 'PIN purchased successfully', data: { pin: result.data.pin } })
+        return sendResponse(res, { message: 'PIN purchased successfully', data: { pin: result.data.token } })
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: err.message || 'Server error', error: err })
     }
