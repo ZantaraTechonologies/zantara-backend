@@ -19,11 +19,13 @@ async function logTransaction({
     service,
     amount,
     status = 'success',
-    response = {}
+    response = {},
+    transactionId
 }) {
     try {
         await Transaction.create({
             userId,
+            transactionId: transactionId || refId || `TXN-${Date.now()}`,
             refId,
             type,
             service,
