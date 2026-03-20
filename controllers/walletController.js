@@ -74,6 +74,12 @@ const redeemEarnings = async (req, res) => {
             return res.status(400).json({ message: 'Transaction PIN not set' });
         }
 
+        if (!pin) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({ message: 'Transaction PIN is required' });
+        }
+
         const pinMatch = await bcrypt.compare(pin, user.transactionPin);
         if (!pinMatch) {
             await session.abortTransaction();
