@@ -176,7 +176,7 @@ const purchaseExamPin = async (req, res) => {
             serviceId: variation_code,
             amount,
             pin,
-            details: { variation_code, quantity, phone, request_id: request_id.requestId, roles: req.user.roles },
+            details: { variation_code, quantity, phone, roles: req.user.roles },
             providerCall: (refId) => providerService.purchaseExamPin({ request_id: refId, variation_code, amount, quantity, phone })
         })
 

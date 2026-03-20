@@ -72,7 +72,8 @@ class VTPassAdapter extends BaseAdapter {
 
     async purchaseAirtime({ request_id, serviceID, phone, amount }) {
         try {
-            const raw = await this._pay({ request_id, serviceID, amount, phone });
+            const finalServiceID = (serviceID || '').toLowerCase();
+            const raw = await this._pay({ request_id, serviceID: finalServiceID, amount, phone });
             return this.mapResponse(raw);
         } catch (err) {
             return this._errorResponse(err);
@@ -81,7 +82,9 @@ class VTPassAdapter extends BaseAdapter {
 
     async purchaseData({ request_id, serviceID, billersCode, variation_code, phone, amount }) {
         try {
-            const raw = await this._pay({ request_id, serviceID, billersCode, variation_code, phone, amount });
+            const finalServiceID = (serviceID || '').toLowerCase();
+            const finalVarCode = (variation_code || '').toLowerCase();
+            const raw = await this._pay({ request_id, serviceID: finalServiceID, billersCode, variation_code: finalVarCode, phone, amount });
             return this.mapResponse(raw);
         } catch (err) {
             return this._errorResponse(err);
@@ -90,7 +93,9 @@ class VTPassAdapter extends BaseAdapter {
 
     async purchaseElectricity({ request_id, serviceID, billersCode, variation_code, amount, phone }) {
         try {
-            const raw = await this._pay({ request_id, serviceID, billersCode, variation_code, amount, phone });
+            const finalServiceID = (serviceID || '').toLowerCase();
+            const finalVarCode = (variation_code || '').toLowerCase();
+            const raw = await this._pay({ request_id, serviceID: finalServiceID, billersCode, variation_code: finalVarCode, amount, phone });
             return this.mapResponse(raw);
         } catch (err) {
             return this._errorResponse(err);
@@ -99,7 +104,9 @@ class VTPassAdapter extends BaseAdapter {
 
     async purchaseCable({ request_id, serviceID, billersCode, variation_code, amount, phone, quantity }) {
         try {
-            const raw = await this._pay({ request_id, serviceID, billersCode, variation_code, amount, phone, quantity });
+            const finalServiceID = (serviceID || '').toLowerCase();
+            const finalVarCode = (variation_code || '').toLowerCase();
+            const raw = await this._pay({ request_id, serviceID: finalServiceID, billersCode, variation_code: finalVarCode, amount, phone, quantity });
             return this.mapResponse(raw);
         } catch (err) {
             return this._errorResponse(err);
@@ -108,7 +115,19 @@ class VTPassAdapter extends BaseAdapter {
 
     async purchaseExamPin({ request_id, serviceID, variation_code, amount, quantity, phone }) {
         try {
-            const raw = await this._pay({ request_id, serviceID, variation_code, amount, quantity, phone });
+            // VTPass Exam Pin: if serviceID is missing, extract it (e.g. 'waec' from 'waec-registration')
+            let finalServiceID = serviceID || (variation_code ? variation_code.split('-')[0] : '');
+            finalServiceID = finalServiceID.toLowerCase();
+            const finalVarCode = (variation_code || '').toLowerCase();
+
+            const raw = await this._pay({ 
+                request_id, 
+                serviceID: finalServiceID, 
+                variation_code: finalVarCode, 
+                amount, 
+                quantity, 
+                phone 
+            });
             return this.mapResponse(raw);
         } catch (err) {
             return this._errorResponse(err);
