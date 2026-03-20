@@ -10,7 +10,8 @@ const {
     resetPassword,
     logout,
     sendOTP,
-    verifyOTP
+    verifyOTP,
+    getReferralStats
 } = require('../controllers/authController')
 const { setPin, changePin } = require('../controllers/pinController')
 const { verifyJWT } = require('../middlewares/auth')
