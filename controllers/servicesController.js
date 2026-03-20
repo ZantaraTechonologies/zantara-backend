@@ -20,11 +20,11 @@ const purchaseAirtime = async (req, res) => {
     try {
         const result = await purchaseService.processPurchase(userId, {
             type: 'airtime',
-            serviceId: network,
+            serviceId: finalNetwork,
             amount,
             pin,
-            details: { phone, network, request_id: request_id.requestId, roles: req.user.roles },
-            providerCall: (refId) => providerService.purchaseAirtime({ request_id: refId, serviceID: network, phone, amount })
+            details: { phone: finalPhone, network: finalNetwork, roles: req.user.roles },
+            providerCall: (refId) => providerService.purchaseAirtime({ request_id: refId, serviceID: finalNetwork, phone: finalPhone, amount })
         })
 
         if (!result.success) {
@@ -62,11 +62,11 @@ const purchaseData = async (req, res) => {
     try {
         const result = await purchaseService.processPurchase(userId, {
             type: 'data',
-            serviceId: serviceID,
+            serviceId: finalServiceID,
             amount,
             pin,
-            details: { phone, serviceID, variation_code, request_id: request_id.requestId, roles: req.user.roles },
-            providerCall: (refId) => providerService.purchaseData({ request_id: refId, serviceID, billersCode, variation_code, phone })
+            details: { phone: finalPhone, serviceID: finalServiceID, variation_code, roles: req.user.roles },
+            providerCall: (refId) => providerService.purchaseData({ request_id: refId, serviceID: finalServiceID, billersCode: finalBillersCode, variation_code, phone: finalPhone, amount })
         })
 
         if (!result.success) {
@@ -115,11 +115,11 @@ const payElectricityBill = async (req, res) => {
     try {
         const result = await purchaseService.processPurchase(userId, {
             type: 'electricity',
-            serviceId: serviceID,
+            serviceId: finalServiceID,
             amount,
             pin,
-            details: { meter_number, meter_type, phone, request_id: request_id.requestId, roles: req.user.roles },
-            providerCall: (refId) => providerService.purchaseElectricity({ request_id: refId, serviceID, billersCode: meter_number, variation_code: meter_type, amount, phone })
+            details: { meter_number: finalMeterNumber, meter_type: finalMeterType, phone: finalPhone, roles: req.user.roles },
+            providerCall: (refId) => providerService.purchaseElectricity({ request_id: refId, serviceID: finalServiceID, billersCode: finalMeterNumber, variation_code: finalMeterType, amount, phone: finalPhone })
         })
 
         if (!result.success) {
@@ -146,11 +146,11 @@ const rechargeCable = async (req, res) => {
     try {
         const result = await purchaseService.processPurchase(userId, {
             type: 'cable',
-            serviceId: serviceID,
+            serviceId: finalServiceID,
             amount,
             pin,
-            details: { serviceID, billersCode, variation_code, request_id: request_id.requestId, roles: req.user.roles },
-            providerCall: (refId) => providerService.purchaseCable({ request_id: refId, serviceID, billersCode, variation_code, amount })
+            details: { serviceID: finalServiceID, billersCode: finalBillersCode, variation_code, roles: req.user.roles },
+            providerCall: (refId) => providerService.purchaseCable({ request_id: refId, serviceID: finalServiceID, billersCode: finalBillersCode, variation_code, amount, phone: finalPhone })
         })
 
         if (!result.success) {

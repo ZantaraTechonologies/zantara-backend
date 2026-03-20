@@ -5,7 +5,7 @@ const walletService = require('./wallet.service');
 const refundService = require('./refund.service');
 const providerService = require('./provider.service');
 const pinService = require('./pin.service');
-const { generateTransactionId, generateReference } = require('../utils/generateID');
+const { generateTransactionId, generateReference, generateVTPassRequestId } = require('../utils/generateID');
 const { processReferralBonus } = require('../utils/referral');
 const { calculateServicePrice, getProviderCost } = require('../utils/pricing');
 const notificationService = require('./notification.service');
@@ -37,7 +37,8 @@ class PurchaseService {
 
             // 1. Create PENDING Transaction Record
             const transactionId = generateTransactionId();
-            const reference = details.request_id || generateReference();
+            // VTPass REQUIRES YYYYMMDDHHII format for request_id
+            const reference = details.request_id || generateVTPassRequestId();
             
             // Calculate business metrics
             const costPrice = await getProviderCost(serviceId, amount);

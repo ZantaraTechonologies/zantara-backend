@@ -22,14 +22,19 @@ const generateReference = () => {
     return `ZNT-${digits}-${letters}`;
 };
 
-// Legacy support (to avoid breaking current code immediately)
-const lagosTime = DateTime.now().setZone('Africa/Lagos');
-const timestamp_old = lagosTime.toFormat('yyyyLLddHHmm');
-const randomSuffix = crypto.randomBytes(6).toString('hex');
-const oldRequestId = timestamp_old + randomSuffix;
+const lagosTime = () => DateTime.now().setZone('Africa/Lagos');
+
+const generateVTPassRequestId = () => {
+    const timeStr = lagosTime().toFormat('yyyyLLddHHmm');
+    const random = crypto.randomBytes(4).toString('hex');
+    return `${timeStr}${random}`;
+};
 
 module.exports = {
     generateTransactionId,
     generateReference,
-    requestId: oldRequestId // Keep for compatibility during transition
+    generateVTPassRequestId,
+    get requestId() {
+        return generateVTPassRequestId();
+    }
 };
