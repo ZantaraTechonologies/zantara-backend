@@ -13,14 +13,20 @@ const BaseAdapter = require('./base.adapter');
 class VTPassAdapter extends BaseAdapter {
     constructor() {
         super();
-        this.baseUrl = process.env.VTU_API_URI || 'https://sandbox.vtpass.com/api';
-        this.apiKey = process.env.VTPASS_API_KEY;
-        this.secretKey = process.env.VTPASS_SECRET_KEY;
-        this.publicKey = process.env.VTPASS_PUBLIC_KEY;
     }
+
+    // ── Lazy getters so keys are always read from process.env at request time ──
+    get baseUrl() { return process.env.VTU_API_URI || 'https://sandbox.vtpass.com/api'; }
+    get apiKey()   { return process.env.VTPASS_API_KEY; }
+    get secretKey(){ return process.env.VTPASS_SECRET_KEY; }
+    get publicKey(){ return process.env.VTPASS_PUBLIC_KEY; }
 
     /** Build VTPass-required request headers */
     _authHeaders() {
+        console.log('[VTPass] Using baseUrl:', this.baseUrl);
+        console.log('[VTPass] api-key present:', !!this.apiKey);
+        console.log('[VTPass] secret-key present:', !!this.secretKey);
+        console.log('[VTPass] public-key present:', !!this.publicKey);
         return {
             'api-key': this.apiKey,
             'secret-key': this.secretKey,
