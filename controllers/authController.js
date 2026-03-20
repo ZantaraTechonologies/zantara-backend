@@ -274,7 +274,33 @@ const verifyOTP = async (req, res) => {
         res.status(500).json({ message: 'Error verifying OTP', error: error.message });
     }
 };
-
+ 
+const getReferralStats = async (req, res) => {
+    try {
+        const user = await User.findById(req.user.id);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+ 
+        // 1. Get referred users (limit to 20 for now)
+        const referrals = await User.find({ referrerCode: user.myReferralCode })
+            .select('name phone createdAt')
+            .sort({ createdAt: -1 })
+            .limit(20);
+ 
+        // 2. Get total count
+        const totalReferrals = await User.countDocuments({ referrerCode: user.myReferralCode });
+ 
+        res.json({
+            success: true,
+            totalReferrals,
+            referrals,
+            referralBalance: user.referralBalance || 0,
+            totalReferralBonus: user.totalReferralBonus || 0
+        });
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching referral stats', error: error.message });
+    }
+};
+ 
 module.exports = {
     register,
     login,
@@ -285,5 +311,6 @@ module.exports = {
     verifyEmail,
     logout,
     sendOTP,
-    verifyOTP
+    verifyOTP,
+    getReferralStats
 }

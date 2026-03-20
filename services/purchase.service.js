@@ -29,7 +29,7 @@ class PurchaseService {
 
             // 0.5 Check KYC Limits (Example: Tier 1=2k, Tier 2=50k, Tier 3=Unlimited)
             const user = await User.findById(userId);
-            const kycLimits = { 1: 2000, 2: 50000, 3: 10000000 };
+            const kycLimits = { 1: 10000, 2: 100000, 3: 10000000 };
             const userLimit = kycLimits[user.kycLevel || 1];
             if (finalAmount > userLimit) {
                 throw new Error(`Transaction amount exceeds your Tier ${user.kycLevel || 1} limit of ${userLimit}. Please upgrade your KYC.`);

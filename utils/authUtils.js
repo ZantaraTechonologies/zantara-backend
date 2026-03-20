@@ -44,8 +44,12 @@ const sendToken = (user, res, status = 200) => {
         token,
         user: { 
             id: String(user._id), 
+            name: user.name,
             email: user.email, 
-            roles 
+            phone: user.phone,
+            roles,
+            isPhoneVerified: user.isPhoneVerified,
+            isPinSet: user.isPinSet
         } 
     });
 };

@@ -32,5 +32,6 @@ router.post('/change-pin', verifyJWT, pinLimiter, changePin)
 
 router.post('/send-otp', verifyJWT, sendOTP)
 router.post('/verify-otp', verifyJWT, verifyOTP)
+router.get('/referrals', verifyJWT, getReferralStats)
 
 module.exports = router;

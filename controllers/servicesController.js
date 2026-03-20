@@ -23,7 +23,7 @@ const purchaseAirtime = async (req, res) => {
             serviceId: network,
             amount,
             pin,
-            details: { phone, network, request_id, roles: req.user.roles },
+            details: { phone, network, request_id: request_id.requestId, roles: req.user.roles },
             providerCall: (refId) => providerService.purchaseAirtime({ request_id: refId, serviceID: network, phone, amount })
         })
 
@@ -65,7 +65,7 @@ const purchaseData = async (req, res) => {
             serviceId: serviceID,
             amount,
             pin,
-            details: { phone, serviceID, variation_code, request_id, roles: req.user.roles },
+            details: { phone, serviceID, variation_code, request_id: request_id.requestId, roles: req.user.roles },
             providerCall: (refId) => providerService.purchaseData({ request_id: refId, serviceID, billersCode, variation_code, phone })
         })
 
@@ -118,7 +118,7 @@ const payElectricityBill = async (req, res) => {
             serviceId: serviceID,
             amount,
             pin,
-            details: { meter_number, meter_type, phone, request_id, roles: req.user.roles },
+            details: { meter_number, meter_type, phone, request_id: request_id.requestId, roles: req.user.roles },
             providerCall: (refId) => providerService.purchaseElectricity({ request_id: refId, serviceID, billersCode: meter_number, variation_code: meter_type, amount, phone })
         })
 
@@ -149,7 +149,7 @@ const rechargeCable = async (req, res) => {
             serviceId: serviceID,
             amount,
             pin,
-            details: { serviceID, billersCode, variation_code, request_id, roles: req.user.roles },
+            details: { serviceID, billersCode, variation_code, request_id: request_id.requestId, roles: req.user.roles },
             providerCall: (refId) => providerService.purchaseCable({ request_id: refId, serviceID, billersCode, variation_code, amount })
         })
 
@@ -176,7 +176,7 @@ const purchaseExamPin = async (req, res) => {
             serviceId: variation_code,
             amount,
             pin,
-            details: { variation_code, quantity, phone, request_id, roles: req.user.roles },
+            details: { variation_code, quantity, phone, request_id: request_id.requestId, roles: req.user.roles },
             providerCall: (refId) => providerService.purchaseExamPin({ request_id: refId, variation_code, amount, quantity, phone })
         })
 
