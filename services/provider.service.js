@@ -1,9 +1,8 @@
-const vas2netsAdapter = require('../adapters/vas2nets.adapter');
+const vtpassAdapter = require('../adapters/vtpass.adapter');
 
 class ProviderService {
     constructor() {
-        // In a more complex setup, this could be dynamic based on settings or failover logic
-        this.primaryAdapter = vas2netsAdapter;
+        this.primaryAdapter = vtpassAdapter;
     }
 
     async purchaseAirtime(data) {
