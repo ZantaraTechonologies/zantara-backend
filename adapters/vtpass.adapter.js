@@ -154,9 +154,13 @@ class VTPassAdapter extends BaseAdapter {
     }
 
     _errorResponse(err) {
-        const message = err?.response?.data?.response_description || err?.message || 'VTPass request failed';
-        console.error('[VTPass] Error:', message);
-        return { success: false, status: 'failed', message, raw: err?.response?.data || {} };
+        const status = err?.response?.status;
+        const body = err?.response?.data;
+        const message = body?.response_description || body?.message || err?.message || 'VTPass request failed';
+        console.error('[VTPass] Error status:', status);
+        console.error('[VTPass] Error body:', JSON.stringify(body));
+        console.error('[VTPass] Error message:', message);
+        return { success: false, status: 'failed', message, raw: body || {} };
     }
 }
 
