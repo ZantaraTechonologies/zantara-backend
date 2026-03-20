@@ -19,14 +19,12 @@ class VTPassAdapter extends BaseAdapter {
         this.publicKey = process.env.VTPASS_PUBLIC_KEY;
     }
 
-    /** Build Basic Auth header from API Key + Secret Key */
+    /** Build VTPass-required request headers */
     _authHeaders() {
-        const token = Buffer.from(`${this.apiKey}:${this.secretKey}`).toString('base64');
         return {
             'api-key': this.apiKey,
             'secret-key': this.secretKey,
             'public-key': this.publicKey,
-            'Authorization': `Basic ${token}`,
             'Content-Type': 'application/json',
         };
     }
