@@ -44,10 +44,17 @@ const updateUserRole = async (req, res) => {
         const { role, status } = req.body; // status for block/unblock
 
         const update = {};
-        if (role) update.role = role;
+        if (role) {
+            const ALLOWED_ROLES = ['user', 'agent', 'admin', 'superAdmin'];
+            if (!ALLOWED_ROLES.includes(role)) {
+                return res.status(400).json({ message: 'Invalid role' });
+            }
+            update.role = role;
+        }
         if (status !== undefined) update.status = status;
 
-        const user = await require('../models/User').findByIdAndUpdate(id, update, { new: true });
+        const User = require('../models/User');
+        const user = await User.findByIdAndUpdate(id, update, { new: true });
         res.json({ success: true, data: user });
     } catch (e) {
         res.status(500).json({ message: e.message });
@@ -137,6 +144,126 @@ const updateUserCommissionRate = async (req, res) => {
     }
 };
 
+// --- Agent Settings (Step 3) ---
+
+const getAgentSettings = async (req, res) => {
+    try {
+        const Setting = require('../models/Setting');
+        const setting = await Setting.findOne({ key: 'defaultAgentDiscountRate' });
+        res.json({ success: true, defaultAgentDiscountRate: setting ? setting.value : 0 });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+};
+
+const updateAgentSettings = async (req, res) => {
+    try {
+        const { defaultAgentDiscountRate } = req.body;
+        const rate = Number(defaultAgentDiscountRate);
+
+        if (isNaN(rate) || rate < 0 || rate > 0.5) {
+            return res.status(400).json({ message: 'Invalid rate. Must be between 0 and 0.5 (0% - 50%)' });
+        }
+
+        const Setting = require('../models/Setting');
+        await Setting.findOneAndUpdate(
+            { key: 'defaultAgentDiscountRate' },
+            { key: 'defaultAgentDiscountRate', value: rate },
+            { upsert: true, new: true }
+        );
+        res.json({ success: true, message: 'Global agent discount rate updated successfully', defaultAgentDiscountRate: rate });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+};
+
+const updateUserAgentDiscount = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { agentDiscountRate } = req.body;
+
+        // Validation
+        if (agentDiscountRate !== null && agentDiscountRate !== undefined) {
+            const rate = Number(agentDiscountRate);
+            if (isNaN(rate) || rate < 0 || rate > 0.5) {
+                return res.status(400).json({ message: 'Invalid rate. Must be between 0 and 0.5 (0% - 50%)' });
+            }
+        }
+
+        const User = require('../models/User');
+        const user = await User.findByIdAndUpdate(id, { agentDiscountRate }, { new: true });
+        
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        res.json({ success: true, message: 'User agent discount override updated successfully', agentDiscountRate: user.agentDiscountRate });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+};
+
+// --- Commission Profit-Share Caps (Step 5) ---
+const getCommissionCaps = async (req, res) => {
+    try {
+        const Setting = require('../models/Setting');
+        const [standardCap, agentCap] = await Promise.all([
+            Setting.findOne({ key: 'maxReferralProfitShare' }),
+            Setting.findOne({ key: 'maxAgentReferralShare' })
+        ]);
+
+        res.json({
+            success: true,
+            maxReferralProfitShare: standardCap ? Number(standardCap.value) : 0.9,
+            maxAgentReferralShare: agentCap ? Number(agentCap.value) : 0.5
+        });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+};
+
+const updateCommissionCaps = async (req, res) => {
+    try {
+        const { maxReferralProfitShare, maxAgentReferralShare } = req.body;
+        const sCap = Number(maxReferralProfitShare);
+        const aCap = Number(maxAgentReferralShare);
+
+        // Validation for Standard User Cap
+        if (maxReferralProfitShare !== undefined) {
+            if (isNaN(sCap) || sCap < 0 || sCap > 1) {
+                return res.status(400).json({ message: 'Invalid maxReferralProfitShare. Must be between 0 and 1.' });
+            }
+        }
+
+        // Validation for Agent Cap
+        if (maxAgentReferralShare !== undefined) {
+            if (isNaN(aCap) || aCap < 0 || aCap > 1) {
+                return res.status(400).json({ message: 'Invalid maxAgentReferralShare. Must be between 0 and 1.' });
+            }
+        }
+
+        const Setting = require('../models/Setting');
+        const updatePromises = [];
+        if (maxReferralProfitShare !== undefined) {
+            updatePromises.push(Setting.findOneAndUpdate(
+                { key: 'maxReferralProfitShare' },
+                { key: 'maxReferralProfitShare', value: sCap },
+                { upsert: true, new: true }
+            ));
+        }
+        if (maxAgentReferralShare !== undefined) {
+            updatePromises.push(Setting.findOneAndUpdate(
+                { key: 'maxAgentReferralShare' },
+                { key: 'maxAgentReferralShare', value: aCap },
+                { upsert: true, new: true }
+            ));
+        }
+
+        await Promise.all(updatePromises);
+        res.json({ success: true, message: 'Commission profit-share caps updated successfully' });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+};
+
 module.exports = {
     getFilteredTransactions,
     getAllUsers,
@@ -145,5 +272,10 @@ module.exports = {
     updateSetting,
     getCommissionSettings,
     updateCommissionSettings,
-    updateUserCommissionRate
+    updateUserCommissionRate,
+    getAgentSettings,
+    updateAgentSettings,
+    updateUserAgentDiscount,
+    getCommissionCaps,
+    updateCommissionCaps
 }

@@ -2,24 +2,33 @@ const Setting = require('../models/Setting');
 
 /**
  * Calculate the final price for a service variation
- * @param {string[]} roles - User roles array (e.g. ['user', 'reseller'])
- * @param {number} baseAmount - The base price or amount of the service
+ * @param {Object} user - Full User object
+ * @param {number} baseAmount - Standard selling price
  * @returns {number} - The discounted price for agents, or base price for users
  */
-const calculateServicePrice = async (roles, baseAmount) => {
-    // Check if user has 'reseller' or 'agent' role
-    const isAgent = Array.isArray(roles) && (roles.includes('reseller') || roles.includes('agent'));
+const calculateServicePrice = async (user, baseAmount) => {
+    if (!user) return baseAmount;
+
+    // Check if user is an agent
+    const isAgent = user.role === 'agent' || (Array.isArray(user.roles) && user.roles.includes('agent'));
 
     if (!isAgent) return baseAmount;
 
-    // Fetch Agent Discount Percentage
-    const discountSetting = await Setting.findOne({ key: 'agent_discount_percentage' });
-    const discount = discountSetting ? Number(discountSetting.value) : 1; // Default 1% for resellers if not set
+    // Fetch Global Agent Discount Setting
+    const discountSetting = await Setting.findOne({ key: 'defaultAgentDiscountRate' });
+    const globalRate = discountSetting ? Number(discountSetting.value) : 0;
 
-    if (discount <= 0) return baseAmount;
+    // Resolve Final Discount Rate
+    // Logic: User Override > Global Default > 0% Fallback
+    const rate = (user.agentDiscountRate !== undefined && user.agentDiscountRate !== null)
+        ? user.agentDiscountRate
+        : globalRate;
 
-    const discountAmount = (discount / 100) * baseAmount;
-    return baseAmount - discountAmount;
+    if (rate <= 0) return baseAmount;
+
+    // Apply discount
+    const discountedPrice = baseAmount * (1 - rate);
+    return Math.round(discountedPrice * 100) / 100; // Round to 2 decimal places
 };
 
 /**

@@ -37,7 +37,12 @@ const register = async (req, res) => {
         if (referrerCode) {
             const referrer = await User.findOne({ myReferralCode: referrerCode.trim() });
             if (referrer) {
-                referredBy = referrer._id;
+                // Prevent self-referral (Check if referrer belongs to this registration phone/email)
+                if (referrer.phone === phone.trim() || (email && referrer.email === email.trim().toLowerCase())) {
+                    console.log(`Self-referral attempt blocked for ${phone}`);
+                } else {
+                    referredBy = referrer._id;
+                }
             }
         }
 

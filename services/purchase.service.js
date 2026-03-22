@@ -20,15 +20,16 @@ class PurchaseService {
             // 0. Verify Transaction PIN first
             await pinService.verifyPin(userId, pin);
 
-            const wallet = await Wallet.findOne({ userId });
-            const finalAmount = await calculateServicePrice(details.roles || [], amount);
+            const user = await User.findById(userId);
+            const standardPrice = amount; // What normal users pay
+            const finalAmount = await calculateServicePrice(user, standardPrice);
 
+            const wallet = await Wallet.findOne({ userId });
             if (!wallet || wallet.balance < finalAmount) {
                 throw new Error('Insufficient wallet balance');
             }
 
             // 0.5 Check KYC Limits (Example: Tier 1=2k, Tier 2=50k, Tier 3=Unlimited)
-            const user = await User.findById(userId);
             const kycLimits = { 1: 10000, 2: 100000, 3: 10000000 };
             const userLimit = kycLimits[user.kycLevel || 1];
             if (finalAmount > userLimit) {
@@ -44,6 +45,11 @@ class PurchaseService {
             const costPrice = await getProviderCost(serviceId, amount);
             const profit = finalAmount - costPrice;
 
+            // --- HARDENING: Profit Safety Check (Step 3) ---
+            if (profit <= 0) {
+                throw new Error(`Transaction aborted: Unsafe pricing (Potential Loss of ${costPrice - finalAmount} NGN). Please contact support to adjust agent discount settings.`);
+            }
+
             transaction = await Transaction.create({
                 userId,
                 transactionId,
@@ -52,8 +58,10 @@ class PurchaseService {
                 service: serviceId,
                 amount: finalAmount,
                 costPrice,
-                salePrice: finalAmount,
+                salePrice: standardPrice,
+                agentPrice: finalAmount, // What the agent/reseller paid
                 profit,
+                userRole: user.role,
                 provider: 'VTPass', // Default primary provider for now
                 status: 'pending',
                 details: { ...details, originalAmount: amount, request_id: reference }
@@ -71,22 +79,33 @@ class PurchaseService {
                 return { success: false, message: response.message, error: response };
             }
 
-            // 5. Finalize transaction on success
-            transaction.status = 'success';
-            transaction.response = response.raw;
-            await transaction.save();
+            // 5. Finalize transaction on success with atomicity
+            const session = await mongoose.startSession();
+            session.startTransaction();
+            try {
+                transaction.status = 'success';
+                transaction.response = response.raw;
+                await transaction.save({ session });
 
-            // Notify user of success
+                // 6. Referral Bonus (Lifetime Commission)
+                const { processLifetimeCommission } = require('../utils/referral');
+                await processLifetimeCommission(userId, finalAmount, transaction._id, transaction.transactionId, session);
+
+                await session.commitTransaction();
+            } catch (error) {
+                await session.abortTransaction();
+                throw error;
+            } finally {
+                session.endSession();
+            }
+
+            // Notify user of success (outside of session for performance)
             await notificationService.sendInApp(userId, {
                 title: `${type.toUpperCase()} Purchase Successful`,
                 message: `Your purchase of ${serviceId} for ${finalAmount} was successful.`,
                 type: 'transaction',
                 metadata: { transactionId: transaction._id }
             });
-
-            // 6. Referral Bonus (Lifetime Commission)
-            const { processLifetimeCommission } = require('../utils/referral');
-            processLifetimeCommission(userId, finalAmount, transaction._id, transaction.transactionId);
 
             return { success: true, data: response, transactionId: transaction._id };
 

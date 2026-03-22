@@ -16,7 +16,11 @@ const transactionSchema = new mongoose.Schema({
     isLoss: { type: Boolean, default: false },
     details: { type: Object },
     response: { type: Object },
-    commission: { type: Number }
+    commission: { type: Number },
+    agentPrice: { type: Number },
+    userRole: { type: String },
+    netProfitAfterCommission: { type: Number, default: 0 },
+    commissionVersion: { type: String, default: 'v1' }
 }, { timestamps: true })
 
 const transactionModel = mongoose.model('Transaction', transactionSchema)

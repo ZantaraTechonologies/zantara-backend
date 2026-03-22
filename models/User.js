@@ -1,6 +1,7 @@
-const mongoose = require('mongoose')
+const mongoose = require('mongoose');
+const Wallet = require('./Wallet');
 
-const ALLOWED_ROLES = ['user', 'admin', 'superAdmin']; // extend anytime
+const ALLOWED_ROLES = ['user', 'agent', 'admin', 'superAdmin']; // extend anytime
 
 const userSchema = new mongoose.Schema({
     name: String,
@@ -13,13 +14,14 @@ const userSchema = new mongoose.Schema({
         default: ['user'],
         index: true,
     },
-    role: { type: String, enum: ['user', 'admin'], default: 'user' },
+    role: { type: String, enum: ['user', 'agent', 'admin'], default: 'user' },
     accountType: { type: String, enum: ['retail', 'reseller'], default: 'retail' },
     status: { type: Boolean, default: false },
     referrerCode: String,
     referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     myReferralCode: String,
     commissionRate: { type: Number, min: 0, max: 0.1 },
+    agentDiscountRate: { type: Number, min: 0, max: 0.5 },
     totalReferralBonus: { type: Number, default: 0 },
     referralBalance: { type: Number, default: 0 },
     resellerEarnings: { type: Number, default: 0 },

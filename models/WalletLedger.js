@@ -10,6 +10,7 @@ const walletLedgerSchema = new mongoose.Schema({
     amount: { type: Number, required: true },
     balanceBefore: { type: Number, required: true },
     balanceAfter: { type: Number, required: true },
+    commissionVersion: { type: String },
     metadata: { type: Object }
 }, { timestamps: true });
 
