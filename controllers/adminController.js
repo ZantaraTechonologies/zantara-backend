@@ -80,10 +80,70 @@ const updateSetting = async (req, res) => {
     }
 };
 
+// --- Commission Settings (Step 2) ---
+
+const getCommissionSettings = async (req, res) => {
+    try {
+        const Setting = require('../models/Setting');
+        const setting = await Setting.findOne({ key: 'defaultCommissionRate' });
+        res.json({ success: true, defaultCommissionRate: setting ? setting.value : 0.01 });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+};
+
+const updateCommissionSettings = async (req, res) => {
+    try {
+        const { defaultCommissionRate } = req.body;
+        const rate = Number(defaultCommissionRate);
+
+        if (isNaN(rate) || rate < 0 || rate > 0.1) {
+            return res.status(400).json({ message: 'Invalid rate. Must be between 0 and 0.1 (0% - 10%)' });
+        }
+
+        const Setting = require('../models/Setting');
+        await Setting.findOneAndUpdate(
+            { key: 'defaultCommissionRate' },
+            { key: 'defaultCommissionRate', value: rate },
+            { upsert: true, new: true }
+        );
+        res.json({ success: true, message: 'Global commission rate updated successfully', defaultCommissionRate: rate });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+};
+
+const updateUserCommissionRate = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { commissionRate } = req.body;
+
+        // Validation
+        if (commissionRate !== null && commissionRate !== undefined) {
+            const rate = Number(commissionRate);
+            if (isNaN(rate) || rate < 0 || rate > 0.1) {
+                return res.status(400).json({ message: 'Invalid rate. Must be between 0 and 0.1 (0% - 10%)' });
+            }
+        }
+
+        const User = require('../models/User');
+        const user = await User.findByIdAndUpdate(id, { commissionRate }, { new: true });
+        
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        res.json({ success: true, message: 'User commission override updated successfully', commissionRate: user.commissionRate });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+};
+
 module.exports = {
     getFilteredTransactions,
     getAllUsers,
     updateUserRole,
     getSettings,
-    updateSetting
+    updateSetting,
+    getCommissionSettings,
+    updateCommissionSettings,
+    updateUserCommissionRate
 }

@@ -85,11 +85,22 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
 
         if (!referrer) return;
 
-        // 2. Calculate Commission (Fixed 1%)
-        const commissionAmount = amount * 0.01;
+        // 2. Fetch Global Commission Setting (Step 2)
+        const Setting = require('../models/Setting');
+        const globalSetting = await Setting.findOne({ key: 'defaultCommissionRate' });
+        const globalRate = globalSetting ? Number(globalSetting.value) : 0.01;
+
+        // 3. Resolve Final Commission Rate
+        // Logic: User Override > Global Default > 1% Fallback
+        const rate = (referrer.commissionRate !== undefined && referrer.commissionRate !== null) 
+            ? referrer.commissionRate 
+            : globalRate;
+
+        // 4. Calculate Commission
+        const commissionAmount = amount * rate;
         if (commissionAmount <= 0) return;
 
-        // 3. Idempotency Check: Don't credit twice for the same transaction
+        // 5. Idempotency Check: Don't credit twice for the same transaction
         const Transaction = require('../models/Transaction');
         const commId = `COMM-${parentTransactionStringId}`;
         const existing = await Transaction.findOne({ 
