@@ -17,6 +17,7 @@ const userSchema = new mongoose.Schema({
     accountType: { type: String, enum: ['retail', 'reseller'], default: 'retail' },
     status: { type: Boolean, default: false },
     referrerCode: String,
+    referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     myReferralCode: String,
     totalReferralBonus: { type: Number, default: 0 },
     referralBalance: { type: Number, default: 0 },

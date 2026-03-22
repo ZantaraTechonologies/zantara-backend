@@ -33,13 +33,20 @@ const register = async (req, res) => {
         const myReferralCode = await generateUniqueReferralCode()
         const hashed = await bcrypt.hash(password, 12)
 
-        const roles = role ? [role] : ['user'];
+        let referredBy = undefined;
+        if (referrerCode) {
+            const referrer = await User.findOne({ myReferralCode: referrerCode.trim() });
+            if (referrer) {
+                referredBy = referrer._id;
+            }
+        }
 
         const userData = {
             name,
             phone: phone.trim(),
             password: hashed,
             referrerCode: referrerCode ? referrerCode.trim() : undefined,
+            referredBy,
             myReferralCode,
             roles
         };

@@ -84,8 +84,9 @@ class PurchaseService {
                 metadata: { transactionId: transaction._id }
             });
 
-            // 6. Referral Bonus
-            processReferralBonus(userId, referralAmount || amount, transaction.refId);
+            // 6. Referral Bonus (Lifetime Commission)
+            const { processLifetimeCommission } = require('../utils/referral');
+            processLifetimeCommission(userId, finalAmount, transaction._id, transaction.transactionId);
 
             return { success: true, data: response, transactionId: transaction._id };
 

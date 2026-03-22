@@ -64,4 +64,77 @@ const processReferralBonus = async (userId, purchaseAmount, transactionRef) => {
     }
 };
 
-module.exports = { processReferralBonus };
+/**
+ * Process lifetime commission for a transaction
+ * @param {string} userId - ID of the user who made the purchase
+ * @param {number} amount - Amount of the purchase
+ * @param {ObjectId} parentTransactionObjectId - MongoDB _id of parent transaction
+ * @param {string} parentTransactionStringId - Human-readable ID of parent (for idempotency)
+ */
+const processLifetimeCommission = async (userId, amount, parentTransactionObjectId, parentTransactionStringId) => {
+    try {
+        // 1. Get User and verify referrer
+        const user = await User.findById(userId).populate('referredBy');
+        if (!user || (!user.referredBy && !user.referrerCode)) return;
+
+        // Use referredBy (ObjectId) as primary, fallback to referrerCode (String)
+        let referrer = user.referredBy;
+        if (!referrer && user.referrerCode) {
+            referrer = await User.findOne({ myReferralCode: user.referrerCode });
+        }
+
+        if (!referrer) return;
+
+        // 2. Calculate Commission (Fixed 1%)
+        const commissionAmount = amount * 0.01;
+        if (commissionAmount <= 0) return;
+
+        // 3. Idempotency Check: Don't credit twice for the same transaction
+        const Transaction = require('../models/Transaction');
+        const commId = `COMM-${parentTransactionStringId}`;
+        const existing = await Transaction.findOne({ 
+            userId: referrer._id, 
+            type: 'referral_bonus', 
+            transactionId: commId 
+        });
+        if (existing) return;
+
+        // 4. Credit Referrer Wallet
+        await walletService.credit(
+            referrer._id, 
+            commissionAmount, 
+            `COMM-${parentTransactionStringId}`, 
+            'REFERRAL_COMMISSION', 
+            parentTransactionObjectId
+        );
+
+        // 5. Update Referrer Stats (for the Referral Screen display)
+        referrer.totalReferralBonus = (referrer.totalReferralBonus || 0) + commissionAmount;
+        referrer.referralBalance = (referrer.referralBalance || 0) + commissionAmount;
+        await referrer.save();
+
+        // 6. Log as Transaction for Visibility in History
+        await Transaction.create({
+            userId: referrer._id,
+            transactionId: commId,
+            refId: parentTransactionStringId,
+            type: 'referral_bonus',
+            service: 'Commission',
+            amount: commissionAmount,
+            status: 'success',
+            details: {
+                fromUser: user.phone || user.email,
+                fromUserId: user._id,
+                triggerTransaction: parentTransactionStringId,
+                note: 'Lifetime Panel Commission'
+            }
+        });
+
+        console.log(`Lifetime commission of ${commissionAmount} credited to ${referrer.phone || referrer.email}`);
+
+    } catch (error) {
+        console.error('Error processing lifetime commission:', error);
+    }
+};
+
+module.exports = { processReferralBonus, processLifetimeCommission };
