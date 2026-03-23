@@ -1,3 +1,4 @@
+const mongoose = require('mongoose')
 const Transaction = require('../models/Transaction')
 const User = require('../models/User')
 
@@ -81,11 +82,9 @@ const dailyUserRegistrations = async (req, res) => {
 const getUserEarningsSummary = async (req, res) => {
     try {
         const userId = req.user.id;
-        const mongoose = require('mongoose');
-        const Transaction = require('../models/Transaction');
         const WalletLedger = require('../models/WalletLedger');
 
-        const [referralStats, agentStats, cappedCount, skippedCount] = await Promise.all([
+        const [referralStats, agentStats, cappedCount, skippedCount, totalReferrals, userDoc] = await Promise.all([
             // 1. Referral Commissions
             Transaction.aggregate([
                 { $match: { userId: new mongoose.Types.ObjectId(userId), type: 'referral_bonus', status: 'success' } },
@@ -99,7 +98,11 @@ const getUserEarningsSummary = async (req, res) => {
             // 3. Capped Commissions Count
             Transaction.countDocuments({ userId, type: 'referral_bonus', "details.wasCapped": true }),
             // 4. Skipped Commissions Count
-            WalletLedger.countDocuments({ userId, source: 'REFERRAL_SKIPPED' })
+            WalletLedger.countDocuments({ userId, source: 'REFERRAL_SKIPPED' }),
+            // 5. Total Referrals Count
+            User.countDocuments({ referredBy: userId }),
+            // 6. User Doc for referralBalance
+            User.findById(userId).select('referralBalance')
         ]);
 
         const referralEarnings = referralStats.length > 0 ? referralStats[0].total : 0;
@@ -111,6 +114,8 @@ const getUserEarningsSummary = async (req, res) => {
                 referralEarnings,
                 agentProfit,
                 totalEarnings: referralEarnings + agentProfit,
+                totalReferrals,
+                referralBalance: userDoc ? userDoc.referralBalance : 0,
                 cappedCommissionsCount: cappedCount,
                 skippedCommissionsCount: skippedCount
             }
@@ -127,8 +132,6 @@ const getUserEarningsHistory = async (req, res) => {
         const { page = 1, limit = 20 } = req.query;
         const skip = (page - 1) * limit;
 
-        const Transaction = require('../models/Transaction');
-        
         // Find all records that contribute to earnings: 
         // referral_bonus OR successful professional agent purchases (where userRole='agent')
         const history = await Transaction.find({
