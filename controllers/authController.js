@@ -53,7 +53,8 @@ const register = async (req, res) => {
             referrerCode: referrerCode ? referrerCode.trim() : undefined,
             referredBy,
             myReferralCode,
-            roles
+            role: role || 'user',
+            roles: [role || 'user']
         };
 
         if (email && email.trim()) {
