@@ -76,7 +76,7 @@ const dailyUserRegistrations = async (req, res) => {
         res.status(500).json({ error: 'Analytics failed' })
     }
 }
- 
+
 // --- User Earnings (Step 6) ---
 
 const getUserEarningsSummary = async (req, res) => {
@@ -134,32 +134,33 @@ const getUserEarningsHistory = async (req, res) => {
 
         const WalletLedger = require('../models/WalletLedger');
 
-        // 1. Fetch relevant Transactions (Bonuses & Agent Profits)
+        // 1. Fetch relevant Transactions (Bonuses, Agent Profits, & Redemptions)
         const historyTxs = await Transaction.find({
             userId,
             status: 'success',
             $or: [
                 { type: 'referral_bonus' },
+                { type: 'referral_redeem' },
                 { userRole: 'agent' }
             ]
         })
-        .sort({ createdAt: -1 })
-        .limit(200); // Fetch a reasonable chunk for merging
+            .sort({ createdAt: -1 })
+            .limit(200); // Fetch a reasonable chunk for merging
 
         // 2. Fetch relevant WalletLedger (Skipped Commissions)
         const skippedLogs = await WalletLedger.find({
             userId,
             source: 'REFERRAL_SKIPPED'
         })
-        .sort({ createdAt: -1 })
-        .limit(200);
+            .sort({ createdAt: -1 })
+            .limit(200);
 
         // 3. Format and Merge
         const formattedHistory = [
             ...historyTxs.map(t => ({
                 id: t._id,
-                type: t.type === 'referral_bonus' ? 'referral_bonus' : 'agent_profit',
-                amount: t.type === 'referral_bonus' ? (t.amount || 0) : (t.profit || 0),
+                type: t.type === 'referral_bonus' ? 'referral_bonus' : t.type === 'referral_redeem' ? 'referral_redeem' : 'agent_profit',
+                amount: t.type === 'referral_bonus' ? (t.amount || 0) : t.type === 'referral_redeem' ? (t.amount || 0) : (t.profit || 0),
                 refId: t.refId || t.transactionId,
                 transactionId: t.transactionId,
                 wasCapped: t.details ? t.details.wasCapped : false,
@@ -183,7 +184,7 @@ const getUserEarningsHistory = async (req, res) => {
 
         // 4. Final Sort and Paginate
         formattedHistory.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-        
+
         const total = formattedHistory.length;
         const paginatedHistory = formattedHistory.slice(skip, skip + Number(limit));
 
