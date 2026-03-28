@@ -4,7 +4,10 @@ const {
     getDailyTransactions,
     revenuePerDay,
     topUsedServices,
-    dailyUserRegistrations
+    dailyUserRegistrations,
+    getUserEarningsSummary,
+    getUserEarningsHistory,
+    getAdminEarningsAnalytics
 } = require('../controllers/analyticsController')
 
 const { verifyJWT, checkRoles } = require('../middlewares/auth')
