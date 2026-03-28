@@ -132,9 +132,10 @@ const getUserEarningsHistory = async (req, res) => {
         const { page = 1, limit = 20 } = req.query;
         const skip = (page - 1) * limit;
 
-        // Find all records that contribute to earnings: 
-        // referral_bonus OR successful professional agent purchases (where userRole='agent')
-        const history = await Transaction.find({
+        const WalletLedger = require('../models/WalletLedger');
+
+        // 1. Fetch relevant Transactions (Bonuses & Agent Profits)
+        const historyTxs = await Transaction.find({
             userId,
             status: 'success',
             $or: [
@@ -143,34 +144,56 @@ const getUserEarningsHistory = async (req, res) => {
             ]
         })
         .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(Number(limit));
+        .limit(200); // Fetch a reasonable chunk for merging
 
-        const total = await Transaction.countDocuments({
+        // 2. Fetch relevant WalletLedger (Skipped Commissions)
+        const skippedLogs = await WalletLedger.find({
             userId,
-            status: 'success',
-            $or: [
-                { type: 'referral_bonus' },
-                { userRole: 'agent' }
-            ]
-        });
+            source: 'REFERRAL_SKIPPED'
+        })
+        .sort({ createdAt: -1 })
+        .limit(200);
 
-        const formattedHistory = history.map(t => ({
-            type: t.type === 'referral_bonus' ? 'referral' : 'agent_resale',
-            amount: t.type === 'referral_bonus' ? t.amount : (t.profit || 0),
-            transactionId: t.transactionId,
-            wasCapped: t.details ? t.details.wasCapped : false,
-            buyerRole: t.userRole || 'user',
-            createdAt: t.createdAt
-        }));
+        // 3. Format and Merge
+        const formattedHistory = [
+            ...historyTxs.map(t => ({
+                id: t._id,
+                type: t.type === 'referral_bonus' ? 'referral_bonus' : 'agent_profit',
+                amount: t.type === 'referral_bonus' ? (t.amount || 0) : (t.profit || 0),
+                refId: t.refId || t.transactionId,
+                transactionId: t.transactionId,
+                wasCapped: t.details ? t.details.wasCapped : false,
+                buyerRole: t.userRole || (t.details ? t.details.buyerRole : 'user'),
+                createdAt: t.createdAt,
+                status: 'success'
+            })),
+            ...skippedLogs.map(l => ({
+                id: l._id,
+                type: 'referral_skipped',
+                amount: 0,
+                refId: l.reference,
+                transactionId: l.metadata ? l.metadata.parentTxnId : l.reference,
+                wasCapped: false,
+                buyerRole: l.metadata ? l.metadata.buyerRole : 'user',
+                createdAt: l.createdAt,
+                status: 'skipped',
+                metadata: l.metadata
+            }))
+        ];
+
+        // 4. Final Sort and Paginate
+        formattedHistory.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        
+        const total = formattedHistory.length;
+        const paginatedHistory = formattedHistory.slice(skip, skip + Number(limit));
 
         res.json({
             success: true,
-            data: formattedHistory,
+            data: paginatedHistory,
             pagination: {
                 total,
                 page: Number(page),
-                pages: Math.ceil(total / limit)
+                pages: Math.ceil(total / Number(limit))
             }
         });
     } catch (err) {

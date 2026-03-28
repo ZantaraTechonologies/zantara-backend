@@ -11,11 +11,44 @@ const getUserTransactions = async (req, res) => {
 
 const getUserTransaction = async (req, res) => {
     try {
-        const transaction = await Transaction.findOne({ userId: req.user.id, _id: req.params.id });
-        if (!transaction) {
-            return res.status(404).json({ message: 'Transaction not found' });
+        const userId = req.user.id;
+        const id = req.params.id;
+
+        // 1. Check Transactions first
+        let transaction = await Transaction.findOne({ userId, _id: id });
+        
+        if (transaction) {
+            return res.json(transaction);
         }
-        res.json(transaction);
+
+        // 2. Check WalletLedger for Skipped Commissions (ID might be a MongoDB ID or a "SKIP-" ref)
+        const WalletLedger = require('../models/WalletLedger');
+        let skipLog;
+        
+        if (mongoose.Types.ObjectId.isValid(id)) {
+            skipLog = await WalletLedger.findOne({ userId, _id: id, source: 'REFERRAL_SKIPPED' });
+        } else {
+            skipLog = await WalletLedger.findOne({ userId, reference: id, source: 'REFERRAL_SKIPPED' });
+        }
+
+        if (skipLog) {
+            // Map to a Transaction-like structure for the frontend
+            return res.json({
+                _id: skipLog._id,
+                userId: skipLog.userId,
+                transactionId: skipLog.metadata ? skipLog.metadata.parentTxnId : skipLog.reference,
+                refId: skipLog.reference,
+                type: 'referral_skipped',
+                service: 'Skipped Commission',
+                amount: 0,
+                status: 'skipped',
+                createdAt: skipLog.createdAt,
+                metadata: skipLog.metadata,
+                details: skipLog.metadata // duplicate for frontend safety
+            });
+        }
+
+        return res.status(404).json({ message: 'Transaction or log not found' });
     } catch (error) {
         console.error('Error fetching transaction:', error);
         res.status(500).json({ message: 'Server error' });
