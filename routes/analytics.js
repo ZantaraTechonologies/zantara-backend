@@ -7,10 +7,15 @@ const {
     dailyUserRegistrations
 } = require('../controllers/analyticsController')
 
+const { verifyJWT, checkRoles } = require('../middlewares/auth')
+
 // Protect with admin middleware if needed
 router.get('/transactions/daily', getDailyTransactions)
 router.get('/transactions/daily-revenue', revenuePerDay)
 router.get('/services/top-used', topUsedServices)
 router.get('/users/registrations/daily', dailyUserRegistrations)
+
+// Admin Earnings (Step 11)
+router.get('/admin/earnings', verifyJWT, checkRoles('admin', 'superAdmin'), getAdminEarningsAnalytics)
 
 module.exports = router
