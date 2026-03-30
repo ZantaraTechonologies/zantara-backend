@@ -172,7 +172,7 @@ const rechargeCable = async (req, res) => {
 }
 
 const purchaseExamPin = async (req, res) => {
-    const { variation_code, amount, quantity, phone, pin } = req.body
+    const { serviceID, variation_code, amount, quantity, phone, pin } = req.body
     const userId = req.user.id
 
     if (!pin) {
@@ -182,11 +182,11 @@ const purchaseExamPin = async (req, res) => {
     try {
         const result = await purchaseService.processPurchase(userId, {
             type: 'pin',
-            serviceId: variation_code,
+            serviceId: serviceID || variation_code,
             amount,
             pin,
-            details: { variation_code, quantity, phone, roles: req.user.roles },
-            providerCall: (refId) => providerService.purchaseExamPin({ request_id: refId, variation_code, amount, quantity, phone })
+            details: { serviceID, variation_code, quantity, phone, roles: req.user.roles },
+            providerCall: (refId) => providerService.purchaseExamPin({ request_id: refId, serviceID, variation_code, amount, quantity, phone })
         })
 
         if (!result.success) {
