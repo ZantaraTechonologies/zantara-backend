@@ -23,10 +23,7 @@ class VTPassAdapter extends BaseAdapter {
 
     /** Build VTPass-required request headers */
     _authHeaders() {
-        console.log('[Adapter: VTPass] Using baseUrl:', this.baseUrl);
-        console.log('[Adapter: VTPass] api-key present:', !!this.apiKey);
-        console.log('[Adapter: VTPass] secret-key present:', !!this.secretKey);
-        console.log('[Adapter: VTPass] public-key present:', !!this.publicKey);
+
         return {
             'api-key': this.apiKey,
             'secret-key': this.secretKey,
@@ -37,13 +34,12 @@ class VTPassAdapter extends BaseAdapter {
 
     /** POST to /pay */
     async _pay(payload) {
-        console.log(`[Adapter: VTPass] -> _pay sending POST to ${this.baseUrl}/pay`);
-        console.log(`[Adapter: VTPass] -> _pay payload:`, JSON.stringify(payload));
+
         const res = await axios.post(`${this.baseUrl}/pay`, payload, {
             headers: this._authHeaders(),
             timeout: 30000,
         });
-        console.log(`[Adapter: VTPass] -> _pay received status: ${res.status}`);
+
         return res.data;
     }
 
@@ -75,13 +71,13 @@ class VTPassAdapter extends BaseAdapter {
 
     async purchaseAirtime({ request_id, serviceID, phone, amount }) {
         try {
-            console.log(`[Adapter: VTPass] -> purchaseAirtime called. reqId: ${request_id}, serviceID: ${serviceID}, phone: ${phone}, amount: ${amount}`);
+
             const finalServiceID = (serviceID || '').toLowerCase();
             const raw = await this._pay({ request_id, serviceID: finalServiceID, amount, phone });
-            console.log(`[Adapter: VTPass] -> Raw response from _pay:`, JSON.stringify(raw));
+
             return this.mapResponse(raw);
         } catch (err) {
-            console.error(`[Adapter: VTPass] -> _pay threw error:`, err?.message);
+
             return this._errorResponse(err);
         }
     }
