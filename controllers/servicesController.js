@@ -39,7 +39,7 @@ const purchaseAirtime = async (req, res) => {
 
         if (!result.success) {
             console.log('[Controller: purchaseAirtime] -> Service returned false success');
-            return sendResponse(res, { status: 500, success: false, message: result.message, error: result.error })
+            return sendResponse(res, { status: 400, success: false, message: result.message, error: result.error })
         }
         
         console.log('[Controller: purchaseAirtime] -> Sending final success response');
