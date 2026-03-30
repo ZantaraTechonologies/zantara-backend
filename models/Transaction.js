@@ -4,7 +4,7 @@ const transactionSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     transactionId: { type: String, unique: true }, // Added for professional FT... IDs
     refId: { type: String },
-    type: { type: String, enum: ['funding', 'airtime', 'data', 'tv', 'electricity', 'pin', 'withdrawal', 'referral_redeem', 'referral_bonus', 'settlement', 'expense'] },
+    type: { type: String, enum: ['funding', 'airtime', 'data', 'tv', 'cable', 'electricity', 'pin', 'withdrawal', 'referral_redeem', 'referral_bonus', 'settlement', 'expense'] },
     service: { type: String }, // e.g., MTN, GOTV, NEPA
     status: { type: String, enum: ['pending', 'success', 'failed', 'reversed'] },
     amount: { type: Number },
