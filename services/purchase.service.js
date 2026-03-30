@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Transaction = require('../models/Transaction');
 const User = require('../models/User');
 const Wallet = require('../models/Wallet');
@@ -108,21 +109,27 @@ class PurchaseService {
                 return { success: false, message: response.message, error: response };
             }
 
-            // 5. Finalize transaction on success
-            console.log(`[Service: purchaseService] -> Provider success. Saving transaction logic...`);
-            transaction.status = 'success';
-            transaction.response = response.raw;
-            await transaction.save();
-            console.log(`[Service: purchaseService] -> Transaction saved as success.`);
-
-            // 6. Referral Bonus (Lifetime Commission)
+            // 5. Finalize transaction on success with atomicity
+            console.log(`[Service: purchaseService] -> Provider success. Saving transaction logic with session...`);
+            const session = await mongoose.startSession();
+            session.startTransaction();
             try {
-                console.log(`[Service: purchaseService] -> Processing referral commission...`);
+                transaction.status = 'success';
+                transaction.response = response.raw;
+                await transaction.save({ session });
+
+                // 6. Referral Bonus (Lifetime Commission)
                 const { processLifetimeCommission } = require('../utils/referral');
-                await processLifetimeCommission(userId, finalAmount, transaction._id, transaction.transactionId);
-                console.log(`[Service: purchaseService] -> Commission processed.`);
-            } catch (refErr) {
-                console.error('[Service: purchaseService] -> Referral commission error (non-fatal):', refErr.message);
+                await processLifetimeCommission(userId, finalAmount, transaction._id, transaction.transactionId, session);
+
+                await session.commitTransaction();
+                console.log(`[Service: purchaseService] -> Transaction committed successfully.`);
+            } catch (error) {
+                await session.abortTransaction();
+                console.error(`[Service: purchaseService] -> Session aborted due to error during save/commission:`, error);
+                throw error;
+            } finally {
+                session.endSession();
             }
 
             // Notify user of success (outside of session for performance)
