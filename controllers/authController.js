@@ -54,7 +54,9 @@ const register = async (req, res) => {
             referredBy,
             myReferralCode,
             role: role || 'user',
-            roles: [role || 'user']
+            roles: [role || 'user'],
+            isPhoneVerified: true, // Bypass OTP for now as requested
+            status: true // Auto-verify account
         };
 
         if (email && email.trim()) {

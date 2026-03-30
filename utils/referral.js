@@ -196,7 +196,9 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
         }).session(session);
         if (existing) return;
 
-        // 6. Credit Referrer Wallet
+        /* 
+        // 6. Credit Referrer Wallet - DISABLED to prevent double-crediting.
+        // Users must now redeem referralBalance into main wallet manually.
         await walletService.credit(
             referrer._id, 
             commissionAmount, 
@@ -205,6 +207,7 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
             parentTransactionObjectId,
             session
         );
+        */
 
         // 7. Update Referrer Stats
         referrer.totalReferralBonus = (referrer.totalReferralBonus || 0) + commissionAmount;
