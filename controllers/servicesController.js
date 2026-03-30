@@ -32,6 +32,8 @@ const purchaseAirtime = async (req, res) => {
         }
         return sendResponse(res, { message: 'Airtime sent successfully', data: result.data })
     } catch (err) {
+        console.error('[purchaseAirtime] ERROR:', err.message);
+        console.error('[purchaseAirtime] STACK:', err.stack);
         return sendResponse(res, { status: 500, success: false, message: err.message || 'Server error', error: err })
     }
 }
