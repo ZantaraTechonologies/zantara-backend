@@ -5,7 +5,7 @@ const pinSchema = new mongoose.Schema({
     service: String,
     code: String,
     refId: String,  // Transaction ID
-    status: { type: String, enum: ['unused', 'used'], default: 'unused' }
+    status: { type: String, enum: ['unused', 'used', 'delivered'], default: 'unused' }
 }, { timestamps: true });
 
 const pinModel = mongoose.model('Pin', pinSchema)

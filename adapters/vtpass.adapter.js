@@ -122,15 +122,18 @@ class VTPassAdapter extends BaseAdapter {
             finalServiceID = finalServiceID.toLowerCase();
             const finalVarCode = (variation_code || '').toLowerCase();
 
-            const raw = await this._pay({ 
+            const payload = { 
                 request_id, 
                 serviceID: finalServiceID, 
                 variation_code: finalVarCode, 
                 amount, 
-                quantity, 
-                phone,
-                billersCode
-            });
+                phone 
+            };
+            
+            if (billersCode) payload.billersCode = billersCode;
+            if (quantity && finalServiceID !== 'jamb') payload.quantity = quantity;
+
+            const raw = await this._pay(payload);
             return this.mapResponse(raw);
         } catch (err) {
             return this._errorResponse(err);
