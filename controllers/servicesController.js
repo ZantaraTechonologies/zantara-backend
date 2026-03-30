@@ -8,33 +8,46 @@ const { fetchPlans, verifyMeterWithProvider } = require('../utils/vtuService')
 const { sendResponse } = require('../utils/response')
 
 const purchaseAirtime = async (req, res) => {
+    console.log('[Controller: purchaseAirtime] -> START | Body:', req.body);
     const { network, serviceID, phone, billersCode, amount, pin } = req.body
     const finalNetwork = network || serviceID;
     const finalPhone = phone || billersCode;
     const userId = req.user.id
 
+    console.log('[Controller: purchaseAirtime] -> Parsed finalNetwork:', finalNetwork, 'finalPhone:', finalPhone, 'userId:', userId);
+
     if (!finalNetwork || !finalPhone || !amount || !pin) {
+        console.log('[Controller: purchaseAirtime] -> Missing required fields');
         return sendResponse(res, { status: 400, success: false, message: 'Missing required fields' })
     }
 
     try {
+        console.log('[Controller: purchaseAirtime] -> Calling purchaseService.processPurchase');
         const result = await purchaseService.processPurchase(userId, {
             type: 'airtime',
             serviceId: finalNetwork,
             amount,
             pin,
             details: { phone: finalPhone, network: finalNetwork, roles: req.user.roles },
-            providerCall: (refId) => providerService.purchaseAirtime({ request_id: refId, serviceID: finalNetwork, phone: finalPhone, amount })
+            providerCall: (refId) => {
+                console.log('[Controller: purchaseAirtime] -> Inside providerCall callback with refId:', refId);
+                return providerService.purchaseAirtime({ request_id: refId, serviceID: finalNetwork, phone: finalPhone, amount })
+            }
         })
 
+        console.log('[Controller: purchaseAirtime] -> purchaseService returned result:', JSON.stringify(result));
+
         if (!result.success) {
+            console.log('[Controller: purchaseAirtime] -> Service returned false success');
             return sendResponse(res, { status: 500, success: false, message: result.message, error: result.error })
         }
+        
+        console.log('[Controller: purchaseAirtime] -> Sending final success response');
         return sendResponse(res, { message: 'Airtime sent successfully', data: result.data })
     } catch (err) {
-        console.error('[purchaseAirtime] ERROR:', err.message);
-        console.error('[purchaseAirtime] STACK:', err.stack);
-        return sendResponse(res, { status: 500, success: false, message: err.message || 'Server error', error: err })
+        console.error('[Controller: purchaseAirtime] -> CATCH BLOCK HIT ERROR:', err);
+        console.error('[Controller: purchaseAirtime] -> STACK:', err?.stack);
+        return sendResponse(res, { status: 500, success: false, message: err?.message || 'Server error', error: err })
     }
 }
 
