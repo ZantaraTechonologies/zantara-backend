@@ -115,7 +115,7 @@ class VTPassAdapter extends BaseAdapter {
         }
     }
 
-    async purchaseExamPin({ request_id, serviceID, variation_code, amount, quantity, phone }) {
+    async purchaseExamPin({ request_id, serviceID, variation_code, amount, quantity, phone, billersCode }) {
         try {
             // VTPass Exam Pin: if serviceID is missing, extract it (e.g. 'waec' from 'waec-registration')
             let finalServiceID = serviceID || (variation_code ? variation_code.split('-')[0] : '');
@@ -128,7 +128,8 @@ class VTPassAdapter extends BaseAdapter {
                 variation_code: finalVarCode, 
                 amount, 
                 quantity, 
-                phone 
+                phone,
+                billersCode
             });
             return this.mapResponse(raw);
         } catch (err) {

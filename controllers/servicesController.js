@@ -172,7 +172,7 @@ const rechargeCable = async (req, res) => {
 }
 
 const purchaseExamPin = async (req, res) => {
-    const { serviceID, variation_code, amount, quantity, phone, pin } = req.body
+    const { serviceID, variation_code, amount, quantity, phone, pin, billersCode } = req.body
     const userId = req.user.id
 
     if (!pin) {
@@ -185,8 +185,8 @@ const purchaseExamPin = async (req, res) => {
             serviceId: serviceID || variation_code,
             amount,
             pin,
-            details: { serviceID, variation_code, quantity, phone, roles: req.user.roles },
-            providerCall: (refId) => providerService.purchaseExamPin({ request_id: refId, serviceID, variation_code, amount, quantity, phone })
+            details: { serviceID, variation_code, quantity, phone, billersCode, roles: req.user.roles },
+            providerCall: (refId) => providerService.purchaseExamPin({ request_id: refId, serviceID, variation_code, amount, quantity, phone, billersCode })
         })
 
         if (!result.success) {
