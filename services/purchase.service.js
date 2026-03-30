@@ -1,4 +1,3 @@
-const mongoose = require('mongoose');
 const Transaction = require('../models/Transaction');
 const User = require('../models/User');
 const Wallet = require('../models/Wallet');
@@ -80,24 +79,17 @@ class PurchaseService {
                 return { success: false, message: response.message, error: response };
             }
 
-            // 5. Finalize transaction on success with atomicity
-            const session = await mongoose.startSession();
-            session.startTransaction();
+            // 5. Finalize transaction on success
+            transaction.status = 'success';
+            transaction.response = response.raw;
+            await transaction.save();
+
+            // 6. Referral Bonus (Lifetime Commission)
             try {
-                transaction.status = 'success';
-                transaction.response = response.raw;
-                await transaction.save({ session });
-
-                // 6. Referral Bonus (Lifetime Commission)
                 const { processLifetimeCommission } = require('../utils/referral');
-                await processLifetimeCommission(userId, finalAmount, transaction._id, transaction.transactionId, session);
-
-                await session.commitTransaction();
-            } catch (error) {
-                await session.abortTransaction();
-                throw error;
-            } finally {
-                session.endSession();
+                await processLifetimeCommission(userId, finalAmount, transaction._id, transaction.transactionId);
+            } catch (refErr) {
+                console.error('[purchase.service] Referral commission error (non-fatal):', refErr.message);
             }
 
             // Notify user of success (outside of session for performance)
