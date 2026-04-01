@@ -101,8 +101,8 @@ const getUserEarningsSummary = async (req, res) => {
             WalletLedger.countDocuments({ userId, source: 'REFERRAL_SKIPPED' }),
             // 5. Total Referrals Count
             User.countDocuments({ referredBy: userId }),
-            // 6. User Doc for referralBalance
-            User.findById(userId).select('referralBalance')
+            // 6. User Doc for referralBalance and myReferralCode
+            User.findById(userId).select('referralBalance myReferralCode')
         ]);
 
         const referralEarnings = referralStats.length > 0 ? referralStats[0].total : 0;
@@ -116,6 +116,7 @@ const getUserEarningsSummary = async (req, res) => {
                 totalEarnings: referralEarnings + agentProfit,
                 totalReferrals,
                 referralBalance: userDoc ? userDoc.referralBalance : 0,
+                myReferralCode: userDoc ? userDoc.myReferralCode : null,
                 cappedCommissionsCount: cappedCount,
                 skippedCommissionsCount: skippedCount
             }
