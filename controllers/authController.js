@@ -265,6 +265,40 @@ const sendOTP = async (req, res) => {
     }
 };
 
+const changePassword = async (req, res) => {
+    try {
+        const { oldPassword, newPassword } = req.body;
+        const userId = req.user.id;
+
+        if (!oldPassword || !newPassword) {
+            return res.status(400).json({ message: "Both current and new passwords are required." });
+        }
+
+        const user = await User.findById(userId);
+        if (!user) return res.status(404).json({ message: "User not found." });
+
+        const isMatch = await bcrypt.compare(oldPassword, user.password);
+        if (!isMatch) {
+            return res.status(400).json({ message: "Incorrect current password." });
+        }
+
+        const hashed = await bcrypt.hash(newPassword, 12);
+        user.password = hashed;
+        await user.save();
+
+        await ActivityLog.create({ 
+            userId, 
+            action: 'CHANGE_PASSWORD', 
+            ipAddress: req.ip, 
+            device: req.headers['user-agent'] 
+        });
+
+        res.json({ success: true, message: "Password updated successfully." });
+    } catch (error) {
+        res.status(500).json({ message: "Error updating password.", error: error.message });
+    }
+};
+
 const verifyOTP = async (req, res) => {
     try {
         const { otp } = req.body;
@@ -383,5 +417,6 @@ module.exports = {
     verifyOTP,
     sendEmailOTP,
     verifyEmailOTP,
-    getReferralStats
+    getReferralStats,
+    changePassword
 }
