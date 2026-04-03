@@ -311,9 +311,35 @@ const updateCommissionCaps = async (req, res) => {
     }
 };
 
+const getUserById = async (req, res) => {
+    try {
+        const { id } = req.params;
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ message: 'Invalid User ID' });
+        }
+
+        const user = await User.findById(id).select('-password');
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        const Wallet = require('../models/Wallet');
+        const wallet = await Wallet.findOne({ userId: id });
+
+        const userData = user.toObject();
+        userData.balance = wallet ? wallet.balance : 0;
+
+        res.json({ success: true, data: userData });
+    } catch (e) {
+        console.error('GetUserById error:', e);
+        res.status(500).json({ message: e.message });
+    }
+};
+
 module.exports = {
     getFilteredTransactions,
     getAllUsers,
+    getUserById,
     updateUserRole,
     getSettings,
     updateSetting,

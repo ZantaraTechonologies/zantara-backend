@@ -22,6 +22,7 @@ router.use(verifyJWT, checkRoles('admin', 'superAdmin'));
 
 router.get('/transactions', getFilteredTransactions)
 router.get('/users', getAllUsers)
+router.get('/users/:id', getUserById)
 router.put('/users/:id', updateUserRole)
 router.put('/users/:id/commission-rate', updateUserCommissionRate)
 router.put('/users/:id/agent-discount', updateUserAgentDiscount)
