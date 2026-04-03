@@ -369,11 +369,14 @@ const getDashboardStats = async (req, res) => {
         const WithdrawalRequest = require('../models/WithdrawalRequest');
         const Ticket = require('../models/Ticket');
 
+        const { days = 7 } = req.query;
+        const daysLimit = parseInt(days as string) || 7;
+
         const todayStart = new Date();
         todayStart.setHours(0, 0, 0, 0);
-        const sevenDaysAgo = new Date();
-        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-        sevenDaysAgo.setHours(0, 0, 0, 0);
+        const lookbackDate = new Date();
+        lookbackDate.setDate(lookbackDate.getDate() - daysLimit);
+        lookbackDate.setHours(0, 0, 0, 0);
 
         const [
             totalUsers,
@@ -398,7 +401,7 @@ const getDashboardStats = async (req, res) => {
             Ticket.countDocuments({ status: { $in: ['open', 'in-progress'] } }),
             Transaction.find().sort({ createdAt: -1 }).limit(10).populate('userId', 'name email phone'),
             Transaction.aggregate([
-                { $match: { createdAt: { $gte: sevenDaysAgo }, status: 'success' } },
+                { $match: { createdAt: { $gte: lookbackDate }, status: 'success' } },
                 {
                     $group: {
                         _id: { $dateToString: { format: "%m-%d", date: "$createdAt" } },
@@ -410,7 +413,7 @@ const getDashboardStats = async (req, res) => {
         ]);
 
         const transactionTrendMap = new Map();
-        for (let i = 0; i < 7; i++) {
+        for (let i = 0; i < daysLimit; i++) {
             const d = new Date();
             d.setDate(d.getDate() - i);
             const label = d.toISOString().slice(5, 10); // "MM-DD"
@@ -423,7 +426,6 @@ const getDashboardStats = async (req, res) => {
             }
         });
 
-        // Convert map to sorted array (reverse of loop to get chronological order)
         const transactionTrend = Array.from(transactionTrendMap.entries())
             .map(([label, value]) => ({ label, value }))
             .sort((a, b) => a.label.localeCompare(b.label));
