@@ -409,10 +409,24 @@ const getDashboardStats = async (req, res) => {
             ])
         ]);
 
-        const transactionTrend = transactionTrendStats.map(t => ({
-            label: t._id,
-            value: t.count
-        }));
+        const transactionTrendMap = new Map();
+        for (let i = 0; i < 7; i++) {
+            const d = new Date();
+            d.setDate(d.getDate() - i);
+            const label = d.toISOString().slice(5, 10); // "MM-DD"
+            transactionTrendMap.set(label, 0);
+        }
+
+        transactionTrendStats.forEach(t => {
+            if (transactionTrendMap.has(t._id)) {
+                transactionTrendMap.set(t._id, t.count);
+            }
+        });
+
+        // Convert map to sorted array (reverse of loop to get chronological order)
+        const transactionTrend = Array.from(transactionTrendMap.entries())
+            .map(([label, value]) => ({ label, value }))
+            .sort((a, b) => a.label.localeCompare(b.label));
 
         const criticalAlerts = [
             ...pendingKyc.map(k => ({
