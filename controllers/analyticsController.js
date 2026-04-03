@@ -370,7 +370,7 @@ const getDashboardStats = async (req, res) => {
         const Ticket = require('../models/Ticket');
 
         const { days = 7 } = req.query;
-        const daysLimit = parseInt(days as string) || 7;
+        const daysLimit = parseInt(days) || 7;
 
         const todayStart = new Date();
         todayStart.setHours(0, 0, 0, 0);
