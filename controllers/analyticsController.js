@@ -371,6 +371,9 @@ const getDashboardStats = async (req, res) => {
 
         const todayStart = new Date();
         todayStart.setHours(0, 0, 0, 0);
+        const sevenDaysAgo = new Date();
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+        sevenDaysAgo.setHours(0, 0, 0, 0);
 
         const [
             totalUsers,
@@ -380,7 +383,8 @@ const getDashboardStats = async (req, res) => {
             withdrawalVolumeStats,
             failedTxsToday,
             openTickets,
-            recentTxs
+            recentTxs,
+            transactionTrendStats
         ] = await Promise.all([
             User.countDocuments(),
             Transaction.distinct('userId', { status: 'success' }),
@@ -392,8 +396,23 @@ const getDashboardStats = async (req, res) => {
             ]),
             Transaction.countDocuments({ status: 'failed', createdAt: { $gte: todayStart } }),
             Ticket.countDocuments({ status: { $in: ['open', 'in-progress'] } }),
-            Transaction.find().sort({ createdAt: -1 }).limit(10).populate('userId', 'name email phone')
+            Transaction.find().sort({ createdAt: -1 }).limit(10).populate('userId', 'name email phone'),
+            Transaction.aggregate([
+                { $match: { createdAt: { $gte: sevenDaysAgo }, status: 'success' } },
+                {
+                    $group: {
+                        _id: { $dateToString: { format: "%m-%d", date: "$createdAt" } },
+                        count: { $sum: 1 }
+                    }
+                },
+                { $sort: { "_id": 1 } }
+            ])
         ]);
+
+        const transactionTrend = transactionTrendStats.map(t => ({
+            label: t._id,
+            value: t.count
+        }));
 
         const criticalAlerts = [
             ...pendingKyc.map(k => ({
@@ -401,14 +420,16 @@ const getDashboardStats = async (req, res) => {
                 entity: k.userId?.name || k.userId?.phone || 'Unknown User',
                 time: k.createdAt,
                 status: 'Action Required',
-                statusColor: 'bg-orange-500/10 text-orange-500'
+                statusColor: 'bg-orange-500/10 text-orange-500',
+                link: '/admin/kyc'
             })),
             ...pendingWithdrawals.map(w => ({
                 event: 'Withdrawal Request',
                 entity: `${w.userId?.name || 'User'} (₦${w.amount.toLocaleString()})`,
                 time: w.createdAt,
                 status: 'High Risk',
-                statusColor: 'bg-red-500/10 text-red-500'
+                statusColor: 'bg-red-500/10 text-red-500',
+                link: '/admin/withdrawals'
             }))
         ];
 
@@ -429,9 +450,10 @@ const getDashboardStats = async (req, res) => {
                 withdrawalVolume: withdrawalVolumeStats[0]?.total || 0,
                 failedTxsToday,
                 openTickets,
-                criticalAlerts: criticalAlerts.slice(0, 5),
+                criticalAlerts,
                 recentActivity,
-                userGrowth: '+5%', // Mock growth for now
+                transactionTrend,
+                userGrowth: '+5%',
                 activityRate: `${Math.round((activeUsersSet.length / (totalUsers || 1)) * 100)}%`
             }
         });
