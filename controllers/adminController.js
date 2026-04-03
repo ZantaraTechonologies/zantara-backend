@@ -336,6 +336,7 @@ const getUserById = async (req, res) => {
                     $match: { 
                         userId: new mongoose.Types.ObjectId(id), 
                         status: 'success',
+                        type: { $in: ['airtime', 'data', 'tv', 'cable', 'electricity', 'pin', 'withdrawal', 'expense'] },
                         createdAt: { $gte: startOfMonth }
                     } 
                 },
