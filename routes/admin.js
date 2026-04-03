@@ -4,6 +4,7 @@ const { verifyJWT, checkRoles } = require('../middlewares/auth')
 const {
     getFilteredTransactions,
     getAllUsers,
+    getUserById,
     updateUserRole,
     getSettings,
     updateSetting,
