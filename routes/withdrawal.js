@@ -6,14 +6,14 @@ const {
     getAllWithdrawals,
     getMyWithdrawals
 } = require('../controllers/withdrawalController')
-const { verifyJWT, checkRole } = require('../middlewares/auth')
+const { verifyJWT, checkRoles } = require('../middlewares/auth')
 
 // User routes
 router.post('/', verifyJWT, requestWithdrawal)
 router.get('/me', verifyJWT, getMyWithdrawals)
 
 // Admin routes
-router.get('/', verifyJWT, checkRole('admin'), getAllWithdrawals)
-router.put('/:id', verifyJWT, checkRole('admin'), processWithdrawal)
+router.get('/', verifyJWT, checkRoles('admin'), getAllWithdrawals)
+router.put('/:id', verifyJWT, checkRoles('admin'), processWithdrawal)
 
 module.exports = router
