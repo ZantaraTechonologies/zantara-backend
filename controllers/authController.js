@@ -75,6 +75,8 @@ const register = async (req, res) => {
         })
 
         console.log(`Registration successful for user: ${phone}`);
+        user.lastLogin = new Date();
+        await user.save();
         sendToken(user, res)
     } catch (error) {
         console.error("Registration fatal error:", error);
@@ -134,6 +136,9 @@ const login = async (req, res) => {
         if (!match) return res.status(400).json({ message: 'Invalid credentials' })
 
         await ActivityLog.create({ userId: user._id, action: 'LOGIN', ipAddress: req.ip, device: req.headers['user-agent'] })
+
+        user.lastLogin = new Date();
+        await user.save();
 
         sendToken(user, res)
     } catch (error) {

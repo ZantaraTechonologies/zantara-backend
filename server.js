@@ -101,6 +101,7 @@ app.use('/api/transaction-logs', transactionRoutes);
 app.use('/api/services', servicesRoutes);
 app.use('/api/kyc', kycRoutes);
 app.use('/api/support', supportRoutes);
+app.use('/api/admin/support', supportRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/admin/business', businessRoutes);
 app.use('/api/admin/audit-logs', auditRoutes);

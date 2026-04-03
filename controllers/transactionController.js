@@ -1,5 +1,6 @@
 const Transaction = require('../models/Transaction')
 const User = require('../models/User')
+const mongoose = require('mongoose')
 
 const getUserTransactions = async (req, res) => {
     const limit = parseInt(req.query.limit) || 20;
@@ -111,21 +112,84 @@ const getAllUsers = async (req, res) => {
 const getAllTransactions = async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 50;
+        const limit = parseInt(req.query.limit) || 20;
         const skip = (page - 1) * limit;
 
-        const transactions = await Transaction.find()
+        const { search, status, service, from, to, minAmount, maxAmount, userId } = req.query;
+
+        let filter = {};
+
+        if (status) filter.status = status;
+        if (service) {
+            const s = String(service).toLowerCase();
+            if (['funding', 'credit', 'topup', 'paystack'].includes(s)) {
+                filter.type = 'funding';
+            } else if (s === 'commission') {
+                filter.service = { $regex: /commission/i };
+            } else if (s === 'data') {
+                filter.type = { $ne: 'funding' };
+                filter.service = { $regex: /mtn|glo|9mobile|airtel|data/i };
+            } else if (service === 'airtime') {
+                filter.type = { $ne: 'funding' };
+                filter.service = { $regex: /airtime|mtn|glo|9mobile|airtel/i };
+            } else {
+                filter.service = { $regex: new RegExp(service, 'i') };
+            }
+        }
+        
+        // Handle direct userId Filter
+        if (userId && mongoose.Types.ObjectId.isValid(userId)) {
+            filter.userId = userId;
+        }
+
+        // Date Range
+        if (from || to) {
+            filter.createdAt = {};
+            if (from) filter.createdAt.$gte = new Date(from);
+            if (to) {
+                const toDate = new Date(to);
+                toDate.setHours(23, 59, 59, 999);
+                filter.createdAt.$lte = toDate;
+            }
+        }
+
+        // Amount Range
+        if (minAmount || maxAmount) {
+            filter.amount = {};
+            if (minAmount) filter.amount.$gte = Number(minAmount);
+            if (maxAmount) filter.amount.$lte = Number(maxAmount);
+        }
+
+        // Search on IDs/Refs
+        if (search) {
+            const isObjectId = mongoose.Types.ObjectId.isValid(search);
+            filter.$or = [
+                { transactionId: { $regex: search, $options: 'i' } },
+                { refId: { $regex: search, $options: 'i' } },
+                { providerRef: { $regex: search, $options: 'i' } }
+            ];
+            if (isObjectId) filter.$or.push({ _id: search });
+        }
+
+        const transactions = await Transaction.find(filter)
             .sort({ createdAt: -1 })
-            .populate('userId', 'name email')
+            .populate('userId', 'name email phone')
             .skip(skip)
             .limit(limit);
 
-        const total = await Transaction.countDocuments();
+        const total = await Transaction.countDocuments(filter);
 
         res.status(200).json({ 
             success: true, 
-            data: transactions,
-            pagination: { total, page, limit, pages: Math.ceil(total / limit) }
+            data: {
+                transactions,
+                pagination: { 
+                    total, 
+                    pages: Math.ceil(total / limit),
+                    page, 
+                    limit
+                }
+            }
         });
     } catch (error) {
         console.error('Admin fetch transactions error:', error);

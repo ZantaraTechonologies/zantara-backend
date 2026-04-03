@@ -45,7 +45,8 @@ const userSchema = new mongoose.Schema({
         bankName: String,
         accountName: String,
         accountNumber: String
-    }]
+    }],
+    lastLogin: { type: Date, default: Date.now }
 }, { timestamps: true })
 
 userSchema.post('findOneAndDelete', async function (doc) {

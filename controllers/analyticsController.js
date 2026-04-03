@@ -378,6 +378,9 @@ const getDashboardStats = async (req, res) => {
         lookbackDate.setDate(lookbackDate.getDate() - daysLimit);
         lookbackDate.setHours(0, 0, 0, 0);
 
+        const activeLookback = new Date();
+        activeLookback.setDate(activeLookback.getDate() - 30);
+
         const [
             totalUsers,
             activeUsersSet,
@@ -390,7 +393,10 @@ const getDashboardStats = async (req, res) => {
             transactionTrendStats
         ] = await Promise.all([
             User.countDocuments(),
-            Transaction.distinct('userId', { status: 'success' }),
+            Transaction.distinct('userId', { 
+                status: 'success', 
+                createdAt: { $gte: activeLookback } 
+            }),
             Kyc.find({ status: 'pending' }).populate('userId', 'name phone'),
             WithdrawalRequest.find({ status: 'pending' }).populate('userId', 'name phone'),
             WithdrawalRequest.aggregate([

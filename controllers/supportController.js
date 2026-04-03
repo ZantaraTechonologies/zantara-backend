@@ -73,7 +73,11 @@ const replyToTicket = async (req, res) => {
 // Admin Endpoints
 const getAllTickets = async (req, res) => {
     try {
-        const tickets = await Ticket.find().populate('userId', 'name email').sort({ createdAt: -1 });
+        const { status } = req.query;
+        let filter = {};
+        if (status && status !== 'all') filter.status = status;
+
+        const tickets = await Ticket.find(filter).populate('userId', 'name email').sort({ createdAt: -1 });
         return sendResponse(res, { data: tickets });
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: err.message });
@@ -109,4 +113,16 @@ const resolveTicket = async (req, res) => {
     }
 };
 
-module.exports = { createTicket, getMyTickets, replyToTicket, getAllTickets, resolveTicket };
+const getTicket = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const ticket = await Ticket.findById(id).populate('userId', 'name email phone avatar');
+        if (!ticket) return sendResponse(res, { status: 404, success: false, message: 'Ticket not found' });
+        
+        return sendResponse(res, { data: ticket });
+    } catch (err) {
+        return sendResponse(res, { status: 500, success: false, message: err.message });
+    }
+};
+
+module.exports = { createTicket, getMyTickets, replyToTicket, getAllTickets, resolveTicket, getTicket };

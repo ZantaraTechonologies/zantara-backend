@@ -13,7 +13,7 @@ router.post('/', verifyJWT, requestWithdrawal)
 router.get('/me', verifyJWT, getMyWithdrawals)
 
 // Admin routes
-router.get('/', verifyJWT, checkRoles('admin'), getAllWithdrawals)
-router.put('/:id', verifyJWT, checkRoles('admin'), processWithdrawal)
+router.get('/', verifyJWT, checkRoles('admin', 'superAdmin'), getAllWithdrawals)
+router.put('/:id', verifyJWT, checkRoles('admin', 'superAdmin'), processWithdrawal)
 
 module.exports = router

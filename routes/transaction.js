@@ -13,7 +13,7 @@ const router = express.Router()
 router.get('/', verifyJWT, getUserTransactions)
 router.get('/:id', verifyJWT, getUserTransaction)
 router.get('/admin/users', verifyJWT, checkRoles('admin'), getAllUsers)
-router.get('/admin/transactions/all', verifyJWT, checkRoles('admin'), getAllTransactions)
-router.get('/admin/transactions', verifyJWT, checkRoles('admin'), getFilteredTransactions)
+router.get('/admin/transactions/all', verifyJWT, checkRoles('admin', 'superAdmin'), getAllTransactions)
+router.get('/admin/transactions', verifyJWT, checkRoles('admin', 'superAdmin'), getFilteredTransactions)
 
 module.exports = router
