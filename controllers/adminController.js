@@ -32,9 +32,56 @@ const getFilteredTransactions = async (req, res) => {
 
 const getAllUsers = async (req, res) => {
     try {
-        const users = await User.find().select('-password').sort({ createdAt: -1 });
-        res.json({ success: true, data: users });
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const skip = (page - 1) * limit;
+        const search = req.query.search || '';
+
+        const matchQuery = {};
+        if (search) {
+            matchQuery.$or = [
+                { name: { $regex: search, $options: 'i' } },
+                { email: { $regex: search, $options: 'i' } },
+                { phone: { $regex: search, $options: 'i' } }
+            ];
+        }
+
+        const users = await User.aggregate([
+            { $match: matchQuery },
+            { $sort: { createdAt: -1 } },
+            { $skip: skip },
+            { $limit: limit },
+            {
+                $lookup: {
+                    from: 'wallets',
+                    localField: '_id',
+                    foreignField: 'userId',
+                    as: 'wallet'
+                }
+            },
+            {
+                $addFields: {
+                    balance: { $ifNull: [{ $arrayElemAt: ['$wallet.balance', 0] }, 0] }
+                }
+            },
+            { $project: { password: 0, wallet: 0 } }
+        ]);
+
+        const totalUsers = await User.countDocuments(matchQuery);
+
+        res.json({ 
+            success: true, 
+            data: {
+                users,
+                pagination: {
+                    totalUsers,
+                    totalPages: Math.ceil(totalUsers / limit),
+                    currentPage: page
+                }
+            } 
+        });
     } catch (e) {
+        console.error('GetAllUsers error:', e);
         res.status(500).json({ message: e.message });
     }
 };
