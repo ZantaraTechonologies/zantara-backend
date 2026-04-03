@@ -363,6 +363,84 @@ const getAdminEarningsAnalytics = async (req, res) => {
     }
 };
 
+const getDashboardStats = async (req, res) => {
+    try {
+        const Kyc = require('../models/Kyc');
+        const WithdrawalRequest = require('../models/WithdrawalRequest');
+        const Ticket = require('../models/Ticket');
+
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0);
+
+        const [
+            totalUsers,
+            activeUsersSet,
+            pendingKyc,
+            pendingWithdrawals,
+            withdrawalVolumeStats,
+            failedTxsToday,
+            openTickets,
+            recentTxs
+        ] = await Promise.all([
+            User.countDocuments(),
+            Transaction.distinct('userId', { status: 'success' }),
+            Kyc.find({ status: 'pending' }).populate('userId', 'name phone'),
+            WithdrawalRequest.find({ status: 'pending' }).populate('userId', 'name phone'),
+            WithdrawalRequest.aggregate([
+                { $match: { status: 'pending' } },
+                { $group: { _id: null, total: { $sum: "$amount" } } }
+            ]),
+            Transaction.countDocuments({ status: 'failed', createdAt: { $gte: todayStart } }),
+            Ticket.countDocuments({ status: { $in: ['open', 'in-progress'] } }),
+            Transaction.find().sort({ createdAt: -1 }).limit(10).populate('userId', 'name email phone')
+        ]);
+
+        const criticalAlerts = [
+            ...pendingKyc.map(k => ({
+                event: 'Identity Verification',
+                entity: k.userId?.name || k.userId?.phone || 'Unknown User',
+                time: k.createdAt,
+                status: 'Action Required',
+                statusColor: 'bg-orange-500/10 text-orange-500'
+            })),
+            ...pendingWithdrawals.map(w => ({
+                event: 'Withdrawal Request',
+                entity: `${w.userId?.name || 'User'} (₦${w.amount.toLocaleString()})`,
+                time: w.createdAt,
+                status: 'High Risk',
+                statusColor: 'bg-red-500/10 text-red-500'
+            }))
+        ];
+
+        const recentActivity = recentTxs.map(t => ({
+            event: `${t.type.toUpperCase()} - ${t.status}`,
+            detail: `${t.userId?.name || t.userId?.phone || 'User'} processed ${t.type} of ₦${t.amount.toLocaleString()}`,
+            time: t.createdAt,
+            type: t.status === 'success' ? 'kyc' : t.status === 'failed' ? 'error' : 'system'
+        }));
+
+        res.json({
+            success: true,
+            data: {
+                totalUsers,
+                activeUsers: activeUsersSet.length,
+                pendingKyc: pendingKyc.length,
+                pendingWithdrawals: pendingWithdrawals.length,
+                withdrawalVolume: withdrawalVolumeStats[0]?.total || 0,
+                failedTxsToday,
+                openTickets,
+                criticalAlerts: criticalAlerts.slice(0, 5),
+                recentActivity,
+                userGrowth: '+5%', // Mock growth for now
+                activityRate: `${Math.round((activeUsersSet.length / (totalUsers || 1)) * 100)}%`
+            }
+        });
+    } catch (err) {
+        console.error('Dashboard stats error:', err);
+        res.status(500).json({ message: 'Failed to fetch dashboard statistics' });
+    }
+};
+
 module.exports = {
     getDailyTransactions,
     revenuePerDay,
@@ -370,5 +448,6 @@ module.exports = {
     dailyUserRegistrations,
     getUserEarningsSummary,
     getUserEarningsHistory,
-    getAdminEarningsAnalytics
+    getAdminEarningsAnalytics,
+    getDashboardStats
 }
