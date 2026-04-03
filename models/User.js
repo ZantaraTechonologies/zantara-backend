@@ -14,7 +14,7 @@ const userSchema = new mongoose.Schema({
         default: ['user'],
         index: true,
     },
-    role: { type: String, enum: ['user', 'agent', 'admin'], default: 'user' },
+    role: { type: String, enum: ALLOWED_ROLES, default: 'user' },
     accountType: { type: String, enum: ['retail', 'reseller'], default: 'retail' },
     status: { type: Boolean, default: false },
     referrerCode: String,
@@ -55,5 +55,5 @@ userSchema.post('findOneAndDelete', async function (doc) {
 })
 
 const userModel = mongoose.model('User', userSchema)
-
-module.exports = userModel
+userModel.ALLOWED_ROLES = ALLOWED_ROLES;
+module.exports = userModel

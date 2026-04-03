@@ -1,3 +1,4 @@
+const User = require('../models/User');
 const Transaction = require('../models/Transaction')
 const mongoose = require('mongoose')
 
@@ -31,7 +32,7 @@ const getFilteredTransactions = async (req, res) => {
 
 const getAllUsers = async (req, res) => {
     try {
-        const users = await require('../models/User').find().select('-password').sort({ createdAt: -1 });
+        const users = await User.find().select('-password').sort({ createdAt: -1 });
         res.json({ success: true, data: users });
     } catch (e) {
         res.status(500).json({ message: e.message });
@@ -45,7 +46,7 @@ const updateUserRole = async (req, res) => {
 
         const update = {};
         if (role) {
-            const ALLOWED_ROLES = ['user', 'agent', 'admin', 'superAdmin'];
+            const ALLOWED_ROLES = User.ALLOWED_ROLES;
             if (!ALLOWED_ROLES.includes(role)) {
                 return res.status(400).json({ message: 'Invalid role' });
             }
@@ -53,7 +54,6 @@ const updateUserRole = async (req, res) => {
         }
         if (status !== undefined) update.status = status;
 
-        const User = require('../models/User');
         const user = await User.findByIdAndUpdate(id, update, { new: true });
         res.json({ success: true, data: user });
     } catch (e) {
