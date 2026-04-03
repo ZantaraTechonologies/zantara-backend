@@ -324,10 +324,31 @@ const getUserById = async (req, res) => {
         }
 
         const Wallet = require('../models/Wallet');
-        const wallet = await Wallet.findOne({ userId: id });
+        const Transaction = require('../models/Transaction');
+        
+        const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+
+        const [wallet, transactions, monthlyStats] = await Promise.all([
+            Wallet.findOne({ userId: id }),
+            Transaction.find({ userId: id }).sort({ createdAt: -1 }).limit(10),
+            Transaction.aggregate([
+                { 
+                    $match: { 
+                        userId: new mongoose.Types.ObjectId(id), 
+                        status: 'success',
+                        createdAt: { $gte: startOfMonth }
+                    } 
+                },
+                { $group: { _id: null, total: { $sum: '$amount' } } }
+            ])
+        ]);
 
         const userData = user.toObject();
         userData.balance = wallet ? wallet.balance : 0;
+        userData.transactions = transactions;
+        userData.stats = {
+            monthlyVolume: monthlyStats[0]?.total || 0
+        };
 
         res.json({ success: true, data: userData });
     } catch (e) {
