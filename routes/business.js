@@ -13,6 +13,7 @@ router.get('/wallet', businessController.getBusinessWallet);
 router.get('/cost-ledger', businessController.getCostLedger);
 router.get('/cash-flow', businessController.getCashFlow);
 router.get('/refunds-losses', businessController.getRefundsLosses);
+router.get('/profit', businessController.getProfitAnalytics);
 
 router.get('/expenses', expenseController.getExpenses);
 router.post('/expenses', expenseController.createExpense);

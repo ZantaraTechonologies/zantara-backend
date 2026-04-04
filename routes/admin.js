@@ -15,9 +15,13 @@ const {
     updateAgentSettings,
     updateUserAgentDiscount,
     getCommissionCaps,
-    updateCommissionCaps
+    updateCommissionCaps,
+    adminCreditWallet,
+    adminDebitWallet,
+    exportUsersCSV
 } = require('../controllers/adminController')
 const { getAllKyc, reviewKyc } = require('../controllers/kycController')
+const serviceController = require('../controllers/serviceController')
 
 // Admin middleware: Must be logged in and have 'admin' or 'superAdmin' role
 router.use(verifyJWT, checkRoles('admin', 'superAdmin'));
@@ -50,5 +54,16 @@ router.get('/settings/agent', getAgentSettings)
 router.put('/settings/agent', updateAgentSettings)
 router.get('/settings/commission-caps', getCommissionCaps)
 router.put('/settings/commission-caps', updateCommissionCaps)
+
+// Wallet Management
+router.post('/users/:userId/credit', adminCreditWallet)
+router.post('/users/:userId/debit', adminDebitWallet)
+router.get('/users/export/csv', exportUsersCSV)
+
+// Service Management
+router.get('/services', serviceController.getAdminServices)
+router.post('/services', serviceController.createService)
+router.put('/services/:id', serviceController.updateService)
+router.delete('/services/:id', serviceController.deleteService)
 
 module.exports = router;

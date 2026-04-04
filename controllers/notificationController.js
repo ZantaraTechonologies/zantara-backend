@@ -1,6 +1,8 @@
 const Notification = require('../models/Notification');
 const Broadcast = require('../models/Broadcast');
 const { sendResponse } = require('../utils/response');
+const { sendEmail } = require('../utils/mailer');
+const User = require('../models/User');
 
 const getMyNotifications = async (req, res) => {
     try {
@@ -84,7 +86,39 @@ const sendBroadcast = async (req, res) => {
         });
         
         await broadcast.save();
-        return sendResponse(res, { data: broadcast, message: 'Broadcast initiated successfully' });
+
+        // 🟢 Background task: Send emails if broadcast is critical
+        if (type === 'critical') {
+            (async () => {
+                try {
+                    const users = await User.find({ email: { $exists: true, $ne: null } }, 'email name').lean();
+                    const emailCount = users.length;
+                    
+                    console.log(`[Critical Broadcast] Starting email dispatch to ${emailCount} users...`);
+                    
+                    for (const user of users) {
+                        try {
+                            const html = `
+                                <div style="font-family: sans-serif; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
+                                    <h2 style="color: #e11d48;">${title}</h2>
+                                    <p>${message}</p>
+                                    <hr style="margin: 20px 0; border: 0; border-top: 1px solid #eee;">
+                                    <p style="font-size: 12px; color: #666;">This is an automated critical update from Zantara VTU.</p>
+                                </div>
+                            `;
+                            await sendEmail(user.email, `CRITICAL: ${title}`, html);
+                        } catch (e) {
+                            console.error(`Failed to send broadcast email to ${user.email}:`, e.message);
+                        }
+                    }
+                    console.log(`[Critical Broadcast] Finished email dispatch.`);
+                } catch (err) {
+                    console.error('[Critical Broadcast] Global dispatch error:', err);
+                }
+            })();
+        }
+
+        return sendResponse(res, { data: broadcast, message: 'Broadcast initiated successfully' + (type === 'critical' ? ' and email dispatch started' : '') });
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: err.message });
     }

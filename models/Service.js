@@ -6,6 +6,7 @@ const serviceSchema = new mongoose.Schema({
     category: { type: String, enum: ['airtime', 'data', 'tv', 'electricity', 'pin'] },
     price: Number,
     resellerPrice: Number,
+    costPrice: Number,
     provider: String,
     status: { type: Boolean, default: true }
 })

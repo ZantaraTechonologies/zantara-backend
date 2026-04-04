@@ -358,6 +358,135 @@ const getUserById = async (req, res) => {
     }
 };
 
+// --- Admin Manual Wallet Adjustments ---
+
+const adminCreditWallet = async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { amount, reason } = req.body;
+
+        if (!mongoose.Types.ObjectId.isValid(userId)) {
+            return res.status(400).json({ message: 'Invalid User ID' });
+        }
+        const amountNum = Number(amount);
+        if (!amountNum || amountNum <= 0) {
+            return res.status(400).json({ message: 'Amount must be a positive number' });
+        }
+        if (!reason || !reason.trim()) {
+            return res.status(400).json({ message: 'Reason is required for audit purposes' });
+        }
+
+        const targetUser = await User.findById(userId);
+        if (!targetUser) return res.status(404).json({ message: 'User not found' });
+
+        const walletService = require('../services/wallet.service');
+        const { logAction } = require('./auditController');
+
+        const refId = 'ADM-CR-' + Date.now();
+        const result = await walletService.credit(userId, amountNum, refId, 'admin_manual_credit');
+
+        await logAction(
+            req.user.id,
+            req.user.name || 'Admin',
+            'ADMIN_WALLET_CREDIT',
+            `User: ${targetUser.name} (${targetUser.phone})`,
+            { amount: amountNum, reason, refId, newBalance: result.balance }
+        );
+
+        res.json({
+            success: true,
+            message: `₦${amountNum.toLocaleString()} credited to ${targetUser.name}'s wallet`,
+            newBalance: result.balance,
+            refId
+        });
+    } catch (e) {
+        console.error('Admin credit wallet error:', e);
+        res.status(500).json({ message: e.message });
+    }
+};
+
+const adminDebitWallet = async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { amount, reason } = req.body;
+
+        if (!mongoose.Types.ObjectId.isValid(userId)) {
+            return res.status(400).json({ message: 'Invalid User ID' });
+        }
+        const amountNum = Number(amount);
+        if (!amountNum || amountNum <= 0) {
+            return res.status(400).json({ message: 'Amount must be a positive number' });
+        }
+        if (!reason || !reason.trim()) {
+            return res.status(400).json({ message: 'Reason is required for audit purposes' });
+        }
+
+        const targetUser = await User.findById(userId);
+        if (!targetUser) return res.status(404).json({ message: 'User not found' });
+
+        const walletService = require('../services/wallet.service');
+        const { logAction } = require('./auditController');
+
+        const refId = 'ADM-DB-' + Date.now();
+        const result = await walletService.debit(userId, amountNum, refId, 'admin_manual_debit');
+
+        await logAction(
+            req.user.id,
+            req.user.name || 'Admin',
+            'ADMIN_WALLET_DEBIT',
+            `User: ${targetUser.name} (${targetUser.phone})`,
+            { amount: amountNum, reason, refId, newBalance: result.balance }
+        );
+
+        res.json({
+            success: true,
+            message: `₦${amountNum.toLocaleString()} debited from ${targetUser.name}'s wallet`,
+            newBalance: result.balance,
+            refId
+        });
+    } catch (e) {
+        console.error('Admin debit wallet error:', e);
+        res.status(500).json({ message: e.message });
+    }
+};
+
+const exportUsersCSV = async (req, res) => {
+    try {
+        const users = await User.find().lean();
+        const wallets = await Wallet.find().lean();
+        
+        // Map wallet balance to user for the export
+        const walletMap = wallets.reduce((acc, w) => {
+            acc[w.userId.toString()] = w.balance;
+            return acc;
+        }, {});
+
+        let csv = 'ID,Name,Email,Phone,Role,Balance,Status,Joined\n';
+        
+        users.forEach(u => {
+            const balance = walletMap[u._id.toString()] || 0;
+            const row = [
+                u._id,
+                `"${u.name}"`,
+                u.email || 'N/A',
+                u.phone || 'N/A',
+                u.role,
+                balance,
+                u.status ? 'Active' : 'Inactive',
+                new Date(u.createdAt).toLocaleDateString()
+            ].join(',');
+            csv += row + '\n';
+        });
+
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename=users_export.csv');
+        res.status(200).send(csv);
+    } catch (e) {
+        console.error('Export CSV error:', e);
+        res.status(500).send('Error generating export');
+    }
+};
+
 module.exports = {
     getFilteredTransactions,
     getAllUsers,
@@ -372,5 +501,8 @@ module.exports = {
     updateAgentSettings,
     updateUserAgentDiscount,
     getCommissionCaps,
-    updateCommissionCaps
+    updateCommissionCaps,
+    adminCreditWallet,
+    adminDebitWallet,
+    exportUsersCSV
 }

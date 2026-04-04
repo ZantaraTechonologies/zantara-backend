@@ -153,6 +153,38 @@ class VTPassAdapter extends BaseAdapter {
         }
     }
 
+    /** Ping VTPass to check connectivity/auth */
+    async ping() {
+        try {
+            // We use the service-variations endpoint with a small timeout as a health check
+            await axios.get(`${this.baseUrl}/service-variations?serviceID=mtn-data`, {
+                headers: this._authHeaders(),
+                timeout: 5000,
+            });
+            return { success: true };
+        } catch (err) {
+            return { success: false, message: err.message };
+        }
+    }
+
+    /** GET vendor API balance */
+    async getBalance() {
+        try {
+            const res = await axios.get(`${this.baseUrl}/balance`, {
+                headers: this._authHeaders(),
+                timeout: 10000,
+            });
+            // VTPass balance returns { code: '000', contents: { balance: 1234.56 } }
+            return { 
+                success: res.data?.code === '000', 
+                balance: res.data?.contents?.balance || 0,
+                raw: res.data
+            };
+        } catch (err) {
+            return { success: false, balance: 0, message: err.message };
+        }
+    }
+
     // ─────────────────────────────────────────────
     // RESPONSE NORMALIZER
     // ─────────────────────────────────────────────

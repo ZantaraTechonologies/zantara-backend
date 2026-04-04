@@ -240,8 +240,11 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
 
         console.log(`Lifetime commission of ${commissionAmount} credited to ${referrer.phone || referrer.email} (${wasCapped ? 'CAPPED' : 'FULL'})`);
 
+        return commissionAmount;
+
     } catch (error) {
         console.error('Error processing lifetime commission:', error);
+        return 0;
     }
 };
 

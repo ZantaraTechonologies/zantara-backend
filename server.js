@@ -85,6 +85,7 @@ const businessRoutes = require('./routes/business');
 const auditRoutes = require('./routes/audit');
 const userEarningsRoutes = require('./routes/userEarnings');
 const withdrawalRoutes = require('./routes/withdrawal');
+const systemRoutes = require('./routes/system');
 const errorHandler = require('./middlewares/errorHandler');
 
 app.use('/api', index);
@@ -109,6 +110,7 @@ app.use('/api/admin/business', businessRoutes);
 app.use('/api/admin/audit-logs', auditRoutes);
 app.use('/api/admin/withdrawals', withdrawalRoutes);
 app.use('/api/user/earnings', userEarningsRoutes);
+app.use('/api/admin/system', systemRoutes);
 
 // Global error handler (keep last)
 app.use(errorHandler);

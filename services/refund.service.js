@@ -22,8 +22,9 @@ class RefundService {
 
             // Update transaction status
             transaction.status = 'failed'; // Or 'refunded' if added to enum
-            transaction.metadata = { 
-                ...(transaction.metadata || {}), 
+            transaction.isLoss = true;
+            transaction.details = {
+                ...(transaction.details || {}),
                 refundReason: reason,
                 refundedAt: new Date()
             };

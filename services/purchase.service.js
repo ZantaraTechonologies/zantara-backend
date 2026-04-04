@@ -10,6 +10,7 @@ const { generateTransactionId, generateReference, generateVTPassRequestId } = re
 const { processReferralBonus } = require('../utils/referral');
 const { calculateServicePrice, getProviderCost } = require('../utils/pricing');
 const notificationService = require('./notification.service');
+const Expense = require('../models/Expense');
 
 class PurchaseService {
     /**
@@ -106,11 +107,26 @@ class PurchaseService {
             try {
                 transaction.status = 'success';
                 transaction.response = response.raw;
+                
+                // 6. Referral Bonus (Lifetime Commission)
+                // Note: processLifetimeCommission also writes netProfitAfterCommission on the parent txn
+                const { processLifetimeCommission } = require('../utils/referral');
+                const commissionPaid = await processLifetimeCommission(userId, finalAmount, transaction._id, transaction.transactionId, session);
+                
+                transaction.netProfitAfterCommission = profit - commissionPaid;
                 await transaction.save({ session });
 
-                // 6. Referral Bonus (Lifetime Commission)
-                const { processLifetimeCommission } = require('../utils/referral');
-                await processLifetimeCommission(userId, finalAmount, transaction._id, transaction.transactionId, session);
+                // 8. Log the vendor cost as an Expense for financial tracking
+                await Expense.create([{
+                    category: 'API_COST',
+                    title: `VTPass Cost: ${serviceId}`,
+                    amount: costPrice,
+                    vendor: 'VTPass',
+                    date: new Date(),
+                    paymentSource: 'Business Float',
+                    notes: `Transaction ID: ${transaction.transactionId}`,
+                    createdBy: userId // Or a system admin ID if preferred
+                }], { session });
 
                 await session.commitTransaction();
 

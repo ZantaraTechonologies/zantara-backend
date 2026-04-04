@@ -43,11 +43,37 @@ const creditWallet = async (req, res) => {
 }
 
 const freezeWallet = async (req, res) => {
-    res.json("Wallet Freeze")
+    try {
+        const { amount, reason } = req.body;
+        if (!amount || amount <= 0) throw new Error('Valid amount is required');
+
+        const result = await walletService.freeze(
+            req.user.id,
+            amount,
+            'FRZ-' + Date.now(),
+            reason || 'Manual Freeze'
+        );
+        res.json({ success: true, ...result });
+    } catch (err) {
+        res.status(400).json({ success: false, message: err.message });
+    }
 }
 
 const unfreezeWallet = async (req, res) => {
-    res.json("Wallet UnFreeze")
+    try {
+        const { amount, reason } = req.body;
+        if (!amount || amount <= 0) throw new Error('Valid amount is required');
+
+        const result = await walletService.unfreeze(
+            req.user.id,
+            amount,
+            'UNF-' + Date.now(),
+            reason || 'Manual Unfreeze'
+        );
+        res.json({ success: true, ...result });
+    } catch (err) {
+        res.status(400).json({ success: false, message: err.message });
+    }
 }
 
 const bcrypt = require('bcryptjs')
