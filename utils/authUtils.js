@@ -2,12 +2,12 @@
 const jwt = require('jsonwebtoken');
 
 const generateToken = (user, expiresIn = '7d') => {
-    // roles: always an array (fallback to ['user'] if missing)
-    const roles = Array.isArray(user.roles)
-        ? user.roles
-        : user.role
-            ? [user.role]
-            : ['user'];
+    // Collect roles from both legacy string and new array
+    const userRoleString = user.role ? [user.role] : [];
+    const userRolesArray = Array.isArray(user.roles) ? user.roles : [];
+    let roles = [...new Set([...userRoleString, ...userRolesArray])]; // Combine & remove duplicates
+    
+    if (roles.length === 0) roles = ['user'];
 
     // OPTIONAL: pull perms from user if you add later
     const perms = user.perms ?? undefined;
@@ -35,9 +35,10 @@ const sendToken = (user, res, status = 200) => {
     res.cookie('token', token, cookieOpts());
 
     // return roles array to the client
-    const roles = Array.isArray(user.roles) 
-        ? user.roles 
-        : (user.role ? [user.role] : ['user']);
+    const userRoleString = user.role ? [user.role] : [];
+    const userRolesArray = Array.isArray(user.roles) ? user.roles : [];
+    let roles = [...new Set([...userRoleString, ...userRolesArray])];
+    if (roles.length === 0) roles = ['user'];
 
     return res.status(status).json({ 
         ok: true, 
