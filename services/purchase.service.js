@@ -31,7 +31,12 @@ class PurchaseService {
             }
             
             const standardPrice = amount; // What normal users pay
-            const finalAmount = await calculateServicePrice(user, standardPrice);
+            
+            // 0.6 Calculate Provider Cost First
+            const costPrice = await getProviderCost(serviceId, amount);
+
+            // 0.7 Calculate final amount for user (Agent discount scales with margin)
+            const finalAmount = await calculateServicePrice(user, standardPrice, costPrice);
 
             const wallet = await Wallet.findOne({ userId });
             if (!wallet) {
@@ -57,8 +62,7 @@ class PurchaseService {
             const transactionId = generateTransactionId();
             const reference = details.request_id || generateVTPassRequestId();
 
-            // Calculate business metrics
-            const costPrice = await getProviderCost(serviceId, amount);
+            // Calculate gross profit
             const profit = finalAmount - costPrice;
 
             // --- HARDENING: Profit Safety Check (Step 3) ---

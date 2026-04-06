@@ -98,54 +98,57 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
         const globalSetting = await Setting.findOne({ key: 'defaultCommissionRate' }).session(session);
         const globalRate = globalSetting ? Number(globalSetting.value) : 0.01;
 
-        // 3. Resolve Final Commission Rate
+        // 3. Resolve Final Commission Rate (Margin Share)
         const rate = (referrer.commissionRate !== undefined && referrer.commissionRate !== null) 
             ? referrer.commissionRate 
             : globalRate;
 
-        // 4. Calculate Commission
-        let commissionAmount = amount * rate;
-        if (commissionAmount <= 0) return 0;
-
-        // --- HARDENING: Profit Safety Cap (Step 4: Combination Logic) ---
+        // 4. Retrieve Parent Transaction to derive Profit
         const Transaction = require('../models/Transaction');
         const parentTxn = await Transaction.findById(parentTransactionObjectId).session(session);
         
-        let originalCommission = commissionAmount;
-        let wasCapped = false;
-        let buyerRole = 'user';
-
-        if (parentTxn && parentTxn.profit !== undefined) {
-            buyerRole = parentTxn.userRole || 'user';
-            
-            // 4.5 Fetch Global Profit-Share Caps (Step 5: Configurable Caps)
-            const standardCapSetting = await Setting.findOne({ key: 'maxReferralProfitShare' }).session(session);
-            const agentCapSetting = await Setting.findOne({ key: 'maxAgentReferralShare' }).session(session);
-            
-            const standardCap = standardCapSetting ? Number(standardCapSetting.value) : 0.9;
-            const agentCap = agentCapSetting ? Number(agentCapSetting.value) : 0.5;
-
-            // Stricter cap for agents vs standard users
-            const profitCap = (buyerRole === 'agent') ? agentCap : standardCap;
-            const maxSafeCommission = parentTxn.profit * profitCap;
-
-            // For logging
-            const capRateUsed = profitCap;
-
-            if (commissionAmount > maxSafeCommission) {
-                console.log(`[Safety Cap] ${buyerRole.toUpperCase()} purchase: Commission ${commissionAmount} exceeds ${profitCap*100}% of profit (${maxSafeCommission}). Capping.`);
-                commissionAmount = Math.max(0, maxSafeCommission);
-                wasCapped = true;
-            }
-            
-            // Attach to details later
-            parentTxn.capRateUsed = capRateUsed; 
-        }
-
         if (!parentTxn) {
-            console.error(`[Transparency Error] Parent transaction ${parentTransactionStringId} not found.`);
+            console.error(`[Transparency Error] Parent transaction ${parentTransactionStringId} not found. Cannot calculate margin-share.`);
             return 0;
         }
+
+        // 4.1 Calculate Commission based on PROFIT MARGIN, not the transaction amount
+        const profitMargin = parentTxn.profit || 0;
+        let commissionAmount = profitMargin * rate;
+        
+        if (commissionAmount <= 0) {
+             console.log(`[Margin Guard] Commission skipped: No available profit on transaction ${parentTransactionStringId}.`);
+             return 0;
+        }
+
+        // --- HARDENING: Profit Safety Cap against Misconfiguration ---
+        let originalCommission = commissionAmount;
+        let wasCapped = false;
+        let buyerRole = parentTxn.userRole || 'user';
+
+        // Fetch Global Profit-Share Caps
+        const standardCapSetting = await Setting.findOne({ key: 'maxReferralProfitShare' }).session(session);
+        const agentCapSetting = await Setting.findOne({ key: 'maxAgentReferralShare' }).session(session);
+        
+        // Defaults: Max 90% of profit to referrers of users, Max 50% to referrers of agents
+        const standardCap = standardCapSetting ? Number(standardCapSetting.value) : 0.9;
+        const agentCap = agentCapSetting ? Number(agentCapSetting.value) : 0.5;
+
+        // Stricter cap for agents vs standard users
+        const profitCap = (buyerRole === 'agent') ? agentCap : standardCap;
+        const maxSafeCommission = profitMargin * profitCap;
+
+        if (commissionAmount > maxSafeCommission) {
+            console.log(`[Safety Cap] ${buyerRole.toUpperCase()} referral: Requested margin share (${rate*100}%) exceeds system maximum (${profitCap*100}%). Capping.`);
+            commissionAmount = Math.max(0, maxSafeCommission);
+            wasCapped = true;
+        }
+        
+        // Attach to details later
+        const capRateUsed = profitCap;
+        parentTxn.capRateUsed = capRateUsed;
+
+
 
         const netProfit = (parentTxn.profit || 0) - commissionAmount;
 
