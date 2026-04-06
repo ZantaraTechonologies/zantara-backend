@@ -113,7 +113,9 @@ class PurchaseService {
                 const { processLifetimeCommission } = require('../utils/referral');
                 const commissionPaid = await processLifetimeCommission(userId, finalAmount, transaction._id, transaction.transactionId, session);
                 
-                transaction.netProfitAfterCommission = profit - commissionPaid;
+                const finalCommission = commissionPaid || 0;
+                transaction.netProfitAfterCommission = profit - finalCommission;
+                console.log(`[PurchaseService] Commission processed: ${finalCommission}. Final Net Profit: ${transaction.netProfitAfterCommission}`);
                 await transaction.save({ session });
 
                 // 8. Log the vendor cost as an Expense for financial tracking

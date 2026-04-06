@@ -77,7 +77,7 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
         console.log("!!! ENTERED processLifetimeCommission !!!");
         // 1. Get User and verify referrer
         const user = await User.findById(userId).populate('referredBy').session(session);
-        if (!user || (!user.referredBy && !user.referrerCode)) return;
+        if (!user || (!user.referredBy && !user.referrerCode)) return 0;
 
         // Use referredBy (ObjectId) as primary, fallback to referrerCode (String)
         let referrer = user.referredBy;
@@ -85,12 +85,12 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
             referrer = await User.findOne({ myReferralCode: user.referrerCode }).session(session);
         }
 
-        if (!referrer) return;
+        if (!referrer) return 0;
 
         // --- HARDENING: Self-Referral Guard ---
         if (referrer._id.toString() === userId.toString()) {
             console.warn(`Self-referral detected for user ${userId}. Skipping commission.`);
-            return;
+            return 0;
         }
 
         // 2. Fetch Global Commission Setting
@@ -105,7 +105,7 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
 
         // 4. Calculate Commission
         let commissionAmount = amount * rate;
-        if (commissionAmount <= 0) return;
+        if (commissionAmount <= 0) return 0;
 
         // --- HARDENING: Profit Safety Cap (Step 4: Combination Logic) ---
         const Transaction = require('../models/Transaction');
@@ -144,7 +144,7 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
 
         if (!parentTxn) {
             console.error(`[Transparency Error] Parent transaction ${parentTransactionStringId} not found.`);
-            return;
+            return 0;
         }
 
         const netProfit = (parentTxn.profit || 0) - commissionAmount;
@@ -184,7 +184,7 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
                 }
             }], { session });
 
-            return;
+            return 0;
         }
 
         // 5. Idempotency Check: Don't credit twice for the same transaction
@@ -194,7 +194,7 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
             type: 'referral_bonus', 
             transactionId: commId 
         }).session(session);
-        if (existing) return;
+        if (existing) return 0;
 
         /* 
         // 6. Credit Referrer Wallet - DISABLED to prevent double-crediting.
@@ -238,7 +238,8 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
             }
         }], { session });
 
-        console.log(`Lifetime commission of ${commissionAmount} credited to ${referrer.phone || referrer.email} (${wasCapped ? 'CAPPED' : 'FULL'})`);
+        console.log(`[Referral] Lifetime commission of ${commissionAmount} credited to ${referrer.phone || referrer.email} (${wasCapped ? 'CAPPED' : 'FULL'})`);
+        console.log("!!! COMPLETED processLifetimeCommission !!!");
 
         return commissionAmount;
 
