@@ -24,10 +24,9 @@ const verifyJWT = (req, res, next) => {
 }
 
 const checkRoles = (...allowed) => (req, res, next) => {
-    // Suppport both legacy 'role' string and new 'roles' array
-    const rolesArray = Array.isArray(req.user?.roles) 
-        ? req.user.roles 
-        : (req.user?.role ? [req.user.role] : []);
+    const userRoleString = req.user?.role ? [req.user.role] : [];
+    const userRolesArray = Array.isArray(req.user?.roles) ? req.user.roles : [];
+    const rolesArray = [...userRoleString, ...userRolesArray];
 
     const ok = rolesArray.some(r => allowed.includes(r));
     if (!ok) return res.status(403).json({ message: 'Forbidden: Insufficient role', requiredRoles: allowed });
