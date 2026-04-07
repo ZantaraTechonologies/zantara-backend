@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const transactionStatusSchema = new mongoose.Schema({
     refId: { type: String, required: true, unique: true }, // your app's reference
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true }, // ← add this
-    type: { type: String, enum: ['funding', 'purchase', 'payout'], required: true }, // you already use 'funding'
+    type: { type: String, enum: ['funding', 'purchase', 'payout', 'investment_buy'], required: true }, // you already use 'funding'
     status: { type: String, enum: ['pending', 'failed', 'success'], default: 'pending', index: true },
 
     // Optional but useful observability fields:
