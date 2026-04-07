@@ -1,6 +1,9 @@
+const mongoose = require('mongoose');
+const User = require('../models/User');
+const crypto = require('crypto');
 const { runDividendPayout } = require('../utils/dividendCron');
 const investmentService = require('../services/investment.service');
-const Setting = require('../models/Setting'); // Re-import if needed for getSettings helper
+const Setting = require('../models/Setting'); 
 
 // ─────────────────────────────────────────────────────────────
 // HELPERS

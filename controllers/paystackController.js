@@ -14,24 +14,35 @@ const payment = async (req, res) => {
         const { amount, channels, reference, metadata, isDirectTransfer } = req.body;
         const secret = process.env.PAYSTACK_SECRET_KEY;
         const amountKobo = Math.round(amount * 100);
+        
+        // Always generate a reference if not provided
+        const finalReference = reference || `REF-${crypto.randomBytes(4).toString('hex').toUpperCase()}-${Date.now()}`;
 
         if (isDirectTransfer) {
             // Use Charge API to get direct bank transfer details
             const response = await axios.post(`${process.env.PAYSTACK_BASE_URL}/charge`, {
                 email: req.user.email,
                 amount: amountKobo,
-                metadata: { userId: req.user.id, ...(metadata || {}), ...(reference ? { refId: reference } : {}) },
+                reference: finalReference, // REQUIRED to prevent "Charge attempted" error
+                metadata: { 
+                    userId: req.user.id, 
+                    ...(metadata || {}), 
+                    refId: finalReference 
+                },
                 bank_transfer: { account_expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() }
             }, {
                 headers: { Authorization: `Bearer ${secret}` }
             });
 
-            if (response.data.status && response.data.data.status === 'send_address') {
+            if (response.data.status) {
                 const data = response.data.data;
+                
+                // If it's bank transfer, it should be in 'send_address' or similar state
+                // Or sometimes it's immediately success/pending
                 
                 // Create status record
                 await TransactionStatus.create({
-                    refId: data.reference,
+                    refId: finalReference,
                     userId: req.user.id,
                     type: metadata?.type || 'funding',
                     amountKobo: amountKobo,
@@ -41,7 +52,7 @@ const payment = async (req, res) => {
 
                 return res.json({
                     success: true,
-                    reference: data.reference,
+                    reference: finalReference,
                     account_number: data.account_number,
                     bank_name: data.bank?.name || 'Bank',
                     account_name: data.account_name || 'Zantara Technologies',
@@ -61,7 +72,7 @@ const payment = async (req, res) => {
         );
 
         await TransactionStatus.create({
-            refId: init.data.reference,
+            refId: finalReference,
             userId: req.user.id,
             type: metadata?.type || 'funding',
             amountKobo: amountKobo,
@@ -71,7 +82,7 @@ const payment = async (req, res) => {
 
         res.json({ 
             authorization_url: init.data.authorization_url, 
-            reference: init.data.reference,
+            reference: finalReference,
         });
     } catch (err) {
         console.error('Paystack Error:', err.response?.data || err.message);
