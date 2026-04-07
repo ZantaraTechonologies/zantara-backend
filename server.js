@@ -86,6 +86,7 @@ const auditRoutes = require('./routes/audit');
 const userEarningsRoutes = require('./routes/userEarnings');
 const withdrawalRoutes = require('./routes/withdrawal');
 const systemRoutes = require('./routes/system');
+const investmentRoutes = require('./routes/investment');
 const errorHandler = require('./middlewares/errorHandler');
 
 app.use('/api', index);
@@ -111,6 +112,7 @@ app.use('/api/admin/audit-logs', auditRoutes);
 app.use('/api/admin/withdrawals', withdrawalRoutes);
 app.use('/api/user/earnings', userEarningsRoutes);
 app.use('/api/admin/system', systemRoutes);
+app.use('/api/investment', investmentRoutes);
 
 // Global error handler (keep last)
 app.use(errorHandler);
@@ -126,4 +128,7 @@ const MONGOURI = process.env.MONGO_URI;
 
 mongoose.connect(MONGOURI).then(() => {
     app.listen(PORT, () => console.log(`API is Live on port ${PORT}`));
+    // Start the monthly dividend cron job
+    const { startDividendCron } = require('./utils/dividendCron');
+    startDividendCron();
 }).catch(() => console.log('Error connecting to the Database'));
