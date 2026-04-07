@@ -66,8 +66,8 @@ const payment = async (req, res) => {
         const init = await initializePayment(
             req.user.email,
             amount,
-            { userId: req.user.id, ...(metadata || {}), ...(reference ? { refId: reference } : {}) },
-            reference,
+            { userId: req.user.id, ...(metadata || {}), refId: finalReference },
+            finalReference,
             channels
         );
 
