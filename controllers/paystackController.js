@@ -97,6 +97,50 @@ const verifyTransaction = async (req, res) => {
         
         if (!status) return res.status(404).json({ message: 'Transaction not found' });
         
+        // Manual verification fallback
+        if (status.status === 'pending') {
+            const secret = process.env.PAYSTACK_SECRET_KEY;
+            try {
+                const verify = await axios.get(`${process.env.PAYSTACK_BASE_URL}/transaction/verify/${reference}`, {
+                    headers: { Authorization: `Bearer ${secret}` }
+                });
+
+                if (verify?.data?.data?.status === 'success') {
+                    const upd = await TransactionStatus.updateOne(
+                        { refId: reference, status: 'pending' },
+                        { $set: { status: 'success' } }
+                    );
+
+                    if (upd.modifiedCount === 1) {
+                        const meta = verify.data.data.metadata || {};
+                        const amountNaira = verify.data.data.amount / 100;
+                        if (status.type === 'investment_buy') {
+                             // Assuming investmentService handles duplicate checking internally, but modifiedCount prevents race
+                             await investmentService.fulfillSharePurchase(req.user.id, meta.qty, reference, false);
+                        } else {
+                             await walletService.credit(req.user.id, amountNaira, reference, 'funding');
+                        }
+                        
+                        await logTransaction({
+                            userId: req.user.id,
+                            refId: reference,
+                            type: status.type,
+                            service: 'Paystack',
+                            amount: amountNaira,
+                            status: 'success',
+                            response: verify.data.data
+                        });
+                    }
+                    status.status = 'success';
+                } else if (verify?.data?.data?.status === 'failed') {
+                    await TransactionStatus.updateOne({ refId: reference }, { $set: { status: 'failed' } });
+                    status.status = 'failed';
+                }
+            } catch (vErr) {
+                console.error('Manual fallback verification failed:', vErr.message);
+            }
+        }
+
         res.json({
             success: true,
             status: status.status, // 'pending', 'success', 'failed'
