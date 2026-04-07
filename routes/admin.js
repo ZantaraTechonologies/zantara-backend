@@ -43,9 +43,9 @@ router.post('/kyc/reject/:id', verifyJWT, checkRoles('admin', 'superAdmin'), (re
     req.body.status = 'rejected';
     reviewKyc(req, res, next);
 })
-router.put('/users/:id', updateUserRole)
-router.put('/users/:id/commission-rate', updateUserCommissionRate)
-router.put('/users/:id/agent-discount', updateUserAgentDiscount)
+router.put('/users/:id', checkRoles('superAdmin'), updateUserRole)
+router.put('/users/:id/commission-rate', checkRoles('superAdmin'), updateUserCommissionRate)
+router.put('/users/:id/agent-discount', checkRoles('superAdmin'), updateUserAgentDiscount)
 router.get('/settings', checkRoles('superAdmin'), getSettings)
 router.post('/settings', checkRoles('superAdmin'), updateSetting)
 router.get('/settings/commission', checkRoles('superAdmin'), getCommissionSettings)
