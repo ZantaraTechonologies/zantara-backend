@@ -1,12 +1,6 @@
-const mongoose = require('mongoose');
-const User = require('../models/User');
-const Wallet = require('../models/Wallet');
-const Transaction = require('../models/Transaction');
-const Setting = require('../models/Setting');
-const InvestmentWithdrawal = require('../models/InvestmentWithdrawal');
-const ShareExitRequest = require('../models/ShareExitRequest');
-const crypto = require('crypto');
 const { runDividendPayout } = require('../utils/dividendCron');
+const investmentService = require('../services/investment.service');
+const Setting = require('../models/Setting'); // Re-import if needed for getSettings helper
 
 // ─────────────────────────────────────────────────────────────
 // HELPERS
@@ -111,66 +105,48 @@ exports.buyShares = async (req, res) => {
     session.startTransaction();
     try {
         const userId = req.user.id;
+        const qty = parseInt(req.body.qty);
         if (!qty || qty < 1) return res.status(400).json({ message: 'Quantity must be at least 1' });
 
         const [user, wallet, settings] = await Promise.all([
             User.findById(userId).session(session),
             Wallet.findOne({ userId }).session(session),
-            getSettings()
+            investmentService.getInvestmentSettings()
         ]);
 
-        if (!settings.investmentEnabled) return res.status(403).json({ message: 'Investment feature is currently disabled' });
         if (!user || !wallet) return res.status(404).json({ message: 'User or wallet not found' });
+        if (!settings.investmentEnabled) return res.status(403).json({ message: 'Investment feature is currently disabled' });
 
         // Min shares check
         if (qty < (settings.minSharesPerPurchase || 1))
             return res.status(400).json({ message: `Minimum purchase is ${settings.minSharesPerPurchase || 1} shares` });
 
-        // Validate limits
-        const totalSharesIssued = await User.aggregate([{ $group: { _id: null, total: { $sum: '$sharesOwned' } } }]);
-        const sharesIssued = totalSharesIssued[0]?.total || 0;
-        if (sharesIssued + qty > settings.totalSharesAvailable)
-            return res.status(400).json({ message: `Only ${settings.totalSharesAvailable - sharesIssued} shares remaining` });
-        if (user.sharesOwned + qty > settings.maxSharesPerUser)
-            return res.status(400).json({ message: `Maximum ${settings.maxSharesPerUser} shares per user` });
-
         const totalCost = qty * settings.sharePrice;
         if (wallet.balance < totalCost)
             return res.status(400).json({ message: `Insufficient wallet balance. Need ₦${totalCost.toLocaleString()}` });
 
-        // Deduct from wallet
+        // Deduct from wallet first
         wallet.balance -= totalCost;
         await wallet.save({ session });
 
-        // Update user
-        const isFirstPurchase = !user.isShareholder;
-        user.sharesOwned += qty;
-        user.isShareholder = true;
-        if (isFirstPurchase) user.firstSharePurchasedAt = new Date();
-        await user.save({ session });
-
-        // Record transaction
-        await Transaction.create([{
-            userId,
-            transactionId: generateRef('SHARE'),
-            type: 'share_purchase',
-            amount: totalCost,
-            status: 'success',
-            details: { sharesQty: qty, pricePerShare: settings.sharePrice }
-        }], { session });
-
         await session.commitTransaction();
+        session.endSession();
+
+        // Now fulfill the shares using the service (handles user update & transaction log)
+        const refId = `SHARE-${crypto.randomUUID().split('-')[0].toUpperCase()}-${Date.now()}`;
+        const result = await investmentService.fulfillSharePurchase(userId, qty, refId, true);
+
         res.json({
             success: true,
             message: `Successfully purchased ${qty} share${qty > 1 ? 's' : ''}`,
-            data: { sharesOwned: user.sharesOwned, totalCost, newWalletBalance: wallet.balance }
+            data: { sharesOwned: result.sharesOwned, totalCost, newWalletBalance: wallet.balance }
         });
     } catch (err) {
-        await session.abortTransaction();
+        if (session.inTransaction()) await session.abortTransaction();
         console.error('buyShares error:', err);
-        res.status(500).json({ message: 'Share purchase failed' });
+        res.status(500).json({ message: err.message || 'Share purchase failed' });
     } finally {
-        session.endSession();
+        if (session) session.endSession();
     }
 };
 
