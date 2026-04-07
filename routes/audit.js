@@ -3,6 +3,6 @@ const router = express.Router();
 const { getAuditLogs } = require('../controllers/auditController');
 const { verifyJWT, checkRoles } = require('../middlewares/auth');
 
-router.get('/', verifyJWT, checkRoles('admin', 'superAdmin'), getAuditLogs);
+router.get('/', verifyJWT, checkRoles('superAdmin'), getAuditLogs);
 
 module.exports = router;

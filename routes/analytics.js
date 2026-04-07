@@ -21,6 +21,6 @@ router.get('/users/registrations/daily', dailyUserRegistrations)
 router.get('/dashboard', verifyJWT, checkRoles('admin', 'superAdmin'), getDashboardStats)
 
 // Admin Earnings (Step 11)
-router.get('/admin/earnings', verifyJWT, checkRoles('admin', 'superAdmin'), getAdminEarningsAnalytics)
+router.get('/admin/earnings', verifyJWT, checkRoles('superAdmin'), getAdminEarningsAnalytics)
 
 module.exports = router

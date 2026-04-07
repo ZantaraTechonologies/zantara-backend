@@ -46,18 +46,18 @@ router.post('/kyc/reject/:id', verifyJWT, checkRoles('admin', 'superAdmin'), (re
 router.put('/users/:id', updateUserRole)
 router.put('/users/:id/commission-rate', updateUserCommissionRate)
 router.put('/users/:id/agent-discount', updateUserAgentDiscount)
-router.get('/settings', getSettings)
-router.post('/settings', updateSetting)
-router.get('/settings/commission', getCommissionSettings)
-router.put('/settings/commission', updateCommissionSettings)
-router.get('/settings/agent', getAgentSettings)
-router.put('/settings/agent', updateAgentSettings)
-router.get('/settings/commission-caps', getCommissionCaps)
-router.put('/settings/commission-caps', updateCommissionCaps)
+router.get('/settings', checkRoles('superAdmin'), getSettings)
+router.post('/settings', checkRoles('superAdmin'), updateSetting)
+router.get('/settings/commission', checkRoles('superAdmin'), getCommissionSettings)
+router.put('/settings/commission', checkRoles('superAdmin'), updateCommissionSettings)
+router.get('/settings/agent', checkRoles('superAdmin'), getAgentSettings)
+router.put('/settings/agent', checkRoles('superAdmin'), updateAgentSettings)
+router.get('/settings/commission-caps', checkRoles('superAdmin'), getCommissionCaps)
+router.put('/settings/commission-caps', checkRoles('superAdmin'), updateCommissionCaps)
 
 // Wallet Management
-router.post('/users/:userId/credit', adminCreditWallet)
-router.post('/users/:userId/debit', adminDebitWallet)
+router.post('/users/:userId/credit', checkRoles('superAdmin'), adminCreditWallet)
+router.post('/users/:userId/debit', checkRoles('superAdmin'), adminDebitWallet)
 router.get('/users/export/csv', exportUsersCSV)
 
 // Service Management

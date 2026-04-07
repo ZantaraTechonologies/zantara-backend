@@ -5,8 +5,8 @@ const expenseController = require('../controllers/expenseController');
 const settlementController = require('../controllers/settlementController');
 const { verifyJWT, checkRoles } = require('../middlewares/auth');
 
-// All business routes require admin/superAdmin access
-router.use(verifyJWT, checkRoles('admin', 'superAdmin'));
+// All business routes require superAdmin access exclusively
+router.use(verifyJWT, checkRoles('superAdmin'));
 
 router.get('/overview', businessController.getOverview);
 router.get('/wallet', businessController.getBusinessWallet);
