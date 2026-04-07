@@ -65,12 +65,16 @@ const reviewKyc = async (req, res) => {
         await kyc.save();
 
         // ⬇️ Log Admin Action
-        await require('../models/AdminLog').create({
-            adminId: req.user.id,
-            action: 'KYC_REVIEW',
-            targetId: kyc._id,
-            notes: `Status: ${status}`
-        });
+        const { logAction } = require('./auditController');
+        await logAction(
+            req.user.id,
+            req.user.name,
+            'KYC_REVIEW',
+            `KYC ID: ${kyc._id} (User: ${kyc.userId?.name || kyc.userId})`,
+            { status, rejectionReason },
+            'success',
+            req
+        );
 
         if (status === 'approved') {
             await User.findByIdAndUpdate(kyc.userId, { kycLevel: kyc.tier });

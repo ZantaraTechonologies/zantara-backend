@@ -101,7 +101,30 @@ const updateUserRole = async (req, res) => {
         }
         if (status !== undefined) update.status = status;
 
+        const oldUser = await User.findById(id);
+        if (!oldUser) return res.status(404).json({ message: 'User not found' });
+
         const user = await User.findByIdAndUpdate(id, update, { new: true });
+
+        // Logging & Notification
+        const { logAction } = require('./auditController');
+        const { notifySuperAdmins } = require('../services/notificationService');
+
+        if (status === false && oldUser.status !== false) {
+            // User was blocked
+            await logAction(req.user.id, req.user.name, 'USER_BLOCK', `User: ${user.name} (${user.phone})`, { userId: id }, 'success', req);
+            await notifySuperAdmins(
+                `🚨 User Blocked: ${user.name}`,
+                `<p>Admin <b>${req.user.name}</b> blocked user <b>${user.name}</b> (${user.phone}) at ${new Date().toLocaleString()}.</p>`
+            );
+        } else if (status === true && oldUser.status === false) {
+             await logAction(req.user.id, req.user.name, 'USER_UNBLOCK', `User: ${user.name} (${user.phone})`, { userId: id }, 'success', req);
+        }
+
+        if (role && role !== oldUser.role) {
+            await logAction(req.user.id, req.user.name, 'ROLE_CHANGE', `User: ${user.name} (${user.phone})`, { oldRole: oldUser.role, newRole: role }, 'success', req);
+        }
+
         res.json({ success: true, data: user });
     } catch (e) {
         res.status(500).json({ message: e.message });
@@ -111,9 +134,32 @@ const updateUserRole = async (req, res) => {
 const getSettings = async (req, res) => {
     try {
         const settings = await require('../models/Setting').find();
-        // Convert array to object for frontend convenience
-        const settingsMap = {};
+        
+        // Define all known setting keys with their default values
+        const defaults = {
+            maintenanceMode: false,
+            minWithdrawal: 1000,
+            referralRate: 5,
+            primaryGateway: 'vtpass',
+            gatewayTimeout: 30000,
+            // Investment Defaults
+            investmentEnabled: true,
+            sharePrice: 10000,
+            maxSharesPerUser: 20,
+            totalSharesAvailable: 200,
+            investorAllocationPercent: 20,
+            minSharesPerPurchase: 1,
+            dividendWithdrawalFee: 1.5,
+            dividendReinvestFee: 0,
+            dividendRedeemFee: 0,
+            shareLockPeriodMonths: 6,
+            shareExitFee: 5,
+            maxMonthlyExitPercent: 10
+        };
+
+        const settingsMap = { ...defaults };
         settings.forEach(s => settingsMap[s.key] = s.value);
+        
         res.json({ success: true, data: settingsMap });
     } catch (e) {
         res.status(500).json({ message: e.message });
@@ -128,6 +174,9 @@ const updateSetting = async (req, res) => {
             { key, value },
             { upsert: true, new: true }
         );
+        const { logAction } = require('./auditController');
+        await logAction(req.user.id, req.user.name, 'SETTING_UPDATE', `Key: ${key}`, { value }, 'success', req);
+
         res.json({ success: true, message: 'Setting updated' });
     } catch (e) {
         res.status(500).json({ message: e.message });
@@ -161,6 +210,9 @@ const updateCommissionSettings = async (req, res) => {
             { key: 'defaultCommissionRate', value: rate },
             { upsert: true, new: true }
         );
+        const { logAction } = require('./auditController');
+        await logAction(req.user.id, req.user.name, 'COMMISSION_SETTING_UPDATE', 'Global Rate', { defaultCommissionRate: rate }, 'success', req);
+
         res.json({ success: true, message: 'Global commission rate updated successfully', defaultCommissionRate: rate });
     } catch (e) {
         res.status(500).json({ message: e.message });
@@ -184,6 +236,9 @@ const updateUserCommissionRate = async (req, res) => {
         const user = await User.findByIdAndUpdate(id, { commissionRate }, { new: true });
         
         if (!user) return res.status(404).json({ message: 'User not found' });
+
+        const { logAction } = require('./auditController');
+        await logAction(req.user.id, req.user.name, 'USER_COMMISSION_OVERRIDE', `User: ${user.name}`, { commissionRate: user.commissionRate }, 'success', req);
 
         res.json({ success: true, message: 'User commission override updated successfully', commissionRate: user.commissionRate });
     } catch (e) {
@@ -218,6 +273,9 @@ const updateAgentSettings = async (req, res) => {
             { key: 'defaultAgentDiscountRate', value: rate },
             { upsert: true, new: true }
         );
+        const { logAction } = require('./auditController');
+        await logAction(req.user.id, req.user.name, 'AGENT_DISCOUNT_SETTING_UPDATE', 'Global Rate', { defaultAgentDiscountRate: rate }, 'success', req);
+
         res.json({ success: true, message: 'Global agent discount rate updated successfully', defaultAgentDiscountRate: rate });
     } catch (e) {
         res.status(500).json({ message: e.message });
@@ -241,6 +299,9 @@ const updateUserAgentDiscount = async (req, res) => {
         const user = await User.findByIdAndUpdate(id, { agentDiscountRate }, { new: true });
         
         if (!user) return res.status(404).json({ message: 'User not found' });
+
+        const { logAction } = require('./auditController');
+        await logAction(req.user.id, req.user.name, 'USER_AGENT_DISCOUNT_OVERRIDE', `User: ${user.name}`, { agentDiscountRate: user.agentDiscountRate }, 'success', req);
 
         res.json({ success: true, message: 'User agent discount override updated successfully', agentDiscountRate: user.agentDiscountRate });
     } catch (e) {
@@ -305,6 +366,10 @@ const updateCommissionCaps = async (req, res) => {
         }
 
         await Promise.all(updatePromises);
+
+        const { logAction } = require('./auditController');
+        await logAction(req.user.id, req.user.name, 'COMMISSION_CAPS_UPDATE', 'System Caps', { maxReferralProfitShare, maxAgentReferralShare }, 'success', req);
+
         res.json({ success: true, message: 'Commission profit-share caps updated successfully' });
     } catch (e) {
         res.status(500).json({ message: e.message });

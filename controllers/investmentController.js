@@ -5,7 +5,7 @@ const Transaction = require('../models/Transaction');
 const Setting = require('../models/Setting');
 const InvestmentWithdrawal = require('../models/InvestmentWithdrawal');
 const ShareExitRequest = require('../models/ShareExitRequest');
-const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 const { runDividendPayout } = require('../utils/dividendCron');
 
 // ─────────────────────────────────────────────────────────────
@@ -33,7 +33,7 @@ const getSettings = async () => {
     return map;
 };
 
-const generateRef = (prefix) => `${prefix}-${uuidv4().split('-')[0].toUpperCase()}-${Date.now()}`;
+const generateRef = (prefix) => `${prefix}-${crypto.randomUUID().split('-')[0].toUpperCase()}-${Date.now()}`;
 
 // ─────────────────────────────────────────────────────────────
 // USER ACTIONS
@@ -47,7 +47,7 @@ exports.getInvestmentSummary = async (req, res) => {
     try {
         const userId = req.user.id;
         const [user, settings] = await Promise.all([
-            User.findById(userId).select('sharesOwned dividendBalance totalDividendsEarned isShareholder firstSharePurchasedAt frozenShares'),
+            User.findById(userId).select('sharesOwned dividendBalance referralBalance totalDividendsEarned isShareholder firstSharePurchasedAt frozenShares'),
             getSettings()
         ]);
 
@@ -77,6 +77,7 @@ exports.getInvestmentSummary = async (req, res) => {
                 frozenShares: user.frozenShares,
                 availableShares: user.sharesOwned - user.frozenShares,
                 dividendBalance: user.dividendBalance,
+                referralBalance: user.referralBalance || 0,
                 totalDividendsEarned: user.totalDividendsEarned,
                 firstSharePurchasedAt: user.firstSharePurchasedAt,
                 lockExpiresAt,
@@ -110,7 +111,6 @@ exports.buyShares = async (req, res) => {
     session.startTransaction();
     try {
         const userId = req.user.id;
-        const qty = parseInt(req.body.qty);
         if (!qty || qty < 1) return res.status(400).json({ message: 'Quantity must be at least 1' });
 
         const [user, wallet, settings] = await Promise.all([
@@ -121,6 +121,10 @@ exports.buyShares = async (req, res) => {
 
         if (!settings.investmentEnabled) return res.status(403).json({ message: 'Investment feature is currently disabled' });
         if (!user || !wallet) return res.status(404).json({ message: 'User or wallet not found' });
+
+        // Min shares check
+        if (qty < (settings.minSharesPerPurchase || 1))
+            return res.status(400).json({ message: `Minimum purchase is ${settings.minSharesPerPurchase || 1} shares` });
 
         // Validate limits
         const totalSharesIssued = await User.aggregate([{ $group: { _id: null, total: { $sum: '$sharesOwned' } } }]);
@@ -307,6 +311,7 @@ exports.redeemToMainWallet = async (req, res) => {
     try {
         const userId = req.user.id;
         const amount = parseFloat(req.body.amount);
+        const source = req.body.source || 'dividend'; // 'dividend' or 'referral'
         if (!amount || amount <= 0) return res.status(400).json({ message: 'Invalid amount' });
 
         const [user, wallet, settings] = await Promise.all([
@@ -315,27 +320,32 @@ exports.redeemToMainWallet = async (req, res) => {
             getSettings()
         ]);
 
+        const balanceKey = source === 'referral' ? 'referralBalance' : 'dividendBalance';
         const fee = amount * (settings.dividendRedeemFee / 100);
         const netAmount = amount - fee;
 
-        if (user.dividendBalance < amount)
-            return res.status(400).json({ message: `Insufficient dividend balance` });
+        if ((user[balanceKey] || 0) < amount)
+            return res.status(400).json({ message: `Insufficient ${source} balance` });
 
-        user.dividendBalance -= amount;
+        user[balanceKey] -= amount;
         wallet.balance += netAmount;
         await Promise.all([user.save({ session }), wallet.save({ session })]);
 
         await Transaction.create([{
             userId,
-            transactionId: generateRef('REDEEM'),
-            type: 'dividend_redeem',
+            transactionId: generateRef(source === 'referral' ? 'REF_RED' : 'REDEEM'),
+            type: source === 'referral' ? 'referral_redeem' : 'dividend_redeem',
             amount,
             status: 'success',
-            details: { fee, netAmount }
+            details: { fee, netAmount, source }
         }], { session });
 
         await session.commitTransaction();
-        res.json({ success: true, message: `₦${netAmount.toLocaleString()} moved to main wallet`, data: { dividendBalance: user.dividendBalance, walletBalance: wallet.balance } });
+        res.json({ 
+            success: true, 
+            message: `₦${netAmount.toLocaleString()} moved to main wallet`, 
+            data: { [balanceKey]: user[balanceKey], walletBalance: wallet.balance } 
+        });
     } catch (err) {
         await session.abortTransaction();
         console.error('redeemToMainWallet error:', err);
@@ -354,7 +364,7 @@ exports.requestDividendWithdrawal = async (req, res) => {
     session.startTransaction();
     try {
         const userId = req.user.id;
-        const { amount, bankName, accountNumber, accountName } = req.body;
+        const { amount, bankName, accountNumber, accountName, source = 'dividend' } = req.body;
         if (!amount || !bankName || !accountNumber || !accountName)
             return res.status(400).json({ message: 'All fields are required' });
 
@@ -363,15 +373,16 @@ exports.requestDividendWithdrawal = async (req, res) => {
             getSettings()
         ]);
 
+        const balanceKey = source === 'referral' ? 'referralBalance' : 'dividendBalance';
         const feePercent = settings.dividendWithdrawalFee;
         const feeCharged = amount * (feePercent / 100);
         const netAmount = amount - feeCharged;
 
-        if (user.dividendBalance < amount)
-            return res.status(400).json({ message: 'Insufficient dividend balance' });
+        if ((user[balanceKey] || 0) < amount)
+            return res.status(400).json({ message: `Insufficient ${source} balance` });
 
         // Freeze the amount
-        user.dividendBalance -= amount;
+        user[balanceKey] -= amount;
         await user.save({ session });
 
         const withdrawal = await InvestmentWithdrawal.create([{
@@ -383,7 +394,8 @@ exports.requestDividendWithdrawal = async (req, res) => {
             bankName,
             accountNumber,
             accountName,
-            refId: generateRef('DIVW')
+            source,
+            refId: generateRef(source === 'referral' ? 'REF_W' : 'DIVW')
         }], { session });
 
         await session.commitTransaction();
@@ -535,6 +547,17 @@ exports.processShareExit = async (req, res) => {
             await Promise.all([user.save({ session }), exitRequest.save({ session })]);
         }
 
+        const { logAction } = require('./auditController');
+        await logAction(
+            req.user.id,
+            req.user.name,
+            action === 'approved' ? 'INVESTMENT_EXIT_APPROVE' : 'INVESTMENT_EXIT_REJECT',
+            `Exit ID: ${id} (User: ${user?.name || exitRequest.userId})`,
+            { shares: exitRequest.sharesRequested, amount: exitRequest.netAmount, action, adminNote },
+            'success',
+            req
+        );
+
         await session.commitTransaction();
         res.json({ success: true, message: `Exit request ${action}`, data: exitRequest });
     } catch (err) {
@@ -591,6 +614,26 @@ exports.processDividendWithdrawal = async (req, res) => {
             }], { session });
         }
 
+        const { logAction } = require('./auditController');
+        const { notifySuperAdmins } = require('../services/notificationService');
+
+        await logAction(
+            req.user.id,
+            req.user.name,
+            action === 'approved' ? 'DIVIDEND_WITHDRAW_APPROVE' : 'DIVIDEND_WITHDRAW_REJECT',
+            `Withdrawal ID: ${id} (User ID: ${withdrawal.userId})`,
+            { amount: withdrawal.amount, action, adminNote },
+            'success',
+            req
+        );
+
+        if (action === 'approved' && withdrawal.amount >= 50000) {
+            await notifySuperAdmins(
+                `💰 Large Investment Withdrawal Approved: ₦${withdrawal.amount.toLocaleString()}`,
+                `<p>Admin <b>${req.user.name}</b> approved a large investment withdrawal of <b>₦${withdrawal.amount.toLocaleString()}</b> for User ${withdrawal.userId}.</p>`
+            );
+        }
+
         await session.commitTransaction();
         res.json({ success: true, message: `Withdrawal ${action}` });
     } catch (err) {
@@ -639,6 +682,9 @@ exports.triggerManualDividendPayout = async (req, res) => {
     try {
         const result = await runDividendPayout();
         if (result.success) {
+            const { logAction } = require('./auditController');
+            await logAction(req.user.id, req.user.name, 'INVESTMENT_MANUAL_PAYOUT', `Month: ${result.month}`, { totalPaid: result.totalPaid, shareholders: result.shareholders }, 'success', req);
+            
             res.json({ success: true, message: `Payout successful for ${result.month}. Distributed ₦${result.totalPaid.toLocaleString()} to ${result.shareholders} shareholders.` });
         } else {
             res.status(400).json({ message: `Payout skipped/failed: ${result.reason}` });

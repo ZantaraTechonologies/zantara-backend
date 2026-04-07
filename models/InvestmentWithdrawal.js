@@ -10,6 +10,7 @@ const investmentWithdrawalSchema = new mongoose.Schema({
     bankName:      { type: String, required: true },
     accountNumber: { type: String, required: true },
     accountName:   { type: String, required: true },
+    source:        { type: String, enum: ['dividend', 'referral'], default: 'dividend' },
     refId:         { type: String, unique: true, sparse: true },
     status:        { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
     adminNote:     { type: String, default: '' }

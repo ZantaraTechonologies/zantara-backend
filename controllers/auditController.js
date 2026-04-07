@@ -33,16 +33,23 @@ exports.getAuditLogs = async (req, res) => {
     }
 };
 
-exports.logAction = async (adminId, operatorName, action, target, details, result = 'success') => {
+exports.logAction = async (adminId, operatorName, action, target, details, result = 'success', req = null) => {
     try {
-        await AuditLog.create({
+        const logData = {
             adminId,
             operatorName,
             action,
             target,
             details,
             result
-        });
+        };
+
+        if (req) {
+            logData.ipAddress = req.ip || req.headers['x-forwarded-for'];
+            logData.userAgent = req.headers['user-agent'];
+        }
+
+        await AuditLog.create(logData);
     } catch (error) {
         console.error('Audit logging failed:', error);
     }

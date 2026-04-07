@@ -77,13 +77,24 @@ const processWithdrawal = async (req, res) => {
 
         // ⬇️ Log Admin Action
         const { logAction } = require('./auditController');
+        const { notifySuperAdmins } = require('../services/notificationService');
+
         await logAction(
             req.user.id,
             req.user.name,
             'WITHDRAWAL_PROCESS',
-            `Withdrawal ID: ${request._id}`,
-            { status, adminNote }
+            `Withdrawal ID: ${request._id} (User: ${request.userId})`,
+            { amount: request.amount, status, adminNote },
+            'success',
+            req
         );
+
+        if (status === 'approved' && request.amount >= 50000) {
+            await notifySuperAdmins(
+                `💰 Large Withdrawal Approved: ₦${request.amount.toLocaleString()}`,
+                `<p>Admin <b>${req.user.name}</b> approved a large withdrawal of <b>₦${request.amount.toLocaleString()}</b> for User ${request.userId}.</p>`
+            );
+        }
 
         const user = await User.findById(request.userId)
         const statusMsg = status === 'approved'
