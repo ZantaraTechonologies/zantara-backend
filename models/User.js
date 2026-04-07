@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const Wallet = require('./Wallet');
 
-const ALLOWED_ROLES = ['user', 'agent', 'admin', 'superAdmin']; // extend anytime
+const ALLOWED_ROLES = ['user', 'agent', 'admin', 'superAdmin', 'shareholder']; // extend anytime
 
 const userSchema = new mongoose.Schema({
     name: String,
@@ -25,6 +25,13 @@ const userSchema = new mongoose.Schema({
     totalReferralBonus: { type: Number, default: 0 },
     referralBalance: { type: Number, default: 0 },
     resellerEarnings: { type: Number, default: 0 },
+    // Investment / Shareholder Fields
+    isShareholder: { type: Boolean, default: false },
+    sharesOwned: { type: Number, default: 0, min: 0 },
+    dividendBalance: { type: Number, default: 0, min: 0 },     // Investment Wallet
+    totalDividendsEarned: { type: Number, default: 0 },        // Lifetime dividend tracker
+    firstSharePurchasedAt: { type: Date, default: null },      // For lock period calculation
+    frozenShares: { type: Number, default: 0 },                // Shares locked in a pending exit request
     transactionPin: { type: String, select: false }, // Hashed PIN
     isPinSet: { type: Boolean, default: false },
     kycLevel: { type: Number, default: 1 }, // Tier 1, 2, 3
