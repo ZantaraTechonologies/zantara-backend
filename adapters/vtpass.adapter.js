@@ -120,8 +120,8 @@ class VTPassAdapter extends BaseAdapter {
             // VTPass Exam Pin: if serviceID is missing, extract it (e.g. 'waec' from 'waec-registration')
             let finalServiceID = serviceID || (variation_code ? variation_code.split('-')[0] : '');
             finalServiceID = finalServiceID.toLowerCase();
-            const finalVarCode = (variation_code || '').toLowerCase();
-
+            const finalVarCode = (variation_code === 'utme-no-mock' && finalServiceID === 'jamb') ? 'utme' : (variation_code || '').toLowerCase();
+            
             const payload = { 
                 request_id, 
                 serviceID: finalServiceID, 
@@ -132,6 +132,8 @@ class VTPassAdapter extends BaseAdapter {
             
             if (billersCode) payload.billersCode = billersCode;
             if (quantity && finalServiceID !== 'jamb') payload.quantity = quantity;
+
+            console.log('[VTPass] Sending Exam PIN Request Payload:', JSON.stringify(payload, null, 2));
 
             const raw = await this._pay(payload);
             return this.mapResponse(raw);
