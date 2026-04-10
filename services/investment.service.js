@@ -42,6 +42,11 @@ const generateRef = (prefix) => `${prefix}-${crypto.randomUUID().split('-')[0].t
  * @param {boolean} isWalletPayment - Whether the payment was already deducted from wallet
  */
 const fulfillSharePurchase = async (userId, qty, refId, isWalletPayment = false, externalSession = null) => {
+    const qtyNum = Number(qty);
+    if (isNaN(qtyNum) || qtyNum <= 0) {
+        throw new Error('Invalid quantity for share fulfillment');
+    }
+
     const session = externalSession || await mongoose.startSession();
     if (!externalSession) session.startTransaction();
     

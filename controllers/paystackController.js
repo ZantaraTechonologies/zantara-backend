@@ -7,6 +7,15 @@ const { logTransaction } = require('../utils/transaction');
 const { initializePayment } = require('../utils/paystack');
 const investmentService = require('../services/investment.service');
 
+// Optional helper for robust metadata parsing
+const parseMetadata = (metadata) => {
+    if (!metadata) return {};
+    if (typeof metadata === 'string') {
+        try { return JSON.parse(metadata); } catch (e) { return {}; }
+    }
+    return metadata;
+};
+
 // Optional helper endpoint (not used by /wallet/fund flow)
 // Allows channels/reference to be passed if needed.
 const payment = async (req, res) => {
@@ -112,11 +121,11 @@ const verifyTransaction = async (req, res) => {
                     );
 
                     if (upd.modifiedCount === 1) {
-                        const meta = verify.data.data.metadata || {};
+                        const meta = parseMetadata(verify.data.data.metadata);
                         const amountNaira = verify.data.data.amount / 100;
                         if (status.type === 'investment_buy') {
-                             // Assuming investmentService handles duplicate checking internally, but modifiedCount prevents race
-                             await investmentService.fulfillSharePurchase(req.user.id, meta.qty, reference, false);
+                             const qty = Number(meta.qty);
+                             await investmentService.fulfillSharePurchase(req.user.id, qty, reference, false);
                         } else {
                              await walletService.credit(req.user.id, amountNaira, reference, 'funding');
                         }
@@ -209,7 +218,8 @@ const webhook = async (req, res) => {
                     if (userId) {
                         // 4. Ledger-backed Credit or Fulfillment
                         if (meta.type === 'investment_buy') {
-                             await investmentService.fulfillSharePurchase(userId, meta.qty, refId, false);
+                             const qty = Number(meta.qty);
+                             await investmentService.fulfillSharePurchase(userId, qty, refId, false);
                         } else {
                              await walletService.credit(userId, amountNaira, refId, 'funding');
                         }

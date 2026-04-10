@@ -119,8 +119,14 @@ class VTPassAdapter extends BaseAdapter {
         try {
             // VTPass Exam Pin: if serviceID is missing, extract it (e.g. 'waec' from 'waec-registration')
             let finalServiceID = serviceID || (variation_code ? variation_code.split('-')[0] : '');
+            
+            // Force 'jamb' for UTME variations as per documentation
+            if (variation_code && variation_code.startsWith('utme')) {
+                finalServiceID = 'jamb';
+            }
+            
             finalServiceID = finalServiceID.toLowerCase();
-            const finalVarCode = (variation_code === 'utme-no-mock' && finalServiceID === 'jamb') ? 'utme' : (variation_code || '').toLowerCase();
+            const finalVarCode = (variation_code || '').toLowerCase();
             
             const payload = { 
                 request_id, 
