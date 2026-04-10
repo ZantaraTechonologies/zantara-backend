@@ -8,7 +8,7 @@ const crypto = require('crypto');
 /**
  * Helper to fetch specific investment settings with defaults
  */
-const getInvestmentSettings = async () => {
+const getInvestmentSettings = async (session = null) => {
     const keys = [
         'investmentEnabled', 'sharePrice', 'maxSharesPerUser', 'totalSharesAvailable',
         'minSharesPerPurchase'
@@ -20,7 +20,10 @@ const getInvestmentSettings = async () => {
         totalSharesAvailable: 200,
         minSharesPerPurchase: 1
     };
-    const records = await Setting.find({ key: { $in: keys } });
+    const query = Setting.find({ key: { $in: keys } });
+    if (session) query.session(session);
+    
+    const records = await query;
     const map = {};
     records.forEach(r => map[r.key] = r.value);
     keys.forEach(k => { if (map[k] === undefined) map[k] = defaults[k]; });
@@ -38,13 +41,14 @@ const generateRef = (prefix) => `${prefix}-${crypto.randomUUID().split('-')[0].t
  * @param {string} refId - Reference ID for idempotency and tracking
  * @param {boolean} isWalletPayment - Whether the payment was already deducted from wallet
  */
-const fulfillSharePurchase = async (userId, qty, refId, isWalletPayment = false) => {
-    const session = await mongoose.startSession();
-    session.startTransaction();
+const fulfillSharePurchase = async (userId, qty, refId, isWalletPayment = false, externalSession = null) => {
+    const session = externalSession || await mongoose.startSession();
+    if (!externalSession) session.startTransaction();
+    
     try {
         const [user, settings] = await Promise.all([
             User.findById(userId).session(session),
-            getInvestmentSettings()
+            getInvestmentSettings(session)
         ]);
 
         if (!user) throw new Error('User not found');
@@ -95,18 +99,18 @@ const fulfillSharePurchase = async (userId, qty, refId, isWalletPayment = false)
             }
         }], { session });
 
-        await session.commitTransaction();
+        if (!externalSession) await session.commitTransaction();
         return { 
             success: true, 
             sharesOwned: user.sharesOwned,
             qtyPurchased: qty
         };
     } catch (err) {
-        await session.abortTransaction();
+        if (!externalSession) await session.abortTransaction();
         console.error('fulfillSharePurchase service error:', err);
         throw err;
     } finally {
-        session.endSession();
+        if (!externalSession) session.endSession();
     }
 };
 

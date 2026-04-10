@@ -136,12 +136,12 @@ exports.buyShares = async (req, res) => {
         wallet.balance -= totalCost;
         await wallet.save({ session });
 
-        await session.commitTransaction();
-        session.endSession();
-
         // Now fulfill the shares using the service (handles user update & transaction log)
+        // We pass the current session to make it atomic
         const refId = `SHARE-${crypto.randomUUID().split('-')[0].toUpperCase()}-${Date.now()}`;
-        const result = await investmentService.fulfillSharePurchase(userId, qty, refId, true);
+        const result = await investmentService.fulfillSharePurchase(userId, qty, refId, true, session);
+
+        await session.commitTransaction();
 
         res.json({
             success: true,

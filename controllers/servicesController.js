@@ -79,7 +79,7 @@ const purchaseData = async (req, res) => {
         })
 
         if (!result.success) {
-            return sendResponse(res, { status: 502, success: false, message: result.message, error: result.error })
+            return sendResponse(res, { status: 503, success: false, message: result.message || 'Service provider currently unavailable', error: result.error })
         }
         return sendResponse(res, { message: 'Data purchase successful', data: result.data })
     } catch (err) {
@@ -132,7 +132,7 @@ const payElectricityBill = async (req, res) => {
         })
 
         if (!result.success) {
-            return sendResponse(res, { status: 502, success: false, message: result.message, error: result.error })
+            return sendResponse(res, { status: 503, success: false, message: result.message || 'Service provider currently unavailable', error: result.error })
         }
         return sendResponse(res, { message: 'Electricity bill paid successfully', data: result.data })
     } catch (err) {
@@ -163,7 +163,7 @@ const rechargeCable = async (req, res) => {
         })
 
         if (!result.success) {
-            return sendResponse(res, { status: 502, success: false, message: result.message, error: result.error })
+            return sendResponse(res, { status: 503, success: false, message: result.message || 'Service provider currently unavailable', error: result.error })
         }
         return sendResponse(res, { message: 'Cable subscription successful', data: result.data })
     } catch (err) {
@@ -190,7 +190,7 @@ const purchaseExamPin = async (req, res) => {
         })
 
         if (!result.success) {
-            return sendResponse(res, { status: 502, success: false, message: result.message, error: result.error })
+            return sendResponse(res, { status: 503, success: false, message: result.message || 'Service provider currently unavailable', error: result.error })
         }
 
         // Special handling for PIN storage
