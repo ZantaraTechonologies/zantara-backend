@@ -64,4 +64,34 @@ async function initializePayment(
     }
 }
 
-module.exports = { initializePayment };
+async function getPaystackBalance() {
+    const config = {
+        headers: {
+            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+            'Content-Type': 'application/json',
+        },
+    };
+
+    try {
+        const { data } = await axios.get(`${PAYSTACK_BASE_URL}/balance`, config);
+        
+        if (data?.status && Array.isArray(data.data)) {
+            // Paystack returns an array of balances for different currencies
+            const ngnBalance = data.data.find(b => b.currency === 'NGN');
+            return {
+                success: true,
+                balance: ngnBalance ? ngnBalance.balance / 100 : 0, // Convert Kobo to Naira
+                currency: 'NGN'
+            };
+        }
+        return { success: false, balance: 0, message: data?.message || 'Failed to fetch balance' };
+    } catch (err) {
+        return {
+            success: false,
+            balance: 0,
+            message: err?.response?.data?.message || err.message || 'Paystack balance error'
+        };
+    }
+}
+
+module.exports = { initializePayment, getPaystackBalance };

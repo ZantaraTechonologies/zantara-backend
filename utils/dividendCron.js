@@ -31,12 +31,24 @@ const runDividendPayout = async () => {
         return { success: false, reason: 'Investment disabled' };
     }
 
-    // 1. Get last month's date range
+    // 1. Get last month's date range (Production Rule: March in April, April in May)
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1); // first day last month
     const monthEnd = new Date(now.getFullYear(), now.getMonth(), 1);       // first day this month
+    const month = monthStart.toLocaleString('default', { month: 'long', year: 'numeric' });
 
-    // 2. Sum last month's net profit
+    // 2. DUPLICATE SHIELD: Check if we already paid for this specific month
+    const existingPayout = await Transaction.findOne({
+        type: 'dividend_credit',
+        'details.month': month
+    });
+
+    if (existingPayout) {
+        console.log(`[DividendCron] Skipped: Payout for ${month} has already been finalized.`);
+        return { success: false, reason: `Payout for ${month} is already finalized` };
+    }
+
+    // 3. Sum last month's net profit
     const profitResult = await Transaction.aggregate([
         {
             $match: {
@@ -52,7 +64,7 @@ const runDividendPayout = async () => {
 
     if (totalNetProfit <= 0) {
         console.log(`[DividendCron] Skipped: Net profit for ${monthStart.toLocaleString('default', { month: 'long' })} was ₦0 or negative.`);
-        return { success: false, reason: 'Zero profit month' };
+        return { success: false, reason: `Zero profit detected for ${month}` };
     }
 
     // 3. Calculate dividend pool

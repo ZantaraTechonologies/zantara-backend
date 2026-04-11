@@ -670,7 +670,8 @@ exports.triggerManualDividendPayout = async (req, res) => {
             
             res.json({ success: true, message: `Payout successful for ${result.month}. Distributed ₦${result.totalPaid.toLocaleString()} to ${result.shareholders} shareholders.` });
         } else {
-            res.status(400).json({ message: `Payout skipped/failed: ${result.reason}` });
+            // Return 200 for "Skipped" states so the frontend shows an info toast rather than an error
+            res.json({ success: false, message: `Payout Skipped: ${result.reason}. (Check March profit levels)` });
         }
     } catch (err) {
         res.status(500).json({ message: 'Server error during manual payout trigger.' });

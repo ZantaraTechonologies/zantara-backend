@@ -209,105 +209,128 @@ const getAdminEarningsAnalytics = async (req, res) => {
         const WalletLedger = require('../models/WalletLedger');
         const Setting = require('../models/Setting');
 
+        const { 
+            page = 1, 
+            limit = 25, 
+            type, 
+            search, 
+            startDate, 
+            endDate 
+        } = req.query;
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const limitNum = parseInt(limit);
+
+        // 1. Setup Base Filters
+        const dateFilter = {};
+        if (startDate || endDate) {
+            dateFilter.createdAt = {};
+            if (startDate) dateFilter.createdAt.$gte = new Date(startDate);
+            if (endDate) {
+                const end = new Date(endDate);
+                end.setHours(23, 59, 59, 999);
+                dateFilter.createdAt.$lte = end;
+            }
+        }
+
+        // Search Filter (for name/email/ID)
+        let userMatch = {};
+        if (search) {
+            const searchRegex = new RegExp(search, 'i');
+            userMatch = {
+                $or: [
+                    { "user.name": searchRegex },
+                    { "user.email": searchRegex },
+                    { transactionId: searchRegex },
+                    { refId: searchRegex }
+                ]
+            };
+        }
+
+        // 2. Aggregate Payout Stats & Performers (Applying Filters)
         const [
             payoutStats,
-            agentStats,
+            agentStatsResult,
             cappedCount,
             skippedCount,
-            topReferrers,
-            topAgents,
             caps
         ] = await Promise.all([
-            // 1. Total Referral Payouts
+            // Total Referral Payouts
             Transaction.aggregate([
-                { $match: { type: 'referral_bonus', status: 'success' } },
+                { $match: { type: 'referral_bonus', status: 'success', ...dateFilter } },
                 { $group: { _id: null, total: { $sum: "$amount" } } }
             ]),
-            // 2. Total Agent Profits Generated
+            // Total Agent Profits
             Transaction.aggregate([
-                { $match: { userRole: 'agent', status: 'success' } },
+                { $match: { userRole: 'agent', status: 'success', ...dateFilter } },
                 { $group: { _id: null, total: { $sum: "$profit" } } }
             ]),
-            // 3. Capped Commissions Count
-            Transaction.countDocuments({ type: 'referral_bonus', "details.wasCapped": true }),
-            // 4. Skipped Commissions Count
-            WalletLedger.countDocuments({ source: 'REFERRAL_SKIPPED' }),
-            // 5. Top 10 Referrers
-            Transaction.aggregate([
-                { $match: { type: 'referral_bonus', status: 'success' } },
-                { $group: { _id: "$userId", totalEarned: { $sum: "$amount" }, count: { $sum: 1 } } },
-                { $sort: { totalEarned: -1 } },
-                { $limit: 10 },
-                {
-                    $lookup: {
-                        from: 'users',
-                        localField: '_id',
-                        foreignField: '_id',
-                        as: 'user'
-                    }
-                },
-                { $unwind: "$user" },
-                {
-                    $project: {
-                        name: "$user.name",
-                        email: "$user.email",
-                        totalEarned: 1,
-                        count: 1
-                    }
-                }
-            ]),
-            // 6. Top 10 Agents
-            Transaction.aggregate([
-                { $match: { userRole: 'agent', status: 'success' } },
-                { $group: { _id: "$userId", totalProfit: { $sum: "$profit" }, count: { $sum: 1 } } },
-                { $sort: { totalProfit: -1 } },
-                { $limit: 10 },
-                {
-                    $lookup: {
-                        from: 'users',
-                        localField: '_id',
-                        foreignField: '_id',
-                        as: 'user'
-                    }
-                },
-                { $unwind: "$user" },
-                {
-                    $project: {
-                        name: "$user.name",
-                        email: "$user.email",
-                        totalProfit: 1,
-                        count: 1
-                    }
-                }
-            ]),
-            // 7. Get Caps Settings
+            // Capped Count
+            Transaction.countDocuments({ type: 'referral_bonus', "details.wasCapped": true, ...dateFilter }),
+            // Skipped Count
+            WalletLedger.countDocuments({ source: 'REFERRAL_SKIPPED', ...dateFilter }),
+            // Caps Settings
             Promise.all([
                 Setting.findOne({ key: 'maxReferralProfitShare' }),
                 Setting.findOne({ key: 'maxAgentReferralShare' })
             ])
         ]);
 
-        // 8. Recent Global Earnings History
-        const historyTxs = await Transaction.find({
+        // 3. Top Performers (Dynamic with Filters)
+        const referrerMatch = { type: 'referral_bonus', status: 'success', ...dateFilter };
+        if (type && type !== 'all' && type !== 'agent_profit') referrerMatch.type = type;
+
+        const topReferrers = await Transaction.aggregate([
+            { $match: referrerMatch },
+            { $group: { _id: "$userId", totalEarned: { $sum: "$amount" }, count: { $sum: 1 } } },
+            { $sort: { totalEarned: -1 } },
+            { $limit: 10 },
+            { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'user' } },
+            { $unwind: "$user" },
+            { $match: userMatch }, // Apply search filter to performers
+            { $project: { name: "$user.name", email: "$user.email", totalEarned: 1, count: 1 } }
+        ]);
+
+        const agentMatch = { userRole: 'agent', status: 'success', ...dateFilter };
+        const topAgents = await Transaction.aggregate([
+            { $match: agentMatch },
+            { $group: { _id: "$userId", totalProfit: { $sum: "$profit" }, count: { $sum: 1 } } },
+            { $sort: { totalProfit: -1 } },
+            { $limit: 10 },
+            { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'user' } },
+            { $unwind: "$user" },
+            { $match: userMatch },
+            { $project: { name: "$user.name", email: "$user.email", totalProfit: 1, count: 1 } }
+        ]);
+
+        // 4. Combined Paginated History
+        // To do this "The Professional Way" with mixed collections, we combine, sort, and slice.
+        const historyMatch = {
             status: 'success',
             $or: [
                 { type: 'referral_bonus' },
                 { type: 'referral_redeem' },
                 { userRole: 'agent' }
-            ]
-        })
+            ],
+            ...dateFilter
+        };
+        if (type && type !== 'all') {
+            if (type === 'agent_profit') delete historyMatch.type; // userRole filter handles it
+            else historyMatch.type = type;
+        }
+
+        const historyTxs = await Transaction.find(historyMatch)
             .sort({ createdAt: -1 })
-            .limit(50)
+            .limit(1000) // Fetch sufficient for merging if search is active
             .populate('userId', 'name email');
 
-        const skippedLogs = await WalletLedger.find({
-            source: 'REFERRAL_SKIPPED'
-        })
+        const skippedMatch = { source: 'REFERRAL_SKIPPED', ...dateFilter };
+        const skippedLogs = await WalletLedger.find(skippedMatch)
             .sort({ createdAt: -1 })
-            .limit(50)
+            .limit(500)
             .populate('userId', 'name email');
 
-        const formattedHistory = [
+        let formattedHistory = [
             ...historyTxs.map(t => ({
                 id: t._id,
                 userName: t.userId ? t.userId.name : 'Unknown User',
@@ -334,14 +357,25 @@ const getAdminEarningsAnalytics = async (req, res) => {
             }))
         ];
 
+        // Apply Search Filter locally on merged set if needed, or better, via regex earlier
+        if (search) {
+            const regex = new RegExp(search, 'i');
+            formattedHistory = formattedHistory.filter(h => 
+                regex.test(h.userName) || regex.test(h.userEmail) || regex.test(h.refId) || regex.test(h.id.toString())
+            );
+        }
+
+        // Final Sort & Paginate
         formattedHistory.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        const totalEntries = formattedHistory.length;
+        const paginatedHistory = formattedHistory.slice(skip, skip + limitNum);
 
         res.json({
             success: true,
             data: {
                 overview: {
                     totalReferralPayouts: payoutStats[0]?.total || 0,
-                    totalAgentProfits: agentStats[0]?.total || 0,
+                    totalAgentProfits: agentStatsResult[0]?.total || 0,
                     cappedCommissionsCount: cappedCount,
                     skippedCommissionsCount: skippedCount
                 },
@@ -353,7 +387,13 @@ const getAdminEarningsAnalytics = async (req, res) => {
                     maxReferralProfitShare: caps[0] ? Number(caps[0].value) : 0.9,
                     maxAgentReferralShare: caps[1] ? Number(caps[1].value) : 0.5
                 },
-                history: formattedHistory.slice(0, 50)
+                history: paginatedHistory,
+                pagination: {
+                    total: totalEntries,
+                    page: Number(page),
+                    limit: limitNum,
+                    pages: Math.ceil(totalEntries / limitNum)
+                }
             }
         });
 

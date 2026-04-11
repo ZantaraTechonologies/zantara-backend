@@ -330,7 +330,10 @@ const getCommissionCaps = async (req, res) => {
 
 const updateCommissionCaps = async (req, res) => {
     try {
-        const { maxReferralProfitShare, maxAgentReferralShare } = req.body;
+        // Support both Frontend styles for robustness
+        const maxReferralProfitShare = req.body.maxReferralProfitShare ?? req.body.referralCommissionProfitCap;
+        const maxAgentReferralShare = req.body.maxAgentReferralShare ?? req.body.agentDiscountProfitCap;
+
         const sCap = Number(maxReferralProfitShare);
         const aCap = Number(maxAgentReferralShare);
 
