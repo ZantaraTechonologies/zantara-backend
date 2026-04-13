@@ -128,7 +128,7 @@ const login = async (req, res) => {
         // Search by email OR phone
         const user = await User.findOne({
             $or: [{ email: loginId }, { phone: loginId }]
-        })
+        }).select('+password')
 
         if (!user) return res.status(400).json({ message: 'Invalid credentials' })
 
