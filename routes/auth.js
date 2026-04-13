@@ -14,7 +14,8 @@ const {
     sendEmailOTP,
     verifyEmailOTP,
     getReferralStats,
-    changePassword
+    changePassword,
+    verifyResetOTP
 } = require('../controllers/authController')
 const { setPin, changePin } = require('../controllers/pinController')
 const { verifyJWT } = require('../middlewares/auth')
@@ -33,6 +34,7 @@ router.put('/update-profile', verifyJWT, (req, res) => {
 router.put('/users/:id', verifyJWT, updateUser)
 router.get('/verify-email/:token', verifyEmail)
 router.post('/forgot-password', forgotPassword)
+router.post('/verify-reset-otp', verifyResetOTP)
 router.put('/reset-password/:token', resetPassword)
 router.post('/change-password', verifyJWT, changePassword)
 router.post('/logout', logout)

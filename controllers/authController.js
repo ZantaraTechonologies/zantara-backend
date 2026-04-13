@@ -226,24 +226,84 @@ const updateUser = async (req, res) => {
 }
 
 const forgotPassword = async (req, res) => {
-    const email = (req.body.email || "").trim().toLowerCase();
-    const user = await User.findOne({ email })
-    if (!user) return res.status(404).json({ message: 'Email not found' })
+    try {
+        const { phone } = req.body;
+        if (!phone) return res.status(400).json({ message: 'Phone number is required' });
 
-    const token = generateToken(user, '15m')
-    const resetLink = `${process.env.CLIENT_URL}/reset-password/${token}`
-    await sendEmail(user.email, 'Reset your password', `<a href="${resetLink}">Reset Password</a>`)
-    res.json({ message: 'Password reset email sent' })
+        const user = await User.findOne({ phone });
+        if (!user) return res.status(404).json({ message: 'User with this phone number not found' });
+
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+        await User.findByIdAndUpdate(user._id, { otp, otpExpires });
+
+        await sendSMS(user.phone, `Your Zantara password reset code is: ${otp}. Valid for 10 minutes.`);
+
+        res.json({ success: true, message: 'OTP sent to your phone' });
+    } catch (error) {
+        res.status(500).json({ message: 'Error initiating password reset', error: error.message });
+    }
+}
+
+const verifyResetOTP = async (req, res) => {
+    try {
+        const { phone, otp } = req.body;
+        if (!phone || !otp) return res.status(400).json({ message: 'Phone and OTP are required' });
+
+        const user = await User.findOne({ phone }).select('+otp +otpExpires');
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        if (user.otp !== otp || user.otpExpires < Date.now()) {
+            return res.status(400).json({ message: 'Invalid or expired OTP' });
+        }
+
+        // Clear OTP and return a reset token
+        await User.findByIdAndUpdate(user._id, { otp: null, otpExpires: null });
+        
+        const token = generateToken(user, '15m');
+        res.json({ success: true, token, message: 'OTP verified' });
+    } catch (error) {
+        res.status(500).json({ message: 'Error verifying OTP', error: error.message });
+    }
 }
 
 const resetPassword = async (req, res) => {
     try {
-        const decoded = jwt.verify(req.params.token, process.env.JWT_SECRET)
-        const hashed = await bcrypt.hash(req.body.password, 12)
-        await User.findByIdAndUpdate(decoded.id, { password: hashed })
-        res.json({ message: 'Password reset successful' })
+        const { password } = req.body;
+        const decoded = jwt.verify(req.params.token, process.env.JWT_SECRET);
+        
+        const user = await User.findById(decoded.id).select('+password +passwordHistory');
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        // Check against current and history
+        if (user.password) {
+            const isMatch = await bcrypt.compare(password, user.password);
+            if (isMatch) return res.status(400).json({ message: "New password cannot be your current password." });
+        }
+
+        if (user.passwordHistory) {
+            for (const oldHash of user.passwordHistory) {
+                const isMatch = await bcrypt.compare(password, oldHash);
+                if (isMatch) return res.status(400).json({ message: "You cannot reuse any of your last 5 passwords." });
+            }
+        }
+
+        // Update history
+        let newHistory = user.passwordHistory || [];
+        if (user.password) {
+            newHistory.unshift(user.password);
+            if (newHistory.length > 5) newHistory = newHistory.slice(0, 5);
+        }
+
+        const hashed = await bcrypt.hash(password, 12);
+        user.password = hashed;
+        user.passwordHistory = newHistory;
+        await user.save();
+
+        res.json({ success: true, message: 'Password reset successful' });
     } catch (err) {
-        res.status(400).json({ message: 'Invalid or expired token' })
+        res.status(400).json({ message: 'Invalid or expired reset session' });
     }
 }
 
@@ -447,5 +507,6 @@ module.exports = {
     sendEmailOTP,
     verifyEmailOTP,
     getReferralStats,
-    changePassword
+    changePassword,
+    verifyResetOTP
 }
