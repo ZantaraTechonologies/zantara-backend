@@ -272,23 +272,47 @@ const sendOTP = async (req, res) => {
 
 const changePassword = async (req, res) => {
     try {
-        const { oldPassword, newPassword } = req.body;
+        const { newPassword } = req.body;
         const userId = req.user.id;
 
-        if (!oldPassword || !newPassword) {
-            return res.status(400).json({ message: "Both current and new passwords are required." });
+        if (!newPassword) {
+            return res.status(400).json({ message: "New password is required." });
         }
 
-        const user = await User.findById(userId);
+        // Fetch user with password and history
+        const user = await User.findById(userId).select('+password +passwordHistory');
         if (!user) return res.status(404).json({ message: "User not found." });
 
-        const isMatch = await bcrypt.compare(oldPassword, user.password);
-        if (!isMatch) {
-            return res.status(400).json({ message: "Incorrect current password." });
+        // Check if new password matches current password
+        if (user.password) {
+            const isMatch = await bcrypt.compare(newPassword, user.password);
+            if (isMatch) {
+                return res.status(400).json({ message: "New password cannot be the same as your current password." });
+            }
+        }
+
+        // Check against password history (last 5)
+        if (user.passwordHistory && user.passwordHistory.length > 0) {
+            for (const oldHashedPassword of user.passwordHistory) {
+                const isMatch = await bcrypt.compare(newPassword, oldHashedPassword);
+                if (isMatch) {
+                    return res.status(400).json({ message: "You cannot reuse any of your last 5 passwords." });
+                }
+            }
+        }
+
+        // Prepare new history
+        let newHistory = user.passwordHistory || [];
+        if (user.password) {
+            newHistory.unshift(user.password);
+            if (newHistory.length > 5) {
+                newHistory = newHistory.slice(0, 5);
+            }
         }
 
         const hashed = await bcrypt.hash(newPassword, 12);
         user.password = hashed;
+        user.passwordHistory = newHistory;
         await user.save();
 
         await ActivityLog.create({ 

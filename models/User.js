@@ -7,7 +7,8 @@ const userSchema = new mongoose.Schema({
     name: String,
     email: { type: String, sparse: true, unique: true }, // Optional but must be unique if provided
     phone: { type: String, unique: true, required: true }, // Primary identifier
-    password: String,
+    password: { type: String, select: false },
+    passwordHistory: { type: [String], select: false }, // Store last 5 hashed passwords
     roles: {
         type: [String],
         enum: ALLOWED_ROLES,
