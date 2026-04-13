@@ -9,9 +9,41 @@ class PinService {
         if (!/^\d{4}$/.test(pin)) {
             throw new Error('PIN must be exactly 4 digits');
         }
+
+        const user = await User.findById(userId).select('+transactionPin +pinHistory');
+        if (!user) throw new Error('User not found');
+
+        // Check if new PIN matches current PIN
+        if (user.transactionPin) {
+            const isMatch = await bcrypt.compare(pin, user.transactionPin);
+            if (isMatch) {
+                throw new Error('New PIN cannot be the same as your current PIN');
+            }
+        }
+
+        // Check if new PIN matches any in history (last 5)
+        if (user.pinHistory && user.pinHistory.length > 0) {
+            for (const oldHashedPin of user.pinHistory) {
+                const isMatch = await bcrypt.compare(pin, oldHashedPin);
+                if (isMatch) {
+                    throw new Error('New PIN cannot be one of your last 5 previously used PINs');
+                }
+            }
+        }
+
+        // Prepare new history
+        let newHistory = user.pinHistory || [];
+        if (user.transactionPin) {
+            newHistory.unshift(user.transactionPin);
+            if (newHistory.length > 5) {
+                newHistory = newHistory.slice(0, 5);
+            }
+        }
+
         const hashedPin = await bcrypt.hash(pin, 10);
         await User.findByIdAndUpdate(userId, {
             transactionPin: hashedPin,
+            pinHistory: newHistory,
             isPinSet: true
         });
         return { success: true, message: 'Transaction PIN set successfully' };

@@ -33,6 +33,7 @@ const userSchema = new mongoose.Schema({
     firstSharePurchasedAt: { type: Date, default: null },      // For lock period calculation
     frozenShares: { type: Number, default: 0 },                // Shares locked in a pending exit request
     transactionPin: { type: String, select: false }, // Hashed PIN
+    pinHistory: { type: [String], select: false }, // Store last 5 hashed PINs
     isPinSet: { type: Boolean, default: false },
     kycLevel: { type: Number, default: 1 }, // Tier 1, 2, 3
     otp: { type: String, select: false },
