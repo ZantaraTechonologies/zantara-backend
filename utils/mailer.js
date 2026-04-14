@@ -24,8 +24,8 @@ const sendEmail = async (to, subject, html) => {
         console.log("Email sent successfully:", info.messageId);
         return info;
     } catch (error) {
-        console.error("Email send failed:", error);
-        throw error;
+        console.error("Email notification skipped (Connection Issue):", error.message);
+        return null; // Don't throw, just fail silently
     }
 }
 
