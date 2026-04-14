@@ -131,6 +131,14 @@ const verifyFunding = async (req, res) => {
                             response: data
                         });
 
+                        const notificationService = require('../services/notification.service');
+                        await notificationService.sendInApp(row.userId, {
+                            title: 'Wallet Funded Successfully',
+                            message: `Your wallet has been credited with ₦${amountNaira.toLocaleString()} via ${row.service}.`,
+                            type: 'transaction',
+                            metadata: { reference }
+                        });
+
                         return res.json({ status: 'success' });
                     } else {
                         // Already processed by webhook

@@ -72,6 +72,14 @@ const requestWithdrawal = async (req, res) => {
              <p>Please pay the user manually and approve the request in your admin dashboard.</p>`
         )
 
+        // 7. Notify User via In-App/Push
+        await notificationService.sendInApp(userId, {
+            title: 'Withdrawal Requested',
+            message: `Your withdrawal request of ₦${amount.toLocaleString()} is pending manual review.`,
+            type: 'transaction',
+            metadata: { withdrawalId: request._id, refId }
+        });
+
         return res.json({ 
             message: 'Withdrawal request submitted! It will be processed after manual review.', 
             request 

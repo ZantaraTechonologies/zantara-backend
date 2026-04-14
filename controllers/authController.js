@@ -310,6 +310,13 @@ const resetPassword = async (req, res) => {
         await user.save();
 
         res.json({ success: true, message: 'Password reset successful' });
+ 
+        // Notify User
+        await notificationService.sendInApp(user._id, {
+            title: 'Password Restored',
+            message: 'Your Zantara account password has been successfully reset.',
+            type: 'security'
+        });
     } catch (err) {
         res.status(400).json({ message: 'Invalid or expired reset session' });
     }
@@ -398,6 +405,13 @@ const changePassword = async (req, res) => {
         });
 
         res.json({ success: true, message: "Password updated successfully." });
+ 
+        // Notify User
+        await notificationService.sendInApp(userId, {
+            title: 'Security Alert: Password Changed',
+            message: 'Your account password was recently changed. If this wasn\'t you, please contact support immediately.',
+            type: 'security'
+        });
     } catch (error) {
         res.status(500).json({ message: "Error updating password.", error: error.message });
     }
@@ -453,6 +467,13 @@ const sendEmailOTP = async (req, res) => {
         await sendEmail(user.email, 'Your Zantara Verification Code', html);
 
         res.json({ success: true, message: 'OTP sent to email successfully' });
+ 
+        // Security fallback in-app
+        await notificationService.sendInApp(user._id, {
+            title: 'Email verification code',
+            message: `Your email verification code is: ${emailOtp}. Valid for 10 minutes.`,
+            type: 'security'
+        });
     } catch (error) {
         res.status(500).json({ message: 'Error sending email OTP', error: error.message });
     }

@@ -143,6 +143,13 @@ const redeemEarnings = async (req, res) => {
         await session.commitTransaction();
         session.endSession();
 
+        const notificationService = require('../services/notification.service');
+        await notificationService.sendInApp(userId, {
+            title: 'Earnings Redeemed',
+            message: `₦${amount.toLocaleString()} from your referral wallet has been added to your main balance.`,
+            type: 'transaction'
+        });
+
         res.json({ 
             success: true, 
             message: 'Earnings redeemed successfully', 
