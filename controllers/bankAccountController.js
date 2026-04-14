@@ -1,5 +1,6 @@
 const User = require('../models/User');
 const { sendResponse } = require('../utils/response');
+const axios = require('axios');
 
 const linkAccount = async (req, res) => {
     try {
@@ -50,4 +51,33 @@ const unlinkAccount = async (req, res) => {
     }
 };
 
-module.exports = { linkAccount, getLinkedAccounts, unlinkAccount };
+const resolveAccount = async (req, res) => {
+    try {
+        const { accountNumber, bankCode } = req.query;
+
+        if (!accountNumber || !bankCode) {
+            return sendResponse(res, { status: 400, success: false, message: 'Account number and bank code are required' });
+        }
+
+        const response = await axios.get(`https://api.paystack.co/bank/resolve`, {
+            params: { account_number: accountNumber, bank_code: bankCode },
+            headers: {
+                Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`
+            }
+        });
+
+        if (response.data.status) {
+            return sendResponse(res, { 
+                data: { account_name: response.data.data.account_name } 
+            });
+        } else {
+            return sendResponse(res, { status: 400, success: false, message: 'Could not resolve account' });
+        }
+    } catch (err) {
+        const message = err.response?.data?.message || err.message;
+        const status = err.response?.status || 500;
+        return sendResponse(res, { status, success: false, message });
+    }
+};
+
+module.exports = { linkAccount, getLinkedAccounts, unlinkAccount, resolveAccount };

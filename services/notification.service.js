@@ -43,6 +43,15 @@ class NotificationService {
      */
     async sendInApp(userId, { title, message, type, metadata }) {
         try {
+            // PROMINENT LOG FOR DEVELOPMENT (Handy for OTPs when SMS/Push is restricted)
+            if (type === 'security') {
+                console.log('-------------------------------------------');
+                console.log(`[SECURITY NOTIFICATION] User: ${userId}`);
+                console.log(`[TITLE]: ${title}`);
+                console.log(`[MESSAGE]: ${message}`);
+                console.log('-------------------------------------------');
+            }
+
             const notification = await Notification.create({
                 userId, title, message, type, metadata
             });
