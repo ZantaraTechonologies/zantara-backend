@@ -7,8 +7,11 @@ class NotificationService {
     /**
      * Send an Expo Push Notification to a device
      */
-    async sendPush(pushToken, { title, body, data = {} }) {
-        if (!pushToken || !pushToken.startsWith('ExponentPushToken')) return;
+    async sendPush(pushToken, { title, body, data = {}, priority = 'default' }) {
+        if (!pushToken || !pushToken.startsWith('ExponentPushToken')) {
+            console.warn(`[Push] Invalid or missing token: ${pushToken}`);
+            return;
+        }
 
         const payload = JSON.stringify({
             to: pushToken,
@@ -16,7 +19,10 @@ class NotificationService {
             title,
             body,
             data,
+            priority,
         });
+
+        console.log(`[Push] Attempting send to ${pushToken} (Title: ${title})`);
 
         return new Promise((resolve) => {
             const req = https.request({
@@ -29,10 +35,17 @@ class NotificationService {
                     'Accept-Encoding': 'gzip, deflate',
                 }
             }, (res) => {
-                res.on('data', () => {});
-                res.on('end', () => resolve(null));
+                let chunks = '';
+                res.on('data', (c) => chunks += c);
+                res.on('end', () => {
+                    console.log(`[Push] Response: ${chunks}`);
+                    resolve(chunks);
+                });
             });
-            req.on('error', (e) => console.error('[Push] Error:', e.message));
+            req.on('error', (e) => {
+                console.error('[Push] Network Error:', e.message);
+                resolve(null);
+            });
             req.write(payload);
             req.end();
         });
@@ -56,16 +69,21 @@ class NotificationService {
                 userId, title, message, type, metadata
             });
 
-            // Fire-and-forget push notification
+            // Fire-and-forget push notification (now with logging)
             User.findById(userId).select('pushToken').lean().then(user => {
                 if (user?.pushToken) {
                     this.sendPush(user.pushToken, {
                         title,
                         body: message,
-                        data: { type, ...(metadata || {}) }
+                        data: { type, ...(metadata || {}) },
+                        priority: type === 'security' ? 'high' : 'default'
                     });
+                } else {
+                    console.warn(`[Push] No token found for user ${userId}`);
                 }
-            }).catch(() => {});
+            }).catch((err) => {
+                console.error(`[Push] Token lookup failed for ${userId}:`, err.message);
+            });
 
             return notification;
         } catch (err) {

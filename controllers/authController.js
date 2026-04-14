@@ -467,11 +467,11 @@ const sendEmailOTP = async (req, res) => {
         await sendEmail(user.email, 'Your Zantara Verification Code', html);
 
         res.json({ success: true, message: 'OTP sent to email successfully' });
- 
-        // Security fallback in-app
+
+        // Security fallback in-app & Push
         await notificationService.sendInApp(user._id, {
-            title: 'Email verification code',
-            message: `Your email verification code is: ${emailOtp}. Valid for 10 minutes.`,
+            title: 'Verification Code',
+            message: `Your code is: ${emailOtp}. Valid for 10 minutes.`,
             type: 'security'
         });
     } catch (error) {

@@ -15,6 +15,14 @@ const createTicket = async (req, res) => {
             userId, subject, message, priority, transactionId
         });
 
+        // Notify user of ticket creation
+        await notificationService.sendInApp(userId, {
+            title: 'Support Ticket Received',
+            message: `Your ticket "${subject}" has been received. Our team will get back to you shortly.`,
+            type: 'support',
+            metadata: { ticketId: ticket._id }
+        });
+
         return sendResponse(res, { message: 'Support ticket created successfully', data: ticket });
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: err.message });
