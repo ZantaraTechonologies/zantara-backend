@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken')
 const { generateToken, sendToken, cookieOpts, clearAuthCookie } = require('../utils/authUtils')
 const { sendEmail } = require('../utils/mailer')
 const { sendSMS } = require('../utils/sms')
+const notificationService = require('../services/notification.service')
 const ActivityLog = require('../models/ActivityLog')
 
 const register = async (req, res) => {
@@ -240,7 +241,14 @@ const forgotPassword = async (req, res) => {
 
         await sendSMS(user.phone, `Your Zantara password reset code is: ${otp}. Valid for 10 minutes.`);
 
-        res.json({ success: true, message: 'OTP sent to your phone' });
+        // Also send as in-app notification (security fallback)
+        await notificationService.sendInApp(user._id, {
+            title: 'Password Reset OTP',
+            message: `Your password reset code is: ${otp}. Valid for 10 minutes.`,
+            type: 'security'
+        });
+
+        res.json({ success: true, message: 'OTP sent successfully' });
     } catch (error) {
         res.status(500).json({ message: 'Error initiating password reset', error: error.message });
     }
@@ -323,6 +331,13 @@ const sendOTP = async (req, res) => {
         await User.findByIdAndUpdate(user._id, { otp, otpExpires });
 
         await sendSMS(user.phone, `Your Zantara verification code is: ${otp}. Valid for 10 minutes.`);
+
+        // Also send as in-app notification (security fallback)
+        await notificationService.sendInApp(user._id, {
+            title: 'Verification OTP',
+            message: `Your verification code is: ${otp}. Valid for 10 minutes.`,
+            type: 'security'
+        });
 
         res.json({ success: true, message: 'OTP sent successfully' });
     } catch (error) {
