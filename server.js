@@ -109,6 +109,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/admin/notifications', adminNotificationRoutes);
 app.use('/api/admin/business', businessRoutes);
 app.use('/api/admin/audit-logs', auditRoutes);
+app.use('/api/withdrawal', withdrawalRoutes);
 app.use('/api/admin/withdrawals', withdrawalRoutes);
 app.use('/api/user/earnings', userEarningsRoutes);
 app.use('/api/admin/system', systemRoutes);
