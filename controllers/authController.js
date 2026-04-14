@@ -493,6 +493,19 @@ const getReferralStats = async (req, res) => {
     }
 };
  
+const savePushToken = async (req, res) => {
+    try {
+        const { pushToken } = req.body;
+        if (!pushToken) {
+            return res.status(400).json({ success: false, message: 'Push token is required' });
+        }
+        await User.findByIdAndUpdate(req.user.id, { pushToken });
+        res.json({ success: true, message: 'Push token saved' });
+    } catch (error) {
+        res.status(500).json({ message: 'Error saving push token', error: error.message });
+    }
+};
+
 module.exports = {
     register,
     login,
@@ -508,5 +521,6 @@ module.exports = {
     verifyEmailOTP,
     getReferralStats,
     changePassword,
-    verifyResetOTP
+    verifyResetOTP,
+    savePushToken
 }

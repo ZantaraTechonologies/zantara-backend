@@ -1,15 +1,63 @@
 const Notification = require('../models/Notification');
+const User = require('../models/User');
 const { sendEmail } = require('../utils/mailer');
+const https = require('https');
 
 class NotificationService {
     /**
-     * Send an in-app notification
+     * Send an Expo Push Notification to a device
+     */
+    async sendPush(pushToken, { title, body, data = {} }) {
+        if (!pushToken || !pushToken.startsWith('ExponentPushToken')) return;
+
+        const payload = JSON.stringify({
+            to: pushToken,
+            sound: 'default',
+            title,
+            body,
+            data,
+        });
+
+        return new Promise((resolve) => {
+            const req = https.request({
+                hostname: 'exp.host',
+                path: '/--/api/v2/push/send',
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'Accept-Encoding': 'gzip, deflate',
+                }
+            }, (res) => {
+                res.on('data', () => {});
+                res.on('end', () => resolve(null));
+            });
+            req.on('error', (e) => console.error('[Push] Error:', e.message));
+            req.write(payload);
+            req.end();
+        });
+    }
+
+    /**
+     * Send an in-app notification + fire-and-forget push if user has token
      */
     async sendInApp(userId, { title, message, type, metadata }) {
         try {
             const notification = await Notification.create({
                 userId, title, message, type, metadata
             });
+
+            // Fire-and-forget push notification
+            User.findById(userId).select('pushToken').lean().then(user => {
+                if (user?.pushToken) {
+                    this.sendPush(user.pushToken, {
+                        title,
+                        body: message,
+                        data: { type, ...(metadata || {}) }
+                    });
+                }
+            }).catch(() => {});
+
             return notification;
         } catch (err) {
             console.error('In-app notification error:', err.message);

@@ -55,7 +55,8 @@ const userSchema = new mongoose.Schema({
         accountName: String,
         accountNumber: String
     }],
-    lastLogin: { type: Date, default: Date.now }
+    lastLogin: { type: Date, default: Date.now },
+    pushToken: { type: String, default: null } // Expo Push Token for push notifications
 }, { timestamps: true })
 
 userSchema.post('findOneAndDelete', async function (doc) {
