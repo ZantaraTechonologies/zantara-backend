@@ -216,7 +216,7 @@ const transferMoney = async (req, res) => {
         // 5. Transaction Logs
         await Transaction.create([{
             userId: senderId,
-            transactionId: reference,
+            transactionId: reference + '-S',
             refId: reference,
             type: 'transfer_out',
             service: 'Local Transfer',
@@ -228,7 +228,7 @@ const transferMoney = async (req, res) => {
 
         await Transaction.create([{
             userId: receiver._id,
-            transactionId: reference,
+            transactionId: reference + '-R',
             refId: reference,
             type: 'transfer_in',
             service: 'Local Transfer',
