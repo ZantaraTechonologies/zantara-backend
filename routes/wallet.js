@@ -12,6 +12,8 @@ router.post('/credit', verifyJWT, walletController.creditWallet)
 router.get('/freeze', verifyJWT, walletController.freezeWallet)
 router.get('/unfreeze', verifyJWT, walletController.unfreezeWallet)
 router.post('/redeem-earnings', verifyJWT, walletController.redeemEarnings)
+router.get('/verify-recipient', verifyJWT, walletController.verifyTransferRecipient)
+router.post('/transfer', verifyJWT, walletController.transferMoney)
 
 // Important: Paystack webhook must see raw body for signature
 router.post('/paystack/webhook', require('express').raw({ type: '*/*' }), webhook)

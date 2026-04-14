@@ -156,6 +156,113 @@ const redeemEarnings = async (req, res) => {
     }
 }
 
+const verifyTransferRecipient = async (req, res) => {
+    try {
+        const { identifier } = req.query; // phone or email
+        if (!identifier) return res.status(400).json({ message: 'Recipient identifier is required' });
+
+        const recipient = await User.findOne({
+            $or: [
+                { phone: identifier },
+                { email: identifier.toLowerCase() }
+            ]
+        }).select('name phone email');
+
+        if (!recipient) return res.status(404).json({ message: 'User not found' });
+        if (recipient._id.toString() === req.user.id) return res.status(400).json({ message: 'You cannot transfer to yourself' });
+
+        res.json({ name: recipient.name, identifier: recipient.phone });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+}
+
+const transferMoney = async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    try {
+        const { identifier, amount, pin, remarks } = req.body;
+        const senderId = req.user.id;
+        const amountNum = Number(amount);
+
+        if (!amountNum || amountNum < 100) throw new Error('Minimum transfer is ₦100');
+
+        // 1. PIN Validation
+        const sender = await User.findById(senderId).select('+transactionPin name phone').session(session);
+        if (!sender.isPinSet) throw new Error('Transaction PIN not set');
+        const pinMatch = await bcrypt.compare(pin, sender.transactionPin);
+        if (!pinMatch) throw new Error('Invalid transaction PIN');
+
+        // 2. Resolve Recipient
+        const receiver = await User.findOne({
+            $or: [
+                { phone: identifier },
+                { email: identifier.toLowerCase() }
+            ]
+        }).session(session);
+        if (!receiver) throw new Error('Recipient not found');
+        if (receiver._id.toString() === senderId) throw new Error('Cannot transfer to yourself');
+
+        // 3. Fee Calculation (₦20 per ₦500 increment)
+        const fee = Math.ceil(amountNum / 500) * 20;
+        const totalDebit = amountNum + fee;
+
+        const reference = 'TRF-' + Date.now();
+
+        // 4. Atomic Debit & Credit
+        await walletService.debit(senderId, totalDebit, reference, 'wallet_transfer_out', null, session);
+        await walletService.credit(receiver._id, amountNum, reference, 'wallet_transfer_in', null, session);
+
+        // 5. Transaction Logs
+        await Transaction.create([{
+            userId: senderId,
+            transactionId: reference,
+            refId: reference,
+            type: 'transfer_out',
+            service: 'Local Transfer',
+            amount: amountNum,
+            fee: fee,
+            status: 'success',
+            details: { recipientName: receiver.name, recipientPhone: receiver.phone, remarks }
+        }], { session });
+
+        await Transaction.create([{
+            userId: receiver._id,
+            transactionId: reference,
+            refId: reference,
+            type: 'transfer_in',
+            service: 'Local Transfer',
+            amount: amountNum,
+            status: 'success',
+            details: { senderName: sender.name, senderPhone: sender.phone, remarks }
+        }], { session });
+
+        await session.commitTransaction();
+        session.endSession();
+
+        // 6. Notifications
+        const notificationService = require('../services/notification.service');
+        await notificationService.sendInApp(senderId, {
+            title: 'Transfer Successful',
+            message: `You sent ₦${amountNum.toLocaleString()} to ${receiver.name}. Fee: ₦${fee}`,
+            type: 'transaction'
+        });
+
+        await notificationService.sendInApp(receiver._id, {
+            title: 'Money Received',
+            message: `You received ₦${amountNum.toLocaleString()} from ${sender.name}.`,
+            type: 'transaction'
+        });
+
+        res.json({ success: true, message: 'Transfer successful', fee });
+
+    } catch (err) {
+        await session.abortTransaction();
+        session.endSession();
+        console.error('Transfer error:', err);
+        res.status(400).json({ error: err.message });
+    }
+}
 
 module.exports = {
     getWallet,
@@ -163,5 +270,7 @@ module.exports = {
     creditWallet,
     freezeWallet,
     unfreezeWallet,
-    redeemEarnings
+    redeemEarnings,
+    verifyTransferRecipient,
+    transferMoney
 }
