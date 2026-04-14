@@ -7,11 +7,11 @@ const { verifyJWT, checkRoles } = require('../middlewares/auth');
 router.use(verifyJWT);
 router.post('/create', createTicket);
 router.get('/my-tickets', getMyTickets);
+router.get('/ticket/:id', getTicket);
 router.post('/reply/:id', replyToTicket);
 
 // Admin Routes
 router.get('/all', checkRoles('admin', 'superAdmin'), getAllTickets);
-router.get('/:id', checkRoles('admin', 'superAdmin'), getTicket);
 router.post('/resolve/:id', checkRoles('admin', 'superAdmin'), resolveTicket);
 
 module.exports = router;

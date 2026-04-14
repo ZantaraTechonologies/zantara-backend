@@ -119,6 +119,11 @@ const getTicket = async (req, res) => {
         const ticket = await Ticket.findById(id).populate('userId', 'name email phone avatar');
         if (!ticket) return sendResponse(res, { status: 404, success: false, message: 'Ticket not found' });
         
+        // Ownership check
+        if (ticket.userId._id.toString() !== req.user.id && !['admin', 'superAdmin'].includes(req.user.role)) {
+            return sendResponse(res, { status: 403, success: false, message: 'Unauthorized access to this ticket' });
+        }
+
         return sendResponse(res, { data: ticket });
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: err.message });
