@@ -3,22 +3,22 @@ const Wallet = require('../models/Wallet')
 const User = require('../models/User')
 const { sendEmail } = require('../utils/mailer')
 const notificationService = require('../services/notification.service')
-
 const walletService = require('../services/wallet.service')
+const { createTransferRecipient, initiateTransfer } = require('../utils/paystack')
 
 // User requests withdrawal
 const requestWithdrawal = async (req, res) => {
     try {
-        const { amount, bankName, accountNumber, accountName, pin } = req.body
+        const { amount, accountId, pin } = req.body
         const userId = req.user.id
         const refId = 'WTH-' + Date.now()
 
-        if (!amount || amount <= 0) return res.status(400).json({ message: 'Invalid amount' })
-        if (!bankName || !accountNumber || !accountName) return res.status(400).json({ message: 'Missing bank details' })
+        if (!amount || amount < 500) return res.status(400).json({ message: 'Minimum withdrawal is ₦500.00' })
+        if (!accountId) return res.status(400).json({ message: 'Target bank account is required' })
 
         // 1. PIN Validation
-        const user = await User.findById(userId).select('+transactionPin');
-        if (!user.isPinSet) {
+        const user = await User.findById(userId).select('+transactionPin +linkedAccounts');
+        if (!user || !user.isPinSet) {
             return res.status(400).json({ message: 'Transaction PIN not set' });
         }
         
@@ -28,27 +28,70 @@ const requestWithdrawal = async (req, res) => {
             return res.status(400).json({ message: 'Invalid transaction PIN' });
         }
 
-        // 2. Freeze the amount via WalletService (creates ledger entry)
-        await walletService.freeze(userId, amount, refId, 'withdrawal_request')
+        // 2. Resolve Linked Account
+        const account = user.linkedAccounts.id(accountId);
+        if (!account) return res.status(404).json({ message: 'Linked bank account not found' });
+        
+        const { bankName, accountNumber, accountName, bankCode } = account;
 
+        // 3. Fee Calculation (10%)
+        const fee = Math.round(amount * 0.10);
+        const totalDebit = amount + fee;
+
+        // 4. Freeze the totalDebit via WalletService
+        await walletService.freeze(userId, totalDebit, refId, 'withdrawal_request')
+
+        // 5. Create Withdrawal Record
         const request = await Withdrawal.create({
             userId,
             amount,
+            fee,
+            totalDebit,
             bankName,
             accountNumber,
             accountName,
-            refId // store refId for tracing
+            reference: refId,
+            status: 'processing'
         })
 
-        // Send alert to admin
-        await sendEmail(
-            process.env.ADMIN_EMAIL,
-            'New Withdrawal Request',
-            `<p>User: ${user.name} (${user.phone})<br>Amount: ₦${amount}<br>Bank: ${bankName} (${accountNumber})<br>Status: Pending</p>`
-        )
+        // 6. Paystack Integration (Instant)
+        try {
+            const recipientCode = await createTransferRecipient(accountName, accountNumber, bankCode);
+            const transfer = await initiateTransfer(amount, recipientCode, refId);
 
-        res.json({ message: 'Withdrawal request submitted', request })
+            if (transfer.status) {
+                // Success - Unfreeze and debit permanently
+                await walletService.unfreeze(userId, totalDebit, refId, 'withdrawal_success');
+                await walletService.debit(userId, totalDebit, refId, 'withdrawal_payout');
+                
+                request.status = 'completed';
+                await request.save();
+
+                await notificationService.sendInApp(userId, {
+                    title: 'Withdrawal Successful',
+                    message: `Withdrawal of ₦${amount.toLocaleString()} (Fee: ₦${fee.toLocaleString()}) was successful.`,
+                    type: 'transaction',
+                    metadata: { withdrawalId: request._id }
+                });
+
+                return res.json({ message: 'Withdrawal processed successfully', request });
+            } else {
+                throw new Error(transfer.message || 'Transfer failed at Paystack');
+            }
+        } catch (paystackError) {
+            console.error('Paystack Transfer Error:', paystackError);
+            
+            // Fail - Unfreeze and return funds to user balance
+            await walletService.unfreeze(userId, totalDebit, refId, 'withdrawal_failed');
+            
+            request.status = 'failed';
+            request.notes = paystackError.message;
+            await request.save();
+
+            return res.status(500).json({ message: 'Transfer failed: ' + paystackError.message });
+        }
     } catch (err) {
+        console.error('Withdrawal error:', err);
         res.status(500).json({ error: err.message })
     }
 }

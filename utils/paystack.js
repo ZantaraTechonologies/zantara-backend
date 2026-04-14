@@ -94,4 +94,54 @@ async function getPaystackBalance() {
     }
 }
 
-module.exports = { initializePayment, getPaystackBalance };
+async function createTransferRecipient(name, accountNumber, bankCode) {
+    const config = {
+        headers: {
+            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+            'Content-Type': 'application/json',
+        },
+    };
+
+    const body = {
+        type: "nuban",
+        name: name,
+        account_number: accountNumber,
+        bank_code: bankCode,
+        currency: "NGN"
+    };
+
+    try {
+        const { data } = await axios.post(`${PAYSTACK_BASE_URL}/transferrecipient`, body, config);
+        if (!data?.status) throw new Error(data?.message || 'Failed to create transfer recipient');
+        return data.data.recipient_code;
+    } catch (err) {
+        throw new Error(err?.response?.data?.message || err.message);
+    }
+}
+
+async function initiateTransfer(amount, recipientCode, reference, reason = "Withdrawal from Zantara") {
+    const config = {
+        headers: {
+            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+            'Content-Type': 'application/json',
+        },
+    };
+
+    const body = {
+        source: "balance",
+        amount: Math.round(Number(amount) * 100), // Kobo
+        recipient: recipientCode,
+        reference: reference,
+        reason: reason
+    };
+
+    try {
+        const { data } = await axios.post(`${PAYSTACK_BASE_URL}/transfer`, body, config);
+        if (!data?.status) throw new Error(data?.message || 'Transfer failed');
+        return data;
+    } catch (err) {
+        throw new Error(err?.response?.data?.message || err.message);
+    }
+}
+
+module.exports = { initializePayment, getPaystackBalance, createTransferRecipient, initiateTransfer };

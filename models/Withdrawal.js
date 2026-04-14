@@ -6,6 +6,8 @@ const withdrawalSchema = new mongoose.Schema({
     bankName: { type: String, required: true },
     accountNumber: { type: String, required: true },
     accountName: { type: String, required: true },
+    fee: { type: Number, default: 0 },
+    totalDebit: { type: Number, required: true },
     status: { type: String, enum: ['pending', 'processing', 'completed', 'failed', 'rejected'], default: 'pending' },
     reference: { type: String, unique: true },
     processedAt: { type: Date },
