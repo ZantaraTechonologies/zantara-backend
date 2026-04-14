@@ -202,7 +202,13 @@ const purchaseExamPin = async (req, res) => {
             status: 'delivered'
         })
 
-        return sendResponse(res, { message: 'PIN purchased successfully', data: { pin: result.data.token } })
+        return sendResponse(res, { 
+            message: 'PIN purchased successfully', 
+            data: { 
+                pin: result.data.token,
+                reference: result.data.transactionId
+            } 
+        })
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: err.message || 'Server error', error: err })
     }
