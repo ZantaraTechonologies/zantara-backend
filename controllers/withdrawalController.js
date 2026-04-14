@@ -32,7 +32,7 @@ const requestWithdrawal = async (req, res) => {
         const account = user.linkedAccounts.id(accountId);
         if (!account) return res.status(404).json({ message: 'Linked bank account not found' });
         
-        const { bankName, accountNumber, accountName, bankCode } = account;
+        const { bankName, accountNumber, accountName } = account;
 
         // 3. Fee Calculation (10%)
         const fee = Math.round(amount * 0.10);
@@ -41,7 +41,7 @@ const requestWithdrawal = async (req, res) => {
         // 4. Freeze the totalDebit via WalletService
         await walletService.freeze(userId, totalDebit, refId, 'withdrawal_request')
 
-        // 5. Create Withdrawal Record
+        // 5. Create Withdrawal Record (Status: Pending)
         const request = await Withdrawal.create({
             userId,
             amount,
@@ -51,45 +51,32 @@ const requestWithdrawal = async (req, res) => {
             accountNumber,
             accountName,
             reference: refId,
-            status: 'processing'
+            status: 'pending'
         })
 
-        // 6. Paystack Integration (Instant)
-        try {
-            const recipientCode = await createTransferRecipient(accountName, accountNumber, bankCode);
-            const transfer = await initiateTransfer(amount, recipientCode, refId);
+        // 6. Notify Admin via Email
+        await sendEmail(
+            process.env.ADMIN_EMAIL,
+            'New Withdrawal Request',
+            `<p><b>New Withdrawal Request</b></p>
+             <p>User: ${user.name} (${user.phone})</p>
+             <p>Requested Amount: ₦${amount.toLocaleString()}</p>
+             <p>Service Fee (10%): ₦${fee.toLocaleString()}</p>
+             <p><b>Total Balance to Debit: ₦${totalDebit.toLocaleString()}</b></p>
+             <hr>
+             <p><b>Bank Details:</b></p>
+             <p>Bank: ${bankName}</p>
+             <p>Acc Number: ${accountNumber}</p>
+             <p>Acc Name: ${accountName}</p>
+             <p>Reference: ${refId}</p>
+             <p>Please pay the user manually and approve the request in your admin dashboard.</p>`
+        )
 
-            if (transfer.status) {
-                // Success - Unfreeze and debit permanently
-                await walletService.unfreeze(userId, totalDebit, refId, 'withdrawal_success');
-                await walletService.debit(userId, totalDebit, refId, 'withdrawal_payout');
-                
-                request.status = 'completed';
-                await request.save();
+        return res.json({ 
+            message: 'Withdrawal request submitted! It will be processed after manual review.', 
+            request 
+        });
 
-                await notificationService.sendInApp(userId, {
-                    title: 'Withdrawal Successful',
-                    message: `Withdrawal of ₦${amount.toLocaleString()} (Fee: ₦${fee.toLocaleString()}) was successful.`,
-                    type: 'transaction',
-                    metadata: { withdrawalId: request._id }
-                });
-
-                return res.json({ message: 'Withdrawal processed successfully', request });
-            } else {
-                throw new Error(transfer.message || 'Transfer failed at Paystack');
-            }
-        } catch (paystackError) {
-            console.error('Paystack Transfer Error:', paystackError);
-            
-            // Fail - Unfreeze and return funds to user balance
-            await walletService.unfreeze(userId, totalDebit, refId, 'withdrawal_failed');
-            
-            request.status = 'failed';
-            request.notes = paystackError.message;
-            await request.save();
-
-            return res.status(500).json({ message: 'Transfer failed: ' + paystackError.message });
-        }
     } catch (err) {
         console.error('Withdrawal error:', err);
         res.status(500).json({ error: err.message })
@@ -105,15 +92,42 @@ const processWithdrawal = async (req, res) => {
             return res.status(400).json({ error: 'Invalid request or already processed' })
         }
 
-        const wallet = await Wallet.findOne({ userId: request.userId })
+        // Ensure we use the totalDebit (Amount + 10% Fee)
+        const totalDebit = request.totalDebit || (request.amount + (request.fee || 0));
 
         if (status === 'approved') {
             // Unfreeze and debit permanently via WalletService
-            await walletService.unfreeze(request.userId, request.amount, request.refId || request._id, 'withdrawal_approval')
-            await walletService.debit(request.userId, request.amount, request.refId || request._id, 'withdrawal_payout')
+            await walletService.unfreeze(request.userId, totalDebit, request.reference || request._id, 'withdrawal_approval')
+            await walletService.debit(request.userId, totalDebit, request.reference || request._id, 'withdrawal_payout')
         } else if (status === 'rejected') {
-            // Return funds via WalletService
-            await walletService.unfreeze(request.userId, request.amount, request.refId || request._id, 'withdrawal_rejection')
+            // Return funds (unfreeze)
+            await walletService.unfreeze(request.userId, totalDebit, request.reference || request._id, 'withdrawal_rejection')
+        }
+
+        request.status = status === 'approved' ? 'completed' : 'rejected'
+        request.adminNote = adminNote
+        request.processedAt = Date.now()
+        await request.save()
+
+        // ⬇️ Log Admin Action
+        const { logAction } = require('./auditController');
+        const { notifySuperAdmins } = require('../services/notificationService');
+
+        await logAction(
+            req.user.id,
+            req.user.name,
+            'WITHDRAWAL_PROCESS',
+            `Withdrawal ID: ${request._id} (User: ${request.userId})`,
+            { amount: request.amount, totalDebit, status, adminNote },
+            'success',
+            req
+        );
+
+        if (status === 'approved' && request.amount >= 50000) {
+            await notifySuperAdmins(
+                `💰 Large Withdrawal Approved: ₦${request.amount.toLocaleString()}`,
+                `<p>Admin <b>${req.user.name}</b> approved a large withdrawal of <b>₦${request.amount.toLocaleString()}</b> for User ${request.userId}.</p>`
+            );
         }
 
         request.adminNote = adminNote
