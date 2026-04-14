@@ -44,10 +44,19 @@ const sendSMS = async (phone, message) => {
 
     } catch (error) {
         const errorData = error.response?.data || error.message;
-        console.error('[SMS Error] Termii:', errorData);
+        
+        if (errorData.code === 404 && errorData.message?.includes('ApplicationSenderId')) {
+            console.error('[SMS Error] YOUR SENDER ID IS NOT APPROVED YET.');
+            console.error(`[SMS Error] Termii says: "${errorData.message}"`);
+            console.error('[SMS Error] ACTION: Register "Zantara" in your Termii dashboard or use "Termii" in your .env for testing.');
+        } else {
+            console.error('[SMS Error] Termii:', errorData);
+        }
+        
         return { success: false, error: errorData };
     }
 };
 
 module.exports = { sendSMS };
+
 
