@@ -25,6 +25,7 @@ const payment = async (req, res) => {
 
 const WebhookEvent = require('../models/WebhookEvent');
 const walletService = require('../services/wallet.service');
+const notificationService = require('../services/notification.service');
 
 const webhook = async (req, res) => {
     try {
@@ -75,6 +76,16 @@ const webhook = async (req, res) => {
                 if (userId) {
                     // 4. Ledger-backed Credit
                     await walletService.credit(userId, amountPaid, refId, 'funding');
+                }
+
+                // Notify user of funding success
+                if (userId) {
+                    await notificationService.sendInApp(userId, {
+                        title: 'Wallet Funded Successfully',
+                        message: `Your wallet has been credited with ₦${amountPaid.toLocaleString()} via Monnify.`,
+                        type: 'transaction',
+                        metadata: { reference: refId }
+                    });
                 }
 
                 await logTransaction({

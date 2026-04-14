@@ -2,6 +2,7 @@ const Withdrawal = require('../models/Withdrawal')
 const Wallet = require('../models/Wallet')
 const User = require('../models/User')
 const { sendEmail } = require('../utils/mailer')
+const notificationService = require('../services/notification.service')
 
 const walletService = require('../services/wallet.service')
 
@@ -106,6 +107,14 @@ const processWithdrawal = async (req, res) => {
             `Withdrawal ${status.charAt(0).toUpperCase() + status.slice(1)}`,
             `<p>Hello ${user.name},</p><p>${statusMsg}</p>`
         )
+
+        // ⬇️ Push/In-App Notification
+        await notificationService.sendInApp(request.userId, {
+            title: `Withdrawal ${status.charAt(0).toUpperCase() + status.slice(1)}`,
+            message: statusMsg,
+            type: 'transaction',
+            metadata: { withdrawalId: request._id }
+        });
 
         res.json({ message: `Withdrawal ${status}`, request })
     } catch (err) {

@@ -1,6 +1,7 @@
 const Kyc = require('../models/Kyc');
 const User = require('../models/User');
 const { sendResponse } = require('../utils/response');
+const notificationService = require('../services/notification.service');
 
 const submitKyc = async (req, res) => {
     try {
@@ -79,6 +80,16 @@ const reviewKyc = async (req, res) => {
         if (status === 'approved') {
             await User.findByIdAndUpdate(kyc.userId, { kycLevel: kyc.tier });
         }
+
+        // ⬇️ Push/In-App Notification
+        await notificationService.sendInApp(kyc.userId, {
+            title: `KYC ${status.charAt(0).toUpperCase() + status.slice(1)}`,
+            message: status === 'approved' 
+                ? `Congratulations! Your KYC Tier ${kyc.tier || 1} verification has been approved.`
+                : `Your KYC verification request was rejected. Reason: ${rejectionReason || 'Incomplete documents'}.`,
+            type: 'kyc',
+            metadata: { kycId: kyc._id, tier: kyc.tier }
+        });
 
         return sendResponse(res, { message: `KYC ${status} successfully` });
     } catch (err) {

@@ -162,6 +162,7 @@ const verifyTransaction = async (req, res) => {
 
 const WebhookEvent = require('../models/WebhookEvent');
 const walletService = require('../services/wallet.service');
+const notificationService = require('../services/notification.service');
 
 const webhook = async (req, res) => {
     try {
@@ -223,6 +224,14 @@ const webhook = async (req, res) => {
                         } else {
                              await walletService.credit(userId, amountNaira, refId, 'funding');
                         }
+
+                        // Notify user of funding success
+                        await notificationService.sendInApp(userId, {
+                             title: 'Wallet Funded Successfully',
+                             message: `Your wallet has been credited with ₦${amountNaira.toLocaleString()} via Paystack.`,
+                             type: 'transaction',
+                             metadata: { reference: refId }
+                        });
                     }
                     
                     await logTransaction({
