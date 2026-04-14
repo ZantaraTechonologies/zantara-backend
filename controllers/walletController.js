@@ -188,7 +188,7 @@ const transferMoney = async (req, res) => {
         if (!amountNum || amountNum < 100) throw new Error('Minimum transfer is ₦100');
 
         // 1. PIN Validation
-        const sender = await User.findById(senderId).select('+transactionPin name phone').session(session);
+        const sender = await User.findById(senderId).select('+transactionPin name phone isPinSet').session(session);
         if (!sender.isPinSet) throw new Error('Transaction PIN not set');
         const pinMatch = await bcrypt.compare(pin, sender.transactionPin);
         if (!pinMatch) throw new Error('Invalid transaction PIN');
