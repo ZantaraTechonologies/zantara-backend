@@ -6,6 +6,7 @@ const { verifyJWT } = require('../middlewares/auth');
 router.use(verifyJWT);
 
 router.get('/resolve', resolveAccount);
+router.get('/banks', getBanks);
 router.post('/', linkAccount);
 router.get('/', getLinkedAccounts);
 router.delete('/:accountId', unlinkAccount);

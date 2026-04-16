@@ -1,6 +1,35 @@
 const User = require('../models/User');
 const { sendResponse } = require('../utils/response');
-const axios = require('axios');
+const { getBanks, resolveAccount: resolvePaystackAccount } = require('../utils/paystack');
+
+let bankCache = {
+    data: null,
+    lastFetched: 0
+};
+
+const CACHE_DURATION = 1000 * 60 * 60 * 24; // 24 hours
+
+const POPULAR_BANK_CODES = [
+    '044', // Access Bank
+    '011', // First Bank of Nigeria
+    '058', // Guaranty Trust Bank
+    '033', // United Bank for Africa
+    '057', // Zenith Bank
+    '221', // Stanbic IBTC Bank
+    '070', // Fidelity Bank
+    '232', // Sterling Bank
+    '035', // Wema Bank
+    '050', // EcoBank
+    '032', // Union Bank
+    '214', // FCMB
+    '076', // Polaris Bank
+    '082', // Keystone Bank
+    '50211', // Kuda Bank
+    '999992', // OPay
+    '999991', // PalmPay
+    '50515', // Moniepoint MFB
+    '100004'  // OPay Digital Services
+];
 
 const linkAccount = async (req, res) => {
     try {
@@ -51,6 +80,34 @@ const unlinkAccount = async (req, res) => {
     }
 };
 
+const getBanksList = async (req, res) => {
+    try {
+        const now = Date.now();
+        if (!bankCache.data || (now - bankCache.lastFetched > CACHE_DURATION)) {
+            const banks = await getBanks();
+            bankCache.data = banks;
+            bankCache.lastFetched = now;
+        }
+
+        const type = req.query.type || 'popular';
+        let filteredBanks = bankCache.data;
+
+        if (type === 'popular') {
+            filteredBanks = bankCache.data.filter(bank => POPULAR_BANK_CODES.includes(bank.code));
+            // Sort by popularity/name? Access, First, GTB...
+            filteredBanks.sort((a, b) => {
+                const aIdx = POPULAR_BANK_CODES.indexOf(a.code);
+                const bIdx = POPULAR_BANK_CODES.indexOf(b.code);
+                return aIdx - bIdx;
+            });
+        }
+
+        return sendResponse(res, { data: filteredBanks });
+    } catch (err) {
+        return sendResponse(res, { status: 500, success: false, message: err.message });
+    }
+};
+
 const resolveAccount = async (req, res) => {
     try {
         const { accountNumber, bankCode } = req.query;
@@ -59,25 +116,20 @@ const resolveAccount = async (req, res) => {
             return sendResponse(res, { status: 400, success: false, message: 'Account number and bank code are required' });
         }
 
-        const response = await axios.get(`https://api.paystack.co/bank/resolve`, {
-            params: { account_number: accountNumber, bank_code: bankCode },
-            headers: {
-                Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`
-            }
-        });
+        const data = await resolvePaystackAccount(accountNumber, bankCode);
 
-        if (response.data.status) {
+        if (data && data.account_name) {
             return sendResponse(res, { 
-                data: { account_name: response.data.data.account_name } 
+                data: { account_name: data.account_name } 
             });
         } else {
             return sendResponse(res, { status: 400, success: false, message: 'Could not resolve account' });
         }
     } catch (err) {
-        const message = err.response?.data?.message || err.message;
-        const status = err.response?.status || 500;
+        const message = err.message;
+        const status = err.response?.status || 400; // Paystack errors are often 4xx
         return sendResponse(res, { status, success: false, message });
     }
 };
 
-module.exports = { linkAccount, getLinkedAccounts, unlinkAccount, resolveAccount };
+module.exports = { linkAccount, getLinkedAccounts, unlinkAccount, resolveAccount, getBanks: getBanksList };

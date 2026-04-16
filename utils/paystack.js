@@ -144,4 +144,52 @@ async function initiateTransfer(amount, recipientCode, reference, reason = "With
     }
 }
 
-module.exports = { initializePayment, getPaystackBalance, createTransferRecipient, initiateTransfer };
+async function getBanks() {
+    const config = {
+        headers: {
+            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+            'Content-Type': 'application/json',
+        },
+    };
+
+    try {
+        const { data } = await axios.get(`${PAYSTACK_BASE_URL}/bank?country=nigeria`, config);
+        if (data?.status) {
+            return data.data; // Array of banks
+        }
+        throw new Error(data?.message || 'Failed to fetch banks');
+    } catch (err) {
+        throw new Error(err?.response?.data?.message || err.message);
+    }
+}
+
+async function resolveAccount(accountNumber, bankCode) {
+    const config = {
+        headers: {
+            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+            'Content-Type': 'application/json',
+        },
+    };
+
+    try {
+        const { data } = await axios.get(`${PAYSTACK_BASE_URL}/bank/resolve`, {
+            params: { account_number: accountNumber, bank_code: bankCode },
+            ...config
+        });
+        if (data?.status) {
+            return data.data; // { account_number, account_name, bank_id }
+        }
+        throw new Error(data?.message || 'Failed to resolve account');
+    } catch (err) {
+        throw new Error(err?.response?.data?.message || err.message);
+    }
+}
+
+module.exports = { 
+    initializePayment, 
+    getPaystackBalance, 
+    createTransferRecipient, 
+    initiateTransfer,
+    getBanks,
+    resolveAccount
+};
