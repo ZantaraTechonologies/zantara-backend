@@ -9,6 +9,10 @@ let bankCache = {
 
 const CACHE_DURATION = 1000 * 60 * 60 * 24; // 24 hours
 
+// Short-term cache for resolved accounts to avoid Paystack rate limiting
+const resolveCache = new Map(); // key: `${accountNumber}:${bankCode}` => { account_name, cachedAt }
+const RESOLVE_CACHE_TTL = 1000 * 60 * 10; // 10 minutes
+
 const POPULAR_BANK_CODES = [
     '044', // Access Bank
     '011', // First Bank of Nigeria
@@ -125,19 +129,50 @@ const resolveAccount = async (req, res) => {
             return sendResponse(res, { status: 400, success: false, message: 'Account number and bank code are required' });
         }
 
+        // Check in-memory cache first to avoid Paystack rate limits
+        const cacheKey = `${accountNumber}:${bankCode}`;
+        const cached = resolveCache.get(cacheKey);
+        if (cached && (Date.now() - cached.cachedAt) < RESOLVE_CACHE_TTL) {
+            console.log(`[resolveAccount] Cache hit for ${cacheKey}`);
+            return sendResponse(res, { data: { account_name: cached.account_name } });
+        }
+
+        console.log(`[resolveAccount] Calling Paystack for accountNumber=${accountNumber} bankCode=${bankCode}`);
         const data = await resolvePaystackAccount(accountNumber, bankCode);
 
         if (data && data.account_name) {
+            // Store in cache
+            resolveCache.set(cacheKey, { account_name: data.account_name, cachedAt: Date.now() });
             return sendResponse(res, { 
                 data: { account_name: data.account_name } 
             });
         } else {
-            return sendResponse(res, { status: 400, success: false, message: 'Could not resolve account' });
+            console.warn(`[resolveAccount] Paystack returned no account_name for ${cacheKey}`);
+            return sendResponse(res, { status: 400, success: false, message: 'Could not resolve this account. Please check the account number and bank.' });
         }
     } catch (err) {
-        const message = err.message;
-        const status = err.response?.status || 400; // Paystack errors are often 4xx
-        return sendResponse(res, { status, success: false, message });
+        // err.message already contains the Paystack error message (from paystack.js re-throw)
+        const message = err.message || 'Unable to verify account at this time.';
+        console.error(`[resolveAccount] Error: ${message}`);
+
+        // Map known Paystack error patterns to friendly messages
+        const lowerMsg = message.toLowerCase();
+        let friendlyMessage;
+        let status = 400;
+
+        if (lowerMsg.includes('too many') || lowerMsg.includes('rate limit') || lowerMsg.includes('429')) {
+            status = 429;
+            friendlyMessage = 'Too many verification attempts. Please wait a moment before trying again.';
+        } else if (lowerMsg.includes('could not resolve') || lowerMsg.includes('not found') || lowerMsg.includes('invalid')) {
+            friendlyMessage = 'Account not found. Please double-check the account number and selected bank.';
+        } else if (lowerMsg.includes('timeout') || lowerMsg.includes('network') || lowerMsg.includes('econnrefused')) {
+            status = 503;
+            friendlyMessage = 'Could not reach the bank verification service. Please try again shortly.';
+        } else {
+            friendlyMessage = message;
+        }
+
+        return sendResponse(res, { status, success: false, message: friendlyMessage });
     }
 };
 
