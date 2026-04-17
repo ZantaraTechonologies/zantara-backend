@@ -41,6 +41,15 @@ const linkAccount = async (req, res) => {
         const user = await User.findById(req.user.id);
         if (!user) return sendResponse(res, { status: 404, success: false, message: 'User not found' });
 
+        // Check for duplicates
+        const accountExists = user.linkedAccounts.some(acc => 
+            acc.accountNumber === accountNumber && acc.bankCode === bankCode
+        );
+
+        if (accountExists) {
+            return sendResponse(res, { status: 400, success: false, message: 'This bank account is already linked to your profile' });
+        }
+
         // Add to linkedAccounts
         user.linkedAccounts.push({
             bankName,
