@@ -94,7 +94,9 @@ const requestWithdrawal = async (req, res) => {
 // Admin approves/rejects withdrawal
 const processWithdrawal = async (req, res) => {
     try {
-        const { status, adminNote } = req.body
+        const status = req.body.status || req.body.action;
+        const adminNote = req.body.adminNote || req.body.reason;
+        
         const request = await Withdrawal.findById(req.params.id)
         if (!request || request.status !== 'pending') {
             return res.status(400).json({ error: 'Invalid request or already processed' })
@@ -166,13 +168,13 @@ const processWithdrawal = async (req, res) => {
 // Admin views all withdrawal requests
 const getAllWithdrawals = async (req, res) => {
     const requests = await Withdrawal.find().populate('userId', 'name email').sort({ createdAt: -1 })
-    res.json(requests)
+    res.json({ success: true, data: requests })
 }
 
 // User views their own withdrawal history
 const getMyWithdrawals = async (req, res) => {
     const requests = await Withdrawal.find({ userId: req.user.id }).sort({ createdAt: -1 })
-    res.json(requests)
+    res.json({ success: true, data: requests })
 }
 
 

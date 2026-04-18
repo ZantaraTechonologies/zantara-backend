@@ -406,7 +406,7 @@ const getAdminEarningsAnalytics = async (req, res) => {
 const getDashboardStats = async (req, res) => {
     try {
         const Kyc = require('../models/Kyc');
-        const WithdrawalRequest = require('../models/WithdrawalRequest');
+        const Withdrawal = require('../models/Withdrawal');
         const Ticket = require('../models/Ticket');
 
         const { days = 7 } = req.query;
@@ -438,8 +438,8 @@ const getDashboardStats = async (req, res) => {
                 createdAt: { $gte: activeLookback } 
             }),
             Kyc.find({ status: 'pending' }).populate('userId', 'name phone'),
-            WithdrawalRequest.find({ status: 'pending' }).populate('userId', 'name phone'),
-            WithdrawalRequest.aggregate([
+            Withdrawal.find({ status: 'pending' }).populate('userId', 'name phone'),
+            Withdrawal.aggregate([
                 { $match: { status: 'pending' } },
                 { $group: { _id: null, total: { $sum: "$amount" } } }
             ]),
