@@ -108,6 +108,7 @@ app.use('/api/admin/support', supportRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/admin/notifications', adminNotificationRoutes);
 app.use('/api/admin/business', businessRoutes);
+app.use('/api/settings', require('./routes/settings'));
 app.use('/api/admin/audit-logs', auditRoutes);
 app.use('/api/withdrawal', withdrawalRoutes);
 app.use('/api/admin/withdrawals', withdrawalRoutes);

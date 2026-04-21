@@ -1,68 +1,16 @@
 const User = require('../models/User');
 const Wallet = require('../models/Wallet');
 const Setting = require('../models/Setting');
+const Transaction = require('../models/Transaction');
+const WalletLedger = require('../models/WalletLedger');
 const { logTransaction } = require('./transaction');
 const walletService = require('../services/wallet.service');
+const settingsService = require('../services/settings.service');
 
 /**
- * Process referral bonus for a transaction
- * @param {string} userId - The ID of the user performing the transaction
- * @param {number} purchaseAmount - The amount of the purchase
- * @param {string} transactionRef - Reference of the triggering transaction
+ * Note: processReferralBonus (Signup/First Funding Bonus) was removed 
+ * as per requirements to only use purchase commissions.
  */
-const processReferralBonus = async (userId, purchaseAmount, transactionRef) => {
-    try {
-        // 1. Check if Referral System is Enabled
-        const referralEnabled = await Setting.findOne({ key: 'referral_enabled' });
-        if (!referralEnabled || referralEnabled.value !== true) return;
-
-        // 2. Get User and Referrer
-        const user = await User.findById(userId);
-        if (!user || !user.referrerCode) return; // No referrer
-
-        const referrer = await User.findOne({ myReferralCode: user.referrerCode });
-        if (!referrer) return;
-
-        // 3. Get Bonus Percentage
-        const bonusSetting = await Setting.findOne({ key: 'referral_percentage' });
-        const percentage = bonusSetting ? Number(bonusSetting.value) : 1; // Default 1%
-
-        const bonusAmount = (percentage / 100) * purchaseAmount;
-
-        if (bonusAmount <= 0) return;
-
-// 4. Credit Referrer Referral Balance (separately from main wallet)
-// We still use WalletService for ledger (if we want it there) or just update the user model.
-// The user requested a separate "referral wallet" experience.
-// Let's update the user model's referralBalance.
-// Note: We'll still log it as a transaction for visibility.
-
-        // 5. Update Referrer Stats and Balance
-        referrer.totalReferralBonus = (referrer.totalReferralBonus || 0) + bonusAmount;
-        referrer.referralBalance = (referrer.referralBalance || 0) + bonusAmount;
-        await referrer.save();
-
-        // 6. Log Transaction for Referrer
-        await logTransaction({
-            userId: referrer._id,
-            refId: `REF-${transactionRef}`,
-            type: 'referral_bonus',
-            service: 'Bonus',
-            amount: bonusAmount,
-            status: 'success',
-            details: {
-                fromUser: user.email,
-                percentage: percentage,
-                triggerTransaction: transactionRef
-            }
-        });
-
-        console.log(`Referral bonus of ${bonusAmount} credited to ${referrer.email}`);
-
-    } catch (error) {
-        console.error('Error processing referral bonus:', error);
-    }
-};
 
 /**
  * Process lifetime commission for a transaction
@@ -93,10 +41,8 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
             return 0;
         }
 
-        // 2. Fetch Global Commission Setting
-        const Setting = require('../models/Setting');
-        const globalSetting = await Setting.findOne({ key: 'defaultCommissionRate' }).session(session);
-        const globalRate = globalSetting ? Number(globalSetting.value) : 0.01;
+        // 2. Fetch Global Commission Setting (Default)
+        const globalRate = await settingsService.getSetting('REFERRAL_COMMISSION_PERCENTAGE', 0.01);
 
         // 3. Resolve Final Commission Rate (Margin Share)
         const rate = (referrer.commissionRate !== undefined && referrer.commissionRate !== null) 
@@ -104,7 +50,6 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
             : globalRate;
 
         // 4. Retrieve Parent Transaction to derive Profit
-        const Transaction = require('../models/Transaction');
         const parentTxn = await Transaction.findById(parentTransactionObjectId).session(session);
         
         if (!parentTxn) {
@@ -162,8 +107,6 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
             console.log(`[Margin Guard] Commission skipped for ${buyerRole} purchase due to zero/negative remaining profit.`);
             
             // Log Skipped Event for Audit (Step 6)
-            const WalletLedger = require('../models/WalletLedger');
-            const Wallet = require('../models/Wallet');
             const wallet = await Wallet.findOne({ userId: user._id }).session(session);
 
             await WalletLedger.create([{
@@ -252,4 +195,4 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
     }
 };
 
-module.exports = { processReferralBonus, processLifetimeCommission };
+module.exports = { processLifetimeCommission };

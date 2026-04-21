@@ -138,7 +138,6 @@ const verifyFunding = async (req, res) => {
                             type: 'transaction',
                             metadata: { reference }
                         });
-
                         return res.json({ status: 'success' });
                     } else {
                         // Already processed by webhook

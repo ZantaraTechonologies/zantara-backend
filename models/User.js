@@ -25,6 +25,7 @@ const userSchema = new mongoose.Schema({
     agentDiscountRate: { type: Number, min: 0, max: 0.5 },
     totalReferralBonus: { type: Number, default: 0 },
     referralBalance: { type: Number, default: 0 },
+    firstFundingBonusProcessed: { type: Boolean, default: false },
     resellerEarnings: { type: Number, default: 0 },
     // Investment / Shareholder Fields
     isShareholder: { type: Boolean, default: false },

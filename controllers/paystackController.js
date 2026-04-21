@@ -130,17 +130,17 @@ const verifyTransaction = async (req, res) => {
                              await walletService.credit(req.user.id, amountNaira, reference, 'funding');
                         }
                         
-                        await logTransaction({
-                            userId: req.user.id,
-                            refId: reference,
-                            type: status.type,
-                            service: 'Paystack',
-                            amount: amountNaira,
-                            status: 'success',
-                            response: verify.data.data
-                        });
-                    }
-                    status.status = 'success';
+                              await logTransaction({
+                                userId: req.user.id,
+                                refId: reference,
+                                type: status.type,
+                                service: 'Paystack',
+                                amount: amountNaira,
+                                status: 'success',
+                                response: verify.data.data
+                            });
+                        }
+                        status.status = 'success';
                 } else if (verify?.data?.data?.status === 'failed') {
                     await TransactionStatus.updateOne({ refId: reference }, { $set: { status: 'failed' } });
                     status.status = 'failed';
