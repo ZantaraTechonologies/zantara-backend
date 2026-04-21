@@ -2,6 +2,7 @@ const purchaseService = require('../services/purchase.service')
 const providerService = require('../services/provider.service')
 const Wallet = require('../models/Wallet')
 const Pin = require('../models/Pin')
+const Service = require('../models/Service')
 const Transaction = require('../models/Transaction')
 const request_id = require('../utils/generateID')
 const { fetchPlans, verifyMeterWithProvider } = require('../utils/vtuService')
@@ -21,16 +22,19 @@ const purchaseAirtime = async (req, res) => {
     }
 
     try {
+        const service = await Service.findOne({ code: finalNetwork, category: 'airtime' });
+        const provider = service?.provider || 'VTPass';
+        const vendorCode = service?.providerCode || finalNetwork;
 
         const result = await purchaseService.processPurchase(userId, {
             type: 'airtime',
             serviceId: finalNetwork,
             amount,
             pin,
+            provider,
             details: { phone: finalPhone, network: finalNetwork, roles: req.user.roles },
             providerCall: (refId) => {
-
-                return providerService.purchaseAirtime({ request_id: refId, serviceID: finalNetwork, phone: finalPhone, amount })
+                return providerService.purchaseAirtime({ request_id: refId, serviceID: vendorCode, phone: finalPhone, amount }, provider)
             }
         })
 
@@ -77,13 +81,26 @@ const purchaseData = async (req, res) => {
     }
 
     try {
+        // Lookup the service to get provider and providerCode
+        const service = await Service.findOne({ code: variation_code, category: 'data' });
+        const provider = service?.provider || 'VTPass';
+        const vendorServiceID = service?.providerCode || finalServiceID; // Some use network, some use bundle name
+
         const result = await purchaseService.processPurchase(userId, {
             type: 'data',
-            serviceId: finalServiceID,
+            serviceId: variation_code,
             amount,
             pin,
+            provider,
             details: { phone: finalPhone, serviceID: finalServiceID, variation_code, roles: req.user.roles },
-            providerCall: (refId) => providerService.purchaseData({ request_id: refId, serviceID: finalServiceID, billersCode: finalBillersCode, variation_code, phone: finalPhone, amount })
+            providerCall: (refId) => providerService.purchaseData({ 
+                request_id: refId, 
+                serviceID: vendorServiceID, 
+                billersCode: finalBillersCode, 
+                variation_code: service?.providerCode || variation_code, 
+                phone: finalPhone, 
+                amount 
+            }, provider)
         })
 
         if (!result.success) {
@@ -106,7 +123,14 @@ const getPlans = async (req, res) => {
     try {
         const { network } = req.params;
         if (!network) return sendResponse(res, { status: 400, success: false, message: 'Network parameter required' });
-        const plans = await fetchPlans(network);
+        
+        // Find a sample service for this network to determine provider
+        const sampleService = await Service.findOne({ 
+            $or: [{ code: network }, { category: 'data', name: new RegExp(network, 'i') }] 
+        });
+        const provider = sampleService?.provider || 'VTPass';
+
+        const plans = await fetchPlans(network, provider);
         return sendResponse(res, { data: plans });
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: 'Error fetching plans', error: err });
@@ -116,7 +140,11 @@ const getPlans = async (req, res) => {
 const verifyMeter = async (req, res) => {
     try {
         const { billersCode, serviceID, type } = req.body;
-        const result = await verifyMeterWithProvider({ billersCode, serviceID, type });
+        // Lookup service to identify provider
+        const service = await Service.findOne({ code: serviceID });
+        const provider = service?.provider || 'VTPass';
+
+        const result = await verifyMeterWithProvider({ billersCode, serviceID, type }, provider);
         return sendResponse(res, { data: result });
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: 'Meter verification failed', error: err });
@@ -137,13 +165,26 @@ const payElectricityBill = async (req, res) => {
     }
 
     try {
+        // Lookup the service to get provider and providerCode
+        const service = await Service.findOne({ code: finalServiceID, category: 'electricity' });
+        const provider = service?.provider || 'VTPass';
+        const vendorServiceID = service?.providerCode || finalServiceID;
+
         const result = await purchaseService.processPurchase(userId, {
             type: 'electricity',
             serviceId: finalServiceID,
             amount,
             pin,
+            provider,
             details: { meter_number: finalMeterNumber, meter_type: finalMeterType, phone: finalPhone, roles: req.user.roles },
-            providerCall: (refId) => providerService.purchaseElectricity({ request_id: refId, serviceID: finalServiceID, billersCode: finalMeterNumber, variation_code: finalMeterType, amount, phone: finalPhone })
+            providerCall: (refId) => providerService.purchaseElectricity({ 
+                request_id: refId, 
+                serviceID: vendorServiceID, 
+                billersCode: finalMeterNumber, 
+                variation_code: finalMeterType, 
+                amount, 
+                phone: finalPhone 
+            }, provider)
         })
 
         if (!result.success) {
@@ -177,13 +218,26 @@ const rechargeCable = async (req, res) => {
     }
 
     try {
+        // Lookup the service to get provider and providerCode
+        const service = await Service.findOne({ code: finalServiceID, category: 'tv' });
+        const provider = service?.provider || 'VTPass';
+        const vendorServiceID = service?.providerCode || finalServiceID;
+
         const result = await purchaseService.processPurchase(userId, {
             type: 'cable',
             serviceId: finalServiceID,
             amount,
             pin,
+            provider,
             details: { serviceID: finalServiceID, billersCode: finalBillersCode, variation_code, roles: req.user.roles },
-            providerCall: (refId) => providerService.purchaseCable({ request_id: refId, serviceID: finalServiceID, billersCode: finalBillersCode, variation_code, amount, phone: finalPhone })
+            providerCall: (refId) => providerService.purchaseCable({ 
+                request_id: refId, 
+                serviceID: vendorServiceID, 
+                billersCode: finalBillersCode, 
+                variation_code, 
+                amount, 
+                phone: finalPhone 
+            }, provider)
         })
 
         if (!result.success) {
@@ -211,13 +265,27 @@ const purchaseExamPin = async (req, res) => {
     }
 
     try {
+        // Lookup the service to get provider and providerCode
+        const service = await Service.findOne({ code: variation_code || serviceID, category: 'pin' });
+        const provider = service?.provider || 'VTPass';
+        const vendorServiceID = service?.providerCode || serviceID;
+
         const result = await purchaseService.processPurchase(userId, {
             type: 'pin',
             serviceId: serviceID || variation_code,
             amount,
             pin,
+            provider,
             details: { serviceID, variation_code, quantity, phone, billersCode, roles: req.user.roles },
-            providerCall: (refId) => providerService.purchaseExamPin({ request_id: refId, serviceID, variation_code, amount, quantity, phone, billersCode })
+            providerCall: (refId) => providerService.purchaseExamPin({ 
+                request_id: refId, 
+                serviceID: vendorServiceID, 
+                variation_code: service?.providerCode || variation_code, 
+                amount, 
+                quantity, 
+                phone, 
+                billersCode 
+            }, provider)
         })
 
         if (!result.success) {

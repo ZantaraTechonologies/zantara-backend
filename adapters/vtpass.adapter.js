@@ -5,41 +5,31 @@ const BaseAdapter = require('./base.adapter');
  * VTPass Adapter
  * Docs: https://www.vtpass.com/documentation
  * Auth: Basic Auth (API Key : Secret Key)
- * Base URLs:
- *   Sandbox: https://sandbox.vtpass.com/api
- *   Live:    https://vtpass.com/api
  */
-
 class VTPassAdapter extends BaseAdapter {
-    constructor() {
-        super();
+    constructor(config) {
+        super(config);
     }
 
-    // ── Lazy getters so keys are always read from process.env at request time ──
-    get baseUrl() { return process.env.VTU_API_URI || 'https://sandbox.vtpass.com/api'; }
-    get apiKey()   { return process.env.VTPASS_API_KEY; }
-    get secretKey(){ return process.env.VTPASS_SECRET_KEY; }
-    get publicKey(){ return process.env.VTPASS_PUBLIC_KEY; }
-
-    /** Build VTPass-required request headers */
+    /** Build VTPass-required request headers from injected config */
     _authHeaders() {
-
-        return {
-            'api-key': this.apiKey,
-            'secret-key': this.secretKey,
-            'public-key': this.publicKey,
+        const headers = {
             'Content-Type': 'application/json',
         };
+        
+        if (this.apiKey) headers['api-key'] = this.apiKey;
+        if (this.secretKey) headers['secret-key'] = this.secretKey;
+        if (this.publicKey) headers['public-key'] = this.publicKey;
+        
+        return headers;
     }
 
     /** POST to /pay */
     async _pay(payload) {
-
         const res = await axios.post(`${this.baseUrl}/pay`, payload, {
             headers: this._authHeaders(),
             timeout: 30000,
         });
-
         return res.data;
     }
 
@@ -71,13 +61,10 @@ class VTPassAdapter extends BaseAdapter {
 
     async purchaseAirtime({ request_id, serviceID, phone, amount }) {
         try {
-
             const finalServiceID = (serviceID || '').toLowerCase();
             const raw = await this._pay({ request_id, serviceID: finalServiceID, amount, phone });
-
             return this.mapResponse(raw);
         } catch (err) {
-
             return this._errorResponse(err);
         }
     }
@@ -117,10 +104,7 @@ class VTPassAdapter extends BaseAdapter {
 
     async purchaseExamPin({ request_id, serviceID, variation_code, amount, quantity, phone, billersCode }) {
         try {
-            // VTPass Exam Pin: if serviceID is missing, extract it (e.g. 'waec' from 'waec-registration')
             let finalServiceID = serviceID || (variation_code ? variation_code.split('-')[0] : '');
-            
-            // Force 'jamb' for UTME variations as per documentation
             if (variation_code && variation_code.startsWith('utme')) {
                 finalServiceID = 'jamb';
             }
@@ -138,8 +122,6 @@ class VTPassAdapter extends BaseAdapter {
             
             if (billersCode) payload.billersCode = billersCode;
             if (quantity && finalServiceID !== 'jamb') payload.quantity = quantity;
-
-            console.log('[VTPass] Sending Exam PIN Request Payload:', JSON.stringify(payload, null, 2));
 
             const raw = await this._pay(payload);
             return this.mapResponse(raw);
@@ -161,35 +143,36 @@ class VTPassAdapter extends BaseAdapter {
         }
     }
 
-    /** Ping VTPass to check connectivity/auth */
-    async ping() {
-        try {
-            // We use the service-variations endpoint with a small timeout as a health check
-            await axios.get(`${this.baseUrl}/service-variations?serviceID=mtn-data`, {
-                headers: this._authHeaders(),
-                timeout: 5000,
-            });
-            return { success: true };
-        } catch (err) {
-            return { success: false, message: err.message };
-        }
-    }
-
     /** GET vendor API balance */
-    async getBalance() {
+    async checkBalance() {
         try {
-            const res = await axios.get(`${this.baseUrl}/balance`, {
-                headers: this._authHeaders(),
+            const url = `${this.baseUrl}/balance`;
+            
+            // VTPass Balance check strictly requires ONLY api-key and public-key.
+            // Sending the secret-key here often causes a 401 on Sandbox.
+            const headers = {
+                'Content-Type': 'application/json',
+                'api-key': this.apiKey,
+                'public-key': this.publicKey
+            };
+
+            const res = await axios.get(url, {
+                headers,
                 timeout: 10000,
             });
-            // VTPass balance returns { code: '000', contents: { balance: 1234.56 } }
+            
+            // In Sandbox, success code is often 1. In Live, it is 000.
+            const code = String(res.data?.code || '');
+            const isSuccess = code === '000' || code === '1';
+
             return { 
-                success: res.data?.code === '000', 
+                success: isSuccess, 
                 balance: res.data?.contents?.balance || 0,
-                raw: res.data
+                raw: res.data,
+                message: res.data?.response_description || res.data?.message
             };
         } catch (err) {
-            return { success: false, balance: 0, message: err.message };
+            return this._errorResponse(err);
         }
     }
 
@@ -197,23 +180,13 @@ class VTPassAdapter extends BaseAdapter {
     // RESPONSE NORMALIZER
     // ─────────────────────────────────────────────
 
-    /**
-     * VTPass returns:
-     *  { code: '000', response_description: 'TRANSACTION SUCCESSFUL', ... }
-     * Success codes: '000'
-     * Delivered codes: '099' (still pending)
-     */
     mapResponse(data) {
         const code = String(data?.code || '');
         const isSuccess = code === '000';
         const isPending = code === '099';
         const status = isSuccess ? 'success' : isPending ? 'pending' : 'failed';
 
-        // Extract token/PIN from various possible VTPass response fields
-        // Electricity: data.purchased_code (e.g. "Token : 1234...") or data.token
-        // Exam PINs: data.purchased_code or data.Pin
         const rawToken = data?.purchased_code || data?.token || data?.Pin || (data?.tokens?.[0]);
-        // Clean up "Token : " prefix if present
         const cleanToken = typeof rawToken === 'string' ? rawToken.replace(/^(Token|Pin)\s*:\s*/i, '') : rawToken;
 
         return {
@@ -227,14 +200,10 @@ class VTPassAdapter extends BaseAdapter {
     }
 
     _errorResponse(err) {
-        const status = err?.response?.status;
         const body = err?.response?.data;
-        const message = body?.response_description || body?.message || err?.message || 'VTPass request failed';
-        console.error('[VTPass] Error status:', status);
-        console.error('[VTPass] Error body:', JSON.stringify(body));
-        console.error('[VTPass] Error message:', message);
+        const message = body?.response_description || body?.content?.errors?.error || body?.message || err?.message || 'VTPass request failed';
         return { success: false, status: 'failed', message, raw: body || {} };
     }
 }
 
-module.exports = new VTPassAdapter();
+module.exports = VTPassAdapter;

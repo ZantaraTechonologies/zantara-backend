@@ -22,6 +22,7 @@ const {
 } = require('../controllers/adminController')
 const { getAllKyc, reviewKyc } = require('../controllers/kycController')
 const serviceController = require('../controllers/serviceController')
+const providerController = require('../controllers/providerController')
 
 // Admin middleware: Must be logged in and have 'admin' or 'superAdmin' role
 router.use(verifyJWT, checkRoles('admin', 'superAdmin'));
@@ -65,5 +66,12 @@ router.get('/services', serviceController.getAdminServices)
 router.post('/services', serviceController.createService)
 router.put('/services/:id', serviceController.updateService)
 router.delete('/services/:id', serviceController.deleteService)
+
+// Provider Management
+router.get('/providers', providerController.getAllProviders)
+router.post('/providers', providerController.createProvider)
+router.put('/providers/:id', providerController.updateProvider)
+router.delete('/providers/:id', providerController.deleteProvider)
+router.get('/providers/:id/balance', providerController.getProviderBalance)
 
 module.exports = router;

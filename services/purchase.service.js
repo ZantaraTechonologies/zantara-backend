@@ -16,7 +16,7 @@ class PurchaseService {
     /**
      * Generic execution flow for all utility purchases
      */
-    async processPurchase(userId, { type, serviceId, amount, details, providerCall, referralAmount, pin }) {
+    async processPurchase(userId, { type, serviceId, amount, details, providerCall, referralAmount, pin, provider = 'VTPass' }) {
         let transaction;
         try {
 
@@ -60,7 +60,7 @@ class PurchaseService {
 
             // 1. Create PENDING Transaction Record
             const transactionId = generateTransactionId();
-            const reference = details.request_id || generateVTPassRequestId();
+            const reference = details.request_id || generateReference();
 
             // Calculate gross profit
             const profit = finalAmount - costPrice;
@@ -83,7 +83,7 @@ class PurchaseService {
                 agentPrice: finalAmount, // What the agent/reseller paid
                 profit,
                 userRole: user.role,
-                provider: 'VTPass', // Default primary provider for now
+                provider: provider, // Dynamic provider
                 status: 'pending',
                 details: { ...details, originalAmount: amount, request_id: reference }
             });
@@ -125,9 +125,9 @@ class PurchaseService {
                 // 8. Log the vendor cost as an Expense for financial tracking
                 await Expense.create([{
                     category: 'API_COST',
-                    title: `VTPass Cost: ${serviceId}`,
+                    title: `${provider} Cost: ${serviceId}`,
                     amount: costPrice,
-                    vendor: 'VTPass',
+                    vendor: provider,
                     date: new Date(),
                     paymentSource: 'Business Float',
                     notes: `Transaction ID: ${transaction.transactionId}`,
