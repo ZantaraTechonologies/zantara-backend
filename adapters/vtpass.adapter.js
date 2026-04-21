@@ -33,13 +33,54 @@ class VTPassAdapter extends BaseAdapter {
         return res.data;
     }
 
-    /** GET service variations (plan list) */
-    async fetchVariations(serviceID) {
-        const res = await axios.get(`${this.baseUrl}/service-variations?serviceID=${serviceID}`, {
+    /** GET all top-level categories */
+    async fetchCategories() {
+        const res = await axios.get(`${this.baseUrl}/service-categories`, {
             headers: this._authHeaders(),
             timeout: 15000,
         });
         return res.data;
+    }
+
+    /** GET all services (providers) within a category identifier */
+    async fetchServicesInCategory(identifier) {
+        const res = await axios.get(`${this.baseUrl}/services?identifier=${identifier}`, {
+            headers: this._authHeaders(),
+            timeout: 15000,
+        });
+        return res.data;
+    }
+
+    /** GET service variations (plan list) */
+    async fetchVariations(serviceID) {
+        try {
+            const res = await axios.get(`${this.baseUrl}/service-variations?serviceID=${serviceID}`, {
+                headers: this._authHeaders(),
+                timeout: 15000,
+            });
+            
+            // VTPass sometimes uses 'code' and sometimes 'response_description' 
+            const code = String(res.data?.code || res.data?.response_description || '');
+            const isSuccess = code === '000' || code === '1';
+
+            if (isSuccess) {
+                // VTPass has a famous typo in some responses: "varations" instead of "variations"
+                const vars = res.data?.content?.variations || res.data?.content?.varations || [];
+                
+                return {
+                    success: true,
+                    variations: vars.map(v => ({
+                        variationCode: v.variation_code,
+                        name: v.name,
+                        amount: Number(v.variation_amount)
+                    })),
+                    raw: res.data
+                };
+            }
+            return { success: false, message: res.data?.response_description || 'Failed to fetch variations' };
+        } catch (err) {
+            return this._errorResponse(err);
+        }
     }
 
     /** POST merchant-verify (meter / smartcard / account number) */

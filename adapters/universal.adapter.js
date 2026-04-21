@@ -166,6 +166,53 @@ class UniversalAdapter extends BaseAdapter {
         }
     }
 
+    /**
+     * Standardized Discovery for Universal Providers
+     * Metadata requirements:
+     * - variationsUrl: URL to fetch plans (can include {{serviceID}})
+     * - variationsPath: path to the array in response (e.g. "content.variations")
+     * - variationFieldMap: { variationCode: "id", name: "name", amount: "amount" }
+     */
+    async fetchVariations(serviceID) {
+        try {
+            const url = this._resolveUrl('variationsUrl', `/service-variations?serviceID=${serviceID}`, { serviceID });
+            const options = {
+                method: 'GET',
+                url,
+                headers: this._buildHeaders(),
+                timeout: 15000
+            };
+
+            const res = await axios(options);
+            const data = res.data;
+
+            // Extract the list
+            const path = this.metadata.variationsPath || 'content.variations';
+            const rawList = path.split('.').reduce((obj, key) => obj?.[key], data) || [];
+
+            if (!Array.isArray(rawList)) {
+                return { success: false, message: 'Invalid variation list format from provider' };
+            }
+
+            // Map fields
+            const fieldMap = this.metadata.variationFieldMap || { 
+                variationCode: 'variation_code', 
+                name: 'name', 
+                amount: 'variation_amount' 
+            };
+
+            const variations = rawList.map(v => ({
+                variationCode: v[fieldMap.variationCode] || v.variation_code,
+                name: v[fieldMap.name] || v.name,
+                amount: Number(v[fieldMap.amount] || v.variation_amount || 0)
+            }));
+
+            return { success: true, variations, raw: data };
+        } catch (err) {
+            return { success: false, message: err.message };
+        }
+    }
+
     mapResponse(data) {
         const successPath = this.metadata.successPath || 'status';
         const successValue = this.metadata.successValue || 'success';

@@ -66,6 +66,8 @@ router.get('/services', serviceController.getAdminServices)
 router.post('/services', serviceController.createService)
 router.put('/services/:id', serviceController.updateService)
 router.delete('/services/:id', serviceController.deleteService)
+router.post('/services/sync-costs', serviceController.bulkSyncCosts)
+router.post('/services/import', serviceController.bulkImportServices)
 
 // Provider Management
 router.get('/providers', providerController.getAllProviders)
