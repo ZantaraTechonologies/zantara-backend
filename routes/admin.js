@@ -18,12 +18,14 @@ const {
     updateCommissionCaps,
     adminCreditWallet,
     adminDebitWallet,
-    exportUsersCSV
+    exportUsersCSV,
+    getPricingIntegrityReport
 } = require('../controllers/adminController')
 const { getAllKyc, reviewKyc } = require('../controllers/kycController')
 const serviceController = require('../controllers/serviceController')
 const providerController = require('../controllers/providerController')
 const adminSettingController = require('../controllers/adminSettingController')
+const adminHierarchyController = require('../controllers/adminHierarchyController')
 
 // Admin middleware: Must be logged in and have 'admin' or 'superAdmin' role
 router.use(verifyJWT, checkRoles('admin', 'superAdmin'));
@@ -80,5 +82,37 @@ router.get('/providers/:id/balance', providerController.getProviderBalance)
 // Business Settings
 router.get('/settings/business', adminSettingController.getBusinessSettings)
 router.post('/settings/business', adminSettingController.updateBusinessSettings)
+
+// Normalized Hierarchy & Pricing Rules (Batch 3)
+router.get('/hierarchy/pricing-rules', adminHierarchyController.getPricingRules)
+router.post('/hierarchy/pricing-rules', adminHierarchyController.createPricingRule)
+router.put('/hierarchy/pricing-rules/:id', adminHierarchyController.updatePricingRule)
+router.delete('/hierarchy/pricing-rules/:id', adminHierarchyController.deletePricingRule)
+
+router.get('/hierarchy/provider-offers', adminHierarchyController.getProviderOffers)
+router.post('/hierarchy/provider-offers', adminHierarchyController.createProviderOffer)
+router.put('/hierarchy/provider-offers/:id', adminHierarchyController.updateProviderOffer)
+router.delete('/hierarchy/provider-offers/:id', adminHierarchyController.deleteProviderOffer)
+router.get('/hierarchy/identities', adminHierarchyController.getServiceIdentities)
+router.post('/hierarchy/identities', adminHierarchyController.createServiceIdentity)
+router.put('/hierarchy/identities/:id', adminHierarchyController.updateServiceIdentity)
+router.get('/hierarchy/metadata', adminHierarchyController.getHierarchyMetadata)
+router.post('/hierarchy/purge-noisy-data', adminHierarchyController.safePurgeNoisyData)
+
+// Master Data Management (Phase A)
+router.get('/hierarchy/categories', adminHierarchyController.manageCategories)
+router.post('/hierarchy/categories', adminHierarchyController.manageCategories)
+router.put('/hierarchy/categories/:id', adminHierarchyController.manageCategories)
+
+router.get('/hierarchy/types', adminHierarchyController.manageServiceTypes)
+router.post('/hierarchy/types', adminHierarchyController.manageServiceTypes)
+router.put('/hierarchy/types/:id', adminHierarchyController.manageServiceTypes)
+
+router.get('/hierarchy/brands', adminHierarchyController.manageBrands)
+router.post('/hierarchy/brands', adminHierarchyController.manageBrands)
+router.put('/hierarchy/brands/:id', adminHierarchyController.manageBrands)
+
+// Pricing Integrity Observability (Batch 3.2)
+router.get('/pricing-integrity/report', getPricingIntegrityReport)
 
 module.exports = router;

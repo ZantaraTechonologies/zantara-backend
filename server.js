@@ -87,6 +87,8 @@ const userEarningsRoutes = require('./routes/userEarnings');
 const withdrawalRoutes = require('./routes/withdrawal');
 const systemRoutes = require('./routes/system');
 const investmentRoutes = require('./routes/investment');
+const catalogV2Routes = require('./routes/v2/catalog');
+const pricingV1Routes = require('./routes/v1/pricing');
 const errorHandler = require('./middlewares/errorHandler');
 
 app.use('/api', index);
@@ -115,6 +117,8 @@ app.use('/api/admin/withdrawals', withdrawalRoutes);
 app.use('/api/user/earnings', userEarningsRoutes);
 app.use('/api/admin/system', systemRoutes);
 app.use('/api/investment', investmentRoutes);
+app.use('/api/v2/catalog', catalogV2Routes);
+app.use('/api/v1/pricing', pricingV1Routes);
 
 // Global error handler (keep last)
 app.use(errorHandler);
@@ -133,4 +137,8 @@ mongoose.connect(MONGOURI).then(() => {
     // Start the monthly dividend cron job
     const { startDividendCron } = require('./utils/dividendCron');
     startDividendCron();
-}).catch(() => console.log('Error connecting to the Database'));
+}).catch((err) => {
+    console.error('CRITICAL: Database connection failed!');
+    console.error('Reason:', err.message || err);
+    process.exit(1); // Force exit so nodemon can try again or the user sees the hard crash
+});

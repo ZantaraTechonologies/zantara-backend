@@ -1,6 +1,8 @@
 const User = require('../models/User');
 const Transaction = require('../models/Transaction')
+const Log = require('../models/Logs')
 const mongoose = require('mongoose')
+const { EVENTS } = require('../utils/pricingLogger')
 
 const getFilteredTransactions = async (req, res) => {
     try {
@@ -555,6 +557,63 @@ const exportUsersCSV = async (req, res) => {
     }
 };
 
+/**
+ * GET /api/admin/pricing-integrity/report
+ * Query params:
+ *   - event:  PRICE_MISMATCH | PREVIEW_FAILURE | MISSING_EXPECTED_PRICE | LEGACY_PRICING_FALLBACK
+ *   - limit:  max records (default 50, max 200)
+ *   - since:  ISO date string
+ * Requires admin or superAdmin role (enforced by route middleware).
+ */
+const getPricingIntegrityReport = async (req, res) => {
+    try {
+        const { event, limit: rawLimit, since } = req.query;
+        const ALLOWED_EVENTS = ['PRICE_MISMATCH', 'PREVIEW_FAILURE', 'MISSING_EXPECTED_PRICE', 'LEGACY_PRICING_FALLBACK'];
+        const limit = Math.min(parseInt(rawLimit) || 50, 200);
+
+        if (event && !ALLOWED_EVENTS.includes(event)) {
+            return res.status(400).json({
+                success: false,
+                message: `Invalid event type. Allowed: ${ALLOWED_EVENTS.join(', ')}`
+            });
+        }
+
+        const filter = { 'context.event': { $in: event ? [event] : ALLOWED_EVENTS } };
+
+        if (since) {
+            const sinceDate = new Date(since);
+            if (isNaN(sinceDate.getTime())) {
+                return res.status(400).json({ success: false, message: 'Invalid `since` date. Use ISO 8601.' });
+            }
+            filter.timestamp = { $gte: sinceDate };
+        }
+
+        const logs = await Log.find(filter).sort({ timestamp: -1 }).limit(limit).lean();
+
+        const summary = {};
+        for (const ev of ALLOWED_EVENTS) {
+            summary[ev] = await Log.countDocuments({ 'context.event': ev });
+        }
+
+        return res.status(200).json({
+            success: true,
+            summary,
+            count: logs.length,
+            limit,
+            data: logs.map(log => ({
+                id:        log._id,
+                event:     log.context?.event,
+                level:     log.level,
+                timestamp: log.timestamp,
+                details:   log.context,
+            }))
+        });
+    } catch (err) {
+        console.error('[Admin] getPricingIntegrityReport error:', err);
+        res.status(500).json({ success: false, message: 'Failed to fetch pricing integrity report' });
+    }
+};
+
 module.exports = {
     getFilteredTransactions,
     getAllUsers,
@@ -572,5 +631,6 @@ module.exports = {
     updateCommissionCaps,
     adminCreditWallet,
     adminDebitWallet,
-    exportUsersCSV
+    exportUsersCSV,
+    getPricingIntegrityReport
 }

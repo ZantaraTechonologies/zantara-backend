@@ -26,10 +26,12 @@ class VTPassAdapter extends BaseAdapter {
 
     /** POST to /pay */
     async _pay(payload) {
+        console.log(`[VTPASS] Pay Request:`, payload);
         const res = await axios.post(`${this.baseUrl}/pay`, payload, {
             headers: this._authHeaders(),
             timeout: 30000,
         });
+        console.log(`[VTPASS] Pay Response:`, res.data);
         return res.data;
     }
 
@@ -85,6 +87,7 @@ class VTPassAdapter extends BaseAdapter {
 
     /** POST merchant-verify (meter / smartcard / account number) */
     async verifyMerchant({ billersCode, serviceID, type }) {
+        console.log(`[VTPASS] Verification Request:`, { billersCode, serviceID, type });
         const res = await axios.post(`${this.baseUrl}/merchant-verify`, {
             billersCode,
             serviceID,
@@ -93,6 +96,7 @@ class VTPassAdapter extends BaseAdapter {
             headers: this._authHeaders(),
             timeout: 15000,
         });
+        console.log(`[VTPASS] Verification Response:`, res.data);
         return res.data;
     }
 
@@ -194,8 +198,12 @@ class VTPassAdapter extends BaseAdapter {
             const headers = {
                 'Content-Type': 'application/json',
                 'api-key': this.apiKey,
-                'public-key': this.publicKey
+                'public-key': this.publicKey || this.apiKey // Fallback to apiKey if publicKey is missing
             };
+
+            if (!this.apiKey) {
+                return { success: false, message: 'VTPass API Key is missing in configuration' };
+            }
 
             const res = await axios.get(url, {
                 headers,
@@ -210,7 +218,7 @@ class VTPassAdapter extends BaseAdapter {
                 success: isSuccess, 
                 balance: res.data?.contents?.balance || 0,
                 raw: res.data,
-                message: res.data?.response_description || res.data?.message
+                message: res.data?.response_description || res.data?.message || (isSuccess ? 'Success' : 'Invalid Credentials or Request Failed')
             };
         } catch (err) {
             return this._errorResponse(err);

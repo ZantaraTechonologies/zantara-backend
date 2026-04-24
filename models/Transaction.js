@@ -20,6 +20,19 @@ const transactionSchema = new mongoose.Schema({
     agentPrice: { type: Number },
     userRole: { type: String },
     netProfitAfterCommission: { type: Number, default: 0 },
+    pricingSnapshot: {
+        serviceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Service' },
+        providerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Provider' },
+        providerOfferId: { type: mongoose.Schema.Types.ObjectId, ref: 'ProviderOffer' },
+        baseCostPrice: Number,
+        rawSalePrice: Number, // Pre-rounded
+        salePrice: Number,    // Final rounded
+        profit: Number,
+        appliedPricingRuleId: { type: mongoose.Schema.Types.ObjectId, ref: 'PricingRule' },
+        markupType: String,
+        markupValue: Number,
+        userRole: String
+    },
     commissionVersion: { type: String, default: 'v1' }
 }, { timestamps: true })
 

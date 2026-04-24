@@ -12,64 +12,130 @@ const { calculateServicePrice, getProviderCost } = require('../utils/pricing');
 const notificationService = require('./notification.service');
 const Expense = require('../models/Expense');
 
+const Service = require('../models/Service');
+const pricingEngine = require('./pricing.service');
+const procurementEngine = require('./procurement.service');
+const {
+    logPriceMismatch,
+    logPreviewFailure,
+    logMissingExpectedPrice,
+    logLegacyPricingFallback,
+} = require('../utils/pricingLogger');
+
 class PurchaseService {
     /**
      * Generic execution flow for all utility purchases
      */
-    async processPurchase(userId, { type, serviceId, amount, details, providerCall, referralAmount, pin, provider = 'VTPass' }) {
+    async processPurchase(userId, { type, serviceId, amount, details, providerCall, referralAmount, pin, provider = 'VTPass', expectedPrice }) {
         let transaction;
         try {
-
             // 0. Verify Transaction PIN first
-
             await pinService.verifyPin(userId, pin);
 
             const user = await User.findById(userId);
-            if (!user) {
+            if (!user) throw new Error('User not found');
 
-                throw new Error('User not found');
+            let costPrice, finalAmount, pricingSnapshot = null;
+            let currentProvider = provider;
+
+            // --- BATCH 2: NEW ENGINES INTEGRATION ---
+            // Try to find the normalized service by its code (e.g., MTN_DATA_1GB)
+            let service = await Service.findOne({ code: serviceId });
+            
+            // Fallback: If not found by code, check if serviceId is a ServiceIdentity slug (e.g. mtnairtime)
+            if (!service) {
+                const ServiceIdentity = require('../models/ServiceIdentity');
+                const identity = await ServiceIdentity.findOne({ slug: String(serviceId).toLowerCase() });
+                if (identity) {
+                    service = await Service.findOne({ identityId: identity._id });
+                }
             }
-            
-            const standardPrice = amount; // What normal users pay
-            
-            // 0.6 Calculate Provider Cost First
-            const costPrice = await getProviderCost(serviceId, amount);
 
-            // 0.7 Calculate final amount for user (Agent discount scales with margin)
-            const finalAmount = await calculateServicePrice(user, standardPrice, costPrice);
+            let offer = null;
+            let pricingResult = null;
+
+            if (service) {
+                // 1. Select the best provider offer (manual_priority strategy)
+                offer = await procurementEngine.selectBestOffer(service._id);
+                if (offer) {
+                    currentProvider = offer.providerId.name;
+                    // 2. Resolve pricing based on rules
+                    pricingResult = await pricingEngine.resolvePricing(user, service, offer, amount);
+                }
+            }
+
+            if (pricingResult) {
+                // Use results from the new engines
+                costPrice = pricingResult.baseCostPrice;
+                finalAmount = pricingResult.salePrice;
+                pricingSnapshot = {
+                    serviceId: service._id,
+                    providerId: offer.providerId._id,
+                    providerOfferId: offer._id,
+                    ...pricingResult
+                };
+            } else {
+                // --- FALLBACK TO LEGACY PRICING ---
+                logLegacyPricingFallback({
+                    userId,
+                    serviceId,
+                    type,
+                    amount,
+                    source: 'purchase.service/processPurchase',
+                });
+                costPrice = await getProviderCost(serviceId, amount);
+                finalAmount = await calculateServicePrice(user, amount, costPrice);
+            }
+
+            // --- BATCH 3.1: PURCHASE CHECKSUM (MISMATCH PREVENTION) ---
+            if (expectedPrice !== undefined && expectedPrice !== null) {
+                if (Number(expectedPrice) !== Number(finalAmount)) {
+                    // Log structured mismatch event before throwing
+                    logPriceMismatch({
+                        userId,
+                        userRole: user.accountType || user.role,
+                        serviceId,
+                        type,
+                        expectedPrice,
+                        computedPrice: finalAmount,
+                        source: 'purchase.service/processPurchase',
+                        clientType: details?.clientType || 'unknown',
+                    });
+                    throw new Error(`The price changed before checkout. Expected: ₦${expectedPrice}, but actual price is ₦${finalAmount}. Please review the updated price and try again.`);
+                }
+            } else {
+                // No expectedPrice = legacy or un-migrated client path
+                logMissingExpectedPrice({
+                    userId,
+                    userRole: user.accountType || user.role,
+                    serviceId,
+                    type,
+                    amount,
+                    source: 'purchase.service/processPurchase',
+                    clientType: details?.clientType || 'legacy',
+                });
+            }
+
+            // --- PROFIT SAFETY CHECK ---
+            const profit = finalAmount - costPrice;
+            if (profit <= 0) {
+                throw new Error(`Transaction aborted: Unsafe pricing (Potential Loss or Zero Margin). Cost: ${costPrice}, Sale: ${finalAmount}.`);
+            }
 
             const wallet = await Wallet.findOne({ userId });
-            if (!wallet) {
+            if (!wallet) throw new Error('Wallet not found');
+            if (wallet.balance < finalAmount) throw new Error('Insufficient wallet balance');
 
-                throw new Error('Wallet not found for user');
-            }
-
-            if (wallet.balance < finalAmount) {
-
-                throw new Error('Insufficient wallet balance');
-            }
-
-            // 0.5 Check KYC Limits (Tier 1=50k, Tier 2=500k, Tier 3=Unlimited)
+            // KYC Checks
             const kycLimits = { 1: 50000, 2: 500000, 3: 100000000 };
             const userLimit = kycLimits[user.kycLevel || 1];
-
             if (finalAmount > userLimit) {
-
-                throw new Error(`Transaction amount exceeds your Tier ${user.kycLevel || 1} limit of ₦${userLimit.toLocaleString()}. Please upgrade your KYC.`);
+                throw new Error(`Transaction amount exceeds your Tier ${user.kycLevel || 1} limit.`);
             }
 
-            // 1. Create PENDING Transaction Record
+            // 1. Create Transaction Record
             const transactionId = generateTransactionId();
             const reference = details.request_id || generateReference();
-
-            // Calculate gross profit
-            const profit = finalAmount - costPrice;
-
-            // --- HARDENING: Profit Safety Check (Step 3) ---
-            if (profit <= 0) {
-
-                throw new Error(`Transaction aborted: Unsafe pricing (Potential Loss of ${costPrice - finalAmount} NGN). Please contact support to adjust agent discount settings.`);
-            }
 
             transaction = await Transaction.create({
                 userId,
@@ -79,21 +145,20 @@ class PurchaseService {
                 service: serviceId,
                 amount: finalAmount,
                 costPrice,
-                salePrice: standardPrice,
-                agentPrice: finalAmount, // What the agent/reseller paid
+                salePrice: amount, // Requested face value
+                agentPrice: finalAmount, 
                 profit,
-                userRole: user.role,
-                provider: provider, // Dynamic provider
+                userRole: user.accountType || user.role,
+                provider: currentProvider,
                 status: 'pending',
-                details: { ...details, originalAmount: amount, request_id: reference }
+                details: { ...details, originalAmount: amount, request_id: reference },
+                pricingSnapshot: pricingSnapshot // Persist the engine snapshot
             });
 
-            // 2. Debit Wallet FIRST (with Ledger entry)
-
+            // 2. Debit Wallet
             await walletService.debit(userId, finalAmount, reference, `${type}_purchase`, transaction._id);
 
             // 3. Call External Provider
-
             const response = await providerCall(reference);
 
             if (!response.success) {

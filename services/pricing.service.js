@@ -1,0 +1,101 @@
+const PricingRule = require('../models/PricingRule');
+const Service = require('../models/Service');
+
+/**
+ * Service responsible for resolving the sale price of a service based on layered rules.
+ */
+class PricingService {
+    /**
+     * Resolves the final pricing for a transaction.
+     * @param {Object} user - The user making the purchase.
+     * @param {Object} service - The normalized Service object.
+     * @param {Object} providerOffer - The selected ProviderOffer.
+     * @param {number} requestedAmount - The face value or requested amount (if applicable).
+     * @returns {Promise<Object>} - Pricing breakdown.
+     */
+    async resolvePricing(user, service, providerOffer, requestedAmount) {
+        // For airtime, the cost is the requested face value. For data, it's the fixed plan cost.
+        const costPrice = (service.category === 'airtime' || service.category === 'electricity') 
+            ? Number(requestedAmount) 
+            : providerOffer.costPrice;
+            
+        const userRole = user ? user.accountType || user.role : 'all';
+
+        // 1. Find the best applicable rule (priority-layered)
+        const rule = await this._findBestRule(service, userRole);
+
+        let salePrice = costPrice; 
+        let markupValue = 0;
+        let markupType = 'none';
+
+        if (rule) {
+            markupType = rule.markupType;
+            markupValue = rule.markupValue;
+
+            if (rule.markupType === 'fixed') {
+                salePrice = costPrice + rule.markupValue;
+            } else if (rule.markupType === 'percent') {
+                salePrice = costPrice * (1 + (rule.markupValue / 100));
+            }
+        } else {
+            // Fallback: If no rule, we might use a default system markup or return null to signal legacy fallback
+            return null; 
+        }
+
+        const rawSalePrice = salePrice;
+        
+        // Round only the final chargeable salePrice to the nearest whole Naira (NGN)
+        const roundedSalePrice = Math.round(salePrice);
+        const profit = roundedSalePrice - costPrice;
+
+        return {
+            baseCostPrice: costPrice,
+            rawSalePrice: rawSalePrice, // Pre-rounded for audit
+            salePrice: roundedSalePrice,
+            profit: profit,
+            appliedPricingRuleId: rule._id,
+            markupType: markupType,
+            markupValue: markupValue,
+            userRole: userRole
+        };
+    }
+
+    /**
+     * Finds the best PricingRule by traversing the hierarchy.
+     * Order: Service > ServiceType > ServiceCategory > Global
+     * Within each level, it prefers specific role over 'all', then higher priority.
+     */
+    async _findBestRule(service, userRole) {
+        const targets = [
+            { type: 'service', id: service._id },
+            { type: 'identity', id: service.identityId },
+            { type: 'service_type', id: service.typeId },
+            { type: 'category', id: service.categoryId },
+            { type: 'global', id: null }
+        ];
+
+        for (const target of targets) {
+            if (target.type !== 'global' && !target.id) continue;
+
+            const query = {
+                targetType: target.type,
+                targetId: target.id,
+                userRole: { $in: [userRole, 'all'] },
+                status: true
+            };
+
+            const rules = await PricingRule.find(query).sort({ priority: -1 });
+
+            // Hardening: Find the exact role match first, then fall back to 'all'
+            const specificRule = rules.find(r => r.userRole === userRole);
+            if (specificRule) return specificRule;
+
+            const globalRule = rules.find(r => r.userRole === 'all');
+            if (globalRule) return globalRule;
+        }
+
+        return null;
+    }
+}
+
+module.exports = new PricingService();
