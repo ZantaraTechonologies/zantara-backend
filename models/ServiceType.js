@@ -25,6 +25,12 @@ const serviceTypeSchema = new mongoose.Schema({
     status: {
         type: Boolean,
         default: true
+    },
+    aliases: {
+        type: [String],
+        default: [],
+        lowercase: true,
+        trim: true
     }
 }, { timestamps: true });
 

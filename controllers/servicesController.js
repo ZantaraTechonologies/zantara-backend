@@ -145,8 +145,17 @@ const getIdentitiesByCategory = async (req, res) => {
         const ServiceType = require('../models/ServiceType');
 
         // 'category' here is actually a service TYPE slug (e.g., 'data', 'airtime', 'tv', 'electricity', 'pin')
-        // ServiceIdentity is linked to ServiceType via typeId
-        const typeDoc = await ServiceType.findOne({ slug: category.toLowerCase(), status: true });
+        const searchSlug = category.toLowerCase();
+        
+        // Find the ServiceType using the slug OR looking inside the aliases array
+        const typeDoc = await ServiceType.findOne({ 
+            $or: [
+                { slug: searchSlug },
+                { aliases: searchSlug }
+            ],
+            status: true 
+        });
+
         if (!typeDoc) {
             return sendResponse(res, { status: 404, success: false, message: `Service type '${category}' not found` });
         }
