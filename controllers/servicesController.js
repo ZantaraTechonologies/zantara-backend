@@ -454,7 +454,7 @@ const purchaseExamPin = async (req, res) => {
 
         const result = await purchaseService.processPurchase(userId, {
             type: 'pin',
-            serviceId: serviceID || variation_code,
+            serviceId: variation_code || serviceID,
             amount: totalAmount,
             pin,
             provider,
