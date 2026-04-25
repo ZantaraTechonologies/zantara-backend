@@ -375,8 +375,8 @@ const rechargeCable = async (req, res) => {
     }
 
     try {
-        // Lookup the service to get provider and providerCode
-        let service = await Service.findOne({ code: finalServiceID, category: 'tv' }).populate('identityId');
+        // Lookup the service to get provider and providerCode using the variation_code (package code)
+        let service = await Service.findOne({ code: variation_code, category: 'tv' }).populate('identityId');
 
         // Fallback
         if (!service) {
@@ -388,11 +388,12 @@ const rechargeCable = async (req, res) => {
         }
 
         const provider = service?.provider || 'VTPass';
-        const vendorServiceID = service?.identityId?.providerCode || service?.providerCode || finalServiceID;
+        const vendorServiceID = service?.identityId?.providerCode || finalServiceID;
+        const variationProviderCode = service?.providerCode || variation_code;
 
         const result = await purchaseService.processPurchase(userId, {
             type: 'cable',
-            serviceId: finalServiceID,
+            serviceId: variation_code, // Use the package code for exact pricing lookup
             amount,
             pin,
             provider,
@@ -402,7 +403,7 @@ const rechargeCable = async (req, res) => {
                 request_id: refId, 
                 serviceID: vendorServiceID, 
                 billersCode: finalBillersCode, 
-                variation_code, 
+                variation_code: variationProviderCode, 
                 amount, 
                 phone: finalPhone 
             }, provider)
