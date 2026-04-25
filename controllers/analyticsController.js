@@ -430,7 +430,8 @@ const getDashboardStats = async (req, res) => {
             failedTxsToday,
             openTickets,
             recentTxs,
-            transactionTrendStats
+            transactionTrendStats,
+            todayProfitStats
         ] = await Promise.all([
             User.countDocuments(),
             Transaction.distinct('userId', { 
@@ -455,8 +456,14 @@ const getDashboardStats = async (req, res) => {
                     }
                 },
                 { $sort: { "_id": 1 } }
+            ]),
+            Transaction.aggregate([
+                { $match: { status: 'success', createdAt: { $gte: todayStart } } },
+                { $group: { _id: null, total: { $sum: "$profit" } } }
             ])
         ]);
+
+        const todayProfit = todayProfitStats[0]?.total || 0;
 
         const transactionTrendMap = new Map();
         for (let i = 0; i < daysLimit; i++) {
@@ -515,6 +522,7 @@ const getDashboardStats = async (req, res) => {
                 criticalAlerts,
                 recentActivity,
                 transactionTrend,
+                todayProfit,
                 userGrowth: '+5%',
                 activityRate: `${Math.round((activeUsersSet.length / (totalUsers || 1)) * 100)}%`
             }
