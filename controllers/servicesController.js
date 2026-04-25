@@ -24,7 +24,7 @@ const purchaseAirtime = async (req, res) => {
 
     try {
         let service = await Service.findOne({ code: finalNetwork, category: 'airtime' }).populate('identityId');
-        
+
         // Fallback: If not found by code, check if finalNetwork is a ServiceIdentity slug
         if (!service) {
             const ServiceIdentity = require('../models/ServiceIdentity');
@@ -70,17 +70,17 @@ const purchaseAirtime = async (req, res) => {
 }
 
 const purchaseData = async (req, res) => {
-    const { 
-        serviceID, 
-        network, 
-        billersCode, 
-        phone, 
-        variation_code, 
-        amount: reqAmount, 
+    const {
+        serviceID,
+        network,
+        billersCode,
+        phone,
+        variation_code,
+        amount: reqAmount,
         pin,
         expectedPrice
     } = req.body
-    
+
     // Support both formats (mobile vs older backend)
     const finalServiceID = serviceID || network;
     const finalBillersCode = billersCode || phone;
@@ -97,9 +97,9 @@ const purchaseData = async (req, res) => {
         // Lookup the service to get provider and providerCode
         const service = await Service.findOne({ code: variation_code, category: 'data' }).populate('identityId');
         const provider = service?.provider || 'VTPass';
-        
+
         // vendorServiceID should be the network code (e.g. mtn-data), variation_code should be the plan code (e.g. mtn-100mb-1000)
-        const vendorServiceID = service?.identityId?.providerCode || finalServiceID; 
+        const vendorServiceID = service?.identityId?.providerCode || finalServiceID;
         const variationProviderCode = service?.providerCode || variation_code;
 
         const result = await purchaseService.processPurchase(userId, {
@@ -110,12 +110,12 @@ const purchaseData = async (req, res) => {
             provider,
             expectedPrice,
             details: { phone: finalPhone, serviceID: finalServiceID, variation_code, roles: req.user.roles },
-            providerCall: (refId) => providerService.purchaseData({ 
-                request_id: refId, 
-                serviceID: vendorServiceID, 
-                billersCode: finalBillersCode, 
-                variation_code: variationProviderCode, 
-                phone: finalPhone, 
+            providerCall: (refId) => providerService.purchaseData({
+                request_id: refId,
+                serviceID: vendorServiceID,
+                billersCode: finalBillersCode,
+                variation_code: variationProviderCode,
+                phone: finalPhone,
                 amount: service?.costPrice || service?.price || amount
             }, provider)
         })
@@ -152,13 +152,13 @@ const getIdentitiesByCategory = async (req, res) => {
         }
 
         // Find all active identities for this service type
-        const identities = await ServiceIdentity.find({ 
+        const identities = await ServiceIdentity.find({
             status: true,
             typeId: typeDoc._id
         })
-        .populate('brandId', 'name logoUrl')
-        .populate('typeId', 'name slug')
-        .sort({ name: 1 });
+            .populate('brandId', 'name logoUrl')
+            .populate('typeId', 'name slug')
+            .sort({ name: 1 });
 
         return sendResponse(res, { success: true, data: identities });
     } catch (err) {
@@ -173,9 +173,9 @@ const getPlans = async (req, res) => {
     try {
         const { network } = req.params; // network is the identityId or identity slug
         if (!network) return sendResponse(res, { status: 400, success: false, message: 'Identity identifier required' });
-        
+
         // Find by identityId or identity slug
-        const query = mongoose.Types.ObjectId.isValid(network) 
+        const query = mongoose.Types.ObjectId.isValid(network)
             ? { identityId: network, status: true }
             : { status: true }; // If slug, we might need a more complex lookup
 
@@ -188,17 +188,17 @@ const getPlans = async (req, res) => {
             identityId = identity._id;
         }
 
-        const plans = await Service.find({ 
-            identityId, 
-            status: true 
+        const plans = await Service.find({
+            identityId,
+            status: true
         }).sort({ price: 1 });
 
         // Map to format expected by existing frontend (VTPass variation format)
         const ProviderOffer = require('../models/ProviderOffer');
-        
+
         const variations = await Promise.all(plans.map(async (p) => {
             let displayPrice = p.price;
-            
+
             // If price is 0, try to find a provider offer cost as fallback
             if (displayPrice === 0) {
                 const bestOffer = await ProviderOffer.findOne({ serviceId: p._id, status: true }).sort({ priority: -1 });
@@ -215,9 +215,9 @@ const getPlans = async (req, res) => {
             };
         }));
 
-        return sendResponse(res, { 
-            success: true, 
-            data: { variations } 
+        return sendResponse(res, {
+            success: true,
+            data: { variations }
         });
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: 'Error fetching plans', error: err.message });
@@ -229,7 +229,7 @@ const verifyMeter = async (req, res) => {
         const { billersCode, serviceID, type } = req.body;
         // Lookup service to identify provider
         let service = await Service.findOne({ code: serviceID });
-        
+
         // Fallback: Check if serviceID is an identity slug
         if (!service) {
             const ServiceIdentity = require('../models/ServiceIdentity');
@@ -253,7 +253,7 @@ const verifySmartcard = async (req, res) => {
     try {
         const { billersCode, serviceID, type } = req.body;
         let service = await Service.findOne({ code: serviceID });
-        
+
         // Fallback
         if (!service) {
             const ServiceIdentity = require('../models/ServiceIdentity');
@@ -277,7 +277,7 @@ const verifyExamProfile = async (req, res) => {
     try {
         const { billersCode, serviceID, type } = req.body;
         let service = await Service.findOne({ code: serviceID });
-        
+
         // Fallback
         if (!service) {
             const ServiceIdentity = require('../models/ServiceIdentity');
@@ -334,13 +334,13 @@ const payElectricityBill = async (req, res) => {
             provider,
             expectedPrice,
             details: { request_id: generateVTPassRequestId(), meter_number: finalMeterNumber, meter_type: finalMeterType, phone: finalPhone, roles: req.user.roles },
-            providerCall: (refId) => providerService.purchaseElectricity({ 
-                request_id: refId, 
-                serviceID: vendorServiceID, 
-                billersCode: finalMeterNumber, 
-                variation_code: finalMeterType, 
-                amount, 
-                phone: finalPhone 
+            providerCall: (refId) => providerService.purchaseElectricity({
+                request_id: refId,
+                serviceID: vendorServiceID,
+                billersCode: finalMeterNumber,
+                variation_code: finalMeterType,
+                amount,
+                phone: finalPhone
             }, provider)
         })
 
@@ -399,13 +399,13 @@ const rechargeCable = async (req, res) => {
             provider,
             expectedPrice,
             details: { request_id: generateVTPassRequestId(), serviceID: finalServiceID, billersCode: finalBillersCode, variation_code, roles: req.user.roles },
-            providerCall: (refId) => providerService.purchaseCable({ 
-                request_id: refId, 
-                serviceID: vendorServiceID, 
-                billersCode: finalBillersCode, 
-                variation_code: variationProviderCode, 
-                amount: service?.costPrice || service?.price || amount, 
-                phone: finalPhone 
+            providerCall: (refId) => providerService.purchaseCable({
+                request_id: refId,
+                serviceID: vendorServiceID,
+                billersCode: finalBillersCode,
+                variation_code: variationProviderCode,
+                amount: service?.costPrice || service?.price || amount,
+                phone: finalPhone
             }, provider)
         })
 
@@ -460,14 +460,14 @@ const purchaseExamPin = async (req, res) => {
             provider,
             expectedPrice,
             details: { request_id: generateVTPassRequestId(), serviceID, variation_code, quantity, phone, billersCode, roles: req.user.roles },
-            providerCall: (refId) => providerService.purchaseExamPin({ 
-                request_id: refId, 
-                serviceID: vendorServiceID, 
-                variation_code: service?.providerCode || variation_code, 
-                amount: (service?.costPrice || service?.price || amount) * parsedQuantity, 
-                quantity, 
-                phone, 
-                billersCode 
+            providerCall: (refId) => providerService.purchaseExamPin({
+                request_id: refId,
+                serviceID: vendorServiceID,
+                variation_code: service?.providerCode || variation_code,
+                amount: (service?.costPrice || service?.price || amount) * parsedQuantity,
+                quantity,
+                phone,
+                billersCode
             }, provider)
         })
 
@@ -491,12 +491,12 @@ const purchaseExamPin = async (req, res) => {
             metadata: { type: 'pin', service: variation_code, token: result.data.token }
         });
 
-        return sendResponse(res, { 
-            message: 'PIN purchased successfully', 
-            data: { 
+        return sendResponse(res, {
+            message: 'PIN purchased successfully',
+            data: {
                 pin: result.data.token,
                 reference: result.data.transactionId
-            } 
+            }
         })
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: err.message || 'Server error', error: err })
@@ -516,11 +516,11 @@ const checkTransaction = async (req, res) => {
 
     try {
         // Verification: Ensure the transaction exists and belongs to the user
-        const localTx = await Transaction.findOne({ 
-            $or: [{ refId: refId }, { transactionId: refId }], 
-            userId: req.user.id 
+        const localTx = await Transaction.findOne({
+            $or: [{ refId: refId }, { transactionId: refId }],
+            userId: req.user.id
         })
-        
+
         if (!localTx) {
             return sendResponse(res, { status: 404, success: false, message: 'Transaction record not found in local database' })
         }
