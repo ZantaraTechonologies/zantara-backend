@@ -11,7 +11,10 @@ const notificationService = require('../services/notification.service')
 const ActivityLog = require('../models/ActivityLog')
 
 const register = async (req, res) => {
-    let { name, email, phone, password, referrerCode, role } = req.body
+    let { name, email, phone, password, referrerCode, referralCode, role } = req.body
+    
+    // Normalize referral code naming (Web vs Mobile mismatch)
+    const activeReferrerCode = (referrerCode || referralCode || "").trim().toLowerCase();
     
     // Normalize email
     if (email) email = email.trim().toLowerCase();
@@ -35,8 +38,8 @@ const register = async (req, res) => {
         const hashed = await bcrypt.hash(password, 12)
 
         let referredBy = undefined;
-        if (referrerCode) {
-            const referrer = await User.findOne({ myReferralCode: referrerCode.trim() });
+        if (activeReferrerCode) {
+            const referrer = await User.findOne({ myReferralCode: activeReferrerCode });
             if (referrer) {
                 // Prevent self-referral (Check if referrer belongs to this registration phone/email)
                 if (referrer.phone === phone.trim() || (email && referrer.email === email.trim().toLowerCase())) {
@@ -51,7 +54,7 @@ const register = async (req, res) => {
             name,
             phone: phone.trim(),
             password: hashed,
-            referrerCode: referrerCode ? referrerCode.trim() : undefined,
+            referrerCode: activeReferrerCode || undefined,
             referredBy,
             myReferralCode,
             role: role || 'user',
