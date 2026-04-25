@@ -144,10 +144,12 @@ class PurchaseService {
                 type,
                 service: serviceId,
                 amount: finalAmount,
-                costPrice,
+                costPrice, // Authoritative (estimated for now)
+                estimatedCostPrice: costPrice,
                 salePrice: amount, // Requested face value
                 agentPrice: finalAmount, 
-                profit,
+                profit, // Authoritative (estimated for now)
+                estimatedProfit: profit,
                 userRole: user.accountType || user.role,
                 provider: currentProvider,
                 status: 'pending',
@@ -176,6 +178,24 @@ class PurchaseService {
             try {
                 transaction.status = 'success';
                 transaction.response = response.raw;
+
+                // --- Hybrid Accounting Update ---
+                let finalProviderCost = costPrice; // Fallback to estimated
+                if (response.financials && response.financials.source === 'actual') {
+                    const { vendorCost, vendorCommission, providerUnitPrice, convenienceFee } = response.financials;
+                    
+                    transaction.actualCostPrice = vendorCost;
+                    transaction.vendorCommission = vendorCommission;
+                    transaction.providerUnitPrice = providerUnitPrice;
+                    transaction.convenienceFee = convenienceFee;
+                    transaction.accountingSource = 'actual';
+                    
+                    // Update authoritative profit and cost fields
+                    finalProviderCost = vendorCost;
+                    transaction.costPrice = vendorCost;
+                    transaction.actualProfit = transaction.amount - vendorCost;
+                    transaction.profit = transaction.actualProfit;
+                }
                 
                 // 6. Referral Bonus (Lifetime Commission)
                 // Note: processLifetimeCommission also writes netProfitAfterCommission on the parent txn
@@ -183,20 +203,21 @@ class PurchaseService {
                 const commissionPaid = await processLifetimeCommission(userId, finalAmount, transaction._id, transaction.transactionId, session);
                 
                 const finalCommission = commissionPaid || 0;
-                transaction.netProfitAfterCommission = profit - finalCommission;
-                console.log(`[PurchaseService] Commission processed: ${finalCommission}. Final Net Profit: ${transaction.netProfitAfterCommission}`);
+                transaction.netProfitAfterCommission = transaction.profit - finalCommission;
+                console.log(`[PurchaseService] Hybrid Accounting: ${transaction.accountingSource}. Cost: ${transaction.costPrice}, Profit: ${transaction.profit}. Commission: ${finalCommission}`);
+                
                 await transaction.save({ session });
 
                 // 8. Log the vendor cost as an Expense for financial tracking
                 await Expense.create([{
                     category: 'API_COST',
                     title: `${provider} Cost: ${serviceId}`,
-                    amount: costPrice,
+                    amount: finalProviderCost,
                     vendor: provider,
                     date: new Date(),
                     paymentSource: 'Business Float',
-                    notes: `Transaction ID: ${transaction.transactionId}`,
-                    createdBy: userId // Or a system admin ID if preferred
+                    notes: `Transaction ID: ${transaction.transactionId} | Source: ${transaction.accountingSource}`,
+                    createdBy: userId 
                 }], { session });
 
                 await session.commitTransaction();

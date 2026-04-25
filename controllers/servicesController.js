@@ -116,7 +116,7 @@ const purchaseData = async (req, res) => {
                 billersCode: finalBillersCode, 
                 variation_code: variationProviderCode, 
                 phone: finalPhone, 
-                amount 
+                amount: service?.costPrice || service?.price || amount
             }, provider)
         })
 
@@ -404,7 +404,7 @@ const rechargeCable = async (req, res) => {
                 serviceID: vendorServiceID, 
                 billersCode: finalBillersCode, 
                 variation_code: variationProviderCode, 
-                amount, 
+                amount: service?.costPrice || service?.price || amount, 
                 phone: finalPhone 
             }, provider)
         })
@@ -464,7 +464,7 @@ const purchaseExamPin = async (req, res) => {
                 request_id: refId, 
                 serviceID: vendorServiceID, 
                 variation_code: service?.providerCode || variation_code, 
-                amount: totalAmount, 
+                amount: (service?.costPrice || service?.price || amount) * parsedQuantity, 
                 quantity, 
                 phone, 
                 billersCode 

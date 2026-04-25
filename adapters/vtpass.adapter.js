@@ -238,12 +238,42 @@ class VTPassAdapter extends BaseAdapter {
         const rawToken = data?.purchased_code || data?.token || data?.Pin || (data?.tokens?.[0]);
         const cleanToken = typeof rawToken === 'string' ? rawToken.replace(/^(Token|Pin)\s*:\s*/i, '') : rawToken;
 
+        // --- Hybrid Accounting Extraction ---
+        const transaction = data?.content?.transactions;
+        let vendorCost = null;
+        let vendorCommission = null;
+        let providerUnitPrice = null;
+        let convenienceFee = null;
+
+        if (transaction) {
+            vendorCommission = Number(transaction.commission) || 0;
+            providerUnitPrice = Number(transaction.unit_price) || 0;
+            convenienceFee = Number(transaction.convinience_fee) || 0;
+            
+            // Primary Actual Cost Source: total_amount
+            if (transaction.total_amount !== undefined && transaction.total_amount !== null) {
+                vendorCost = Number(transaction.total_amount);
+            } 
+            // Fallback: unit_price - commission
+            else if (providerUnitPrice > 0) {
+                vendorCost = providerUnitPrice - vendorCommission;
+            }
+        }
+
         return {
             success: isSuccess,
             status,
             message: data?.response_description || data?.content?.errors?.error || 'Transaction processed',
             transactionId: data?.content?.transactions?.transactionId || data?.requestId,
-            token: cleanToken,  
+            token: cleanToken,
+            // Financials for Hybrid Accounting
+            financials: vendorCost !== null ? {
+                vendorCost,
+                vendorCommission,
+                providerUnitPrice,
+                convenienceFee,
+                source: 'actual'
+            } : null,
             raw: data,
         };
     }
