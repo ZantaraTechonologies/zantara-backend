@@ -15,7 +15,7 @@ const purchaseAirtime = async (req, res) => {
     const { network, serviceID, phone, billersCode, amount, pin, expectedPrice } = req.body
     const finalNetwork = network || serviceID;
     const finalPhone = phone || billersCode;
-    const userId = req.user.id
+    const userId = req.user._id || req.user.id
 
     if (!finalNetwork || !finalPhone || !amount || !pin) {
 
@@ -23,19 +23,40 @@ const purchaseAirtime = async (req, res) => {
     }
 
     try {
-        let service = await Service.findOne({ code: finalNetwork, category: 'airtime' }).populate('identityId');
+        const ProviderOffer = require('../models/ProviderOffer');
+        const ServiceIdentity = require('../models/ServiceIdentity');
+
+        // Find the service/identity by code (case-insensitive)
+        let service = await Service.findOne({ 
+            code: { $regex: new RegExp(`^${finalNetwork}$`, 'i') }, 
+            category: 'airtime' 
+        }).populate('identityId');
 
         // Fallback: If not found by code, check if finalNetwork is a ServiceIdentity slug
         if (!service) {
-            const ServiceIdentity = require('../models/ServiceIdentity');
-            const identity = await ServiceIdentity.findOne({ slug: String(finalNetwork).toLowerCase() });
+            const identity = await ServiceIdentity.findOne({ 
+                $or: [
+                    { slug: String(finalNetwork).toLowerCase() },
+                    { aliases: String(finalNetwork).toLowerCase() }
+                ]
+            });
             if (identity) {
                 service = await Service.findOne({ identityId: identity._id }).populate('identityId');
             }
         }
 
+        let vendorCode = finalNetwork;
+        if (service) {
+            // Find active fulfillment mapping
+            const activeMapping = await ProviderOffer.findOne({ 
+                serviceId: service._id, 
+                status: true 
+            }).sort({ priority: 1 });
+
+            vendorCode = activeMapping?.providerCode || service.identityId?.providerCode || service.providerCode || finalNetwork;
+        }
+
         const provider = service?.provider || 'VTPass';
-        const vendorCode = service?.identityId?.providerCode || service?.providerCode || finalNetwork;
 
         const result = await purchaseService.processPurchase(userId, {
             type: 'airtime',
@@ -87,20 +108,34 @@ const purchaseData = async (req, res) => {
     const finalPhone = phone || billersCode;
     const amount = reqAmount; // Must be passed from frontend now
 
-    const userId = req.user.id
+    const userId = req.user._id || req.user.id
 
     if (!finalServiceID || !variation_code || !finalPhone || amount === undefined || !pin) {
         return sendResponse(res, { status: 400, success: false, message: 'Missing required fields' })
     }
 
     try {
-        // Lookup the service to get provider and providerCode
-        const service = await Service.findOne({ code: variation_code, category: 'data' }).populate('identityId');
-        const provider = service?.provider || 'VTPass';
+        // Find the service variant by its internal code (SKU) - Case-insensitive lookup
+        const ProviderOffer = require('../models/ProviderOffer');
+        const service = await Service.findOne({ 
+            code: { $regex: new RegExp(`^${variation_code}$`, 'i') } 
+        }).populate('identityId');
 
-        // vendorServiceID should be the network code (e.g. mtn-data), variation_code should be the plan code (e.g. mtn-100mb-1000)
+        let variationProviderCode = variation_code;
+
+        if (service) {
+            // Find the active fulfillment mapping for this service
+            const activeMapping = await ProviderOffer.findOne({ 
+                serviceId: service._id, 
+                status: true 
+            }).sort({ priority: 1 });
+
+            // Use mapped provider code, or fallback to service's own providerCode, or finally the variation_code
+            variationProviderCode = activeMapping?.providerCode || service.providerCode || variation_code;
+        }
+
+        const provider = service?.provider || 'VTPass';
         const vendorServiceID = service?.identityId?.providerCode || finalServiceID;
-        const variationProviderCode = service?.providerCode || variation_code;
 
         const result = await purchaseService.processPurchase(userId, {
             type: 'data',
@@ -236,13 +271,20 @@ const getPlans = async (req, res) => {
 const verifyMeter = async (req, res) => {
     try {
         const { billersCode, serviceID, type } = req.body;
-        // Lookup service to identify provider
-        let service = await Service.findOne({ code: serviceID });
+        // Lookup service (case-insensitive)
+        let service = await Service.findOne({ 
+            code: { $regex: new RegExp(`^${serviceID}$`, 'i') } 
+        }).populate('identityId');
 
         // Fallback: Check if serviceID is an identity slug
         if (!service) {
             const ServiceIdentity = require('../models/ServiceIdentity');
-            const identity = await ServiceIdentity.findOne({ slug: String(serviceID).toLowerCase() });
+            const identity = await ServiceIdentity.findOne({ 
+                $or: [
+                    { slug: String(serviceID).toLowerCase() },
+                    { aliases: String(serviceID).toLowerCase() }
+                ]
+            });
             if (identity) {
                 service = await Service.findOne({ identityId: identity._id }).populate('identityId');
             }
@@ -313,27 +355,38 @@ const payElectricityBill = async (req, res) => {
     const finalMeterType = meter_type || variation_code;
     const finalPhone = phone || finalMeterNumber;
 
-    const userId = req.user.id
+    const userId = req.user._id || req.user.id
 
     if (!finalServiceID || !finalMeterNumber || !finalMeterType || !amount || !finalPhone || !pin) {
         return sendResponse(res, { status: 400, success: false, message: 'Missing required fields' })
     }
 
     try {
-        // Lookup the service to get provider and providerCode
-        let service = await Service.findOne({ code: finalServiceID, category: 'electricity' }).populate('identityId');
+        const ProviderOffer = require('../models/ProviderOffer');
+        const ServiceIdentity = require('../models/ServiceIdentity');
+
+        // Lookup the service (case-insensitive)
+        let service = await Service.findOne({ 
+            code: { $regex: new RegExp(`^${finalServiceID}$`, 'i') }, 
+            category: 'electricity' 
+        }).populate('identityId');
 
         // Fallback
         if (!service) {
-            const ServiceIdentity = require('../models/ServiceIdentity');
             const identity = await ServiceIdentity.findOne({ slug: String(finalServiceID).toLowerCase() });
             if (identity) {
                 service = await Service.findOne({ identityId: identity._id }).populate('identityId');
             }
         }
 
+        let vendorServiceID = finalServiceID;
+        if (service) {
+            // Find mapping
+            const activeMapping = await ProviderOffer.findOne({ serviceId: service._id, status: true }).sort({ priority: 1 });
+            vendorServiceID = activeMapping?.providerCode || service.identityId?.providerCode || service.providerCode || finalServiceID;
+        }
+
         const provider = service?.provider || 'VTPass';
-        const vendorServiceID = service?.identityId?.providerCode || service?.providerCode || finalServiceID;
 
         const result = await purchaseService.processPurchase(userId, {
             type: 'electricity',
@@ -377,28 +430,41 @@ const rechargeCable = async (req, res) => {
     const finalBillersCode = billersCode || phone;
     const finalPhone = phone || finalBillersCode;
 
-    const userId = req.user.id
+    const userId = req.user._id || req.user.id
 
     if (!finalServiceID || !finalBillersCode || !variation_code || !amount || !pin) {
         return sendResponse(res, { status: 400, success: false, message: 'Missing required fields' })
     }
 
     try {
-        // Lookup the service to get provider and providerCode using the variation_code (package code)
-        let service = await Service.findOne({ code: variation_code, category: 'tv' }).populate('identityId');
+        const ProviderOffer = require('../models/ProviderOffer');
+        const ServiceIdentity = require('../models/ServiceIdentity');
 
-        // Fallback
+        // Lookup the package (variation_code) case-insensitively
+        let service = await Service.findOne({ 
+            code: { $regex: new RegExp(`^${variation_code}$`, 'i') }, 
+            category: 'tv' 
+        }).populate('identityId');
+
+        // Fallback to serviceID (identity)
         if (!service) {
-            const ServiceIdentity = require('../models/ServiceIdentity');
             const identity = await ServiceIdentity.findOne({ slug: String(finalServiceID).toLowerCase() });
             if (identity) {
                 service = await Service.findOne({ identityId: identity._id }).populate('identityId');
             }
         }
 
+        let vendorServiceID = finalServiceID;
+        let variationProviderCode = variation_code;
+
+        if (service) {
+            // Check mapping
+            const activeMapping = await ProviderOffer.findOne({ serviceId: service._id, status: true }).sort({ priority: 1 });
+            variationProviderCode = activeMapping?.providerCode || service.providerCode || variation_code;
+            vendorServiceID = service.identityId?.providerCode || finalServiceID;
+        }
+
         const provider = service?.provider || 'VTPass';
-        const vendorServiceID = service?.identityId?.providerCode || finalServiceID;
-        const variationProviderCode = service?.providerCode || variation_code;
 
         const result = await purchaseService.processPurchase(userId, {
             type: 'cable',
@@ -436,27 +502,40 @@ const rechargeCable = async (req, res) => {
 
 const purchaseExamPin = async (req, res) => {
     const { serviceID, variation_code, amount, quantity, phone, pin, billersCode, expectedPrice } = req.body
-    const userId = req.user.id
+    const userId = req.user._id || req.user.id
 
     if (!pin) {
         return sendResponse(res, { status: 400, success: false, message: 'PIN is required' })
     }
 
     try {
-        // Lookup the service to get provider and providerCode
-        let service = await Service.findOne({ code: variation_code || serviceID, category: 'pin' }).populate('identityId');
+        const ProviderOffer = require('../models/ProviderOffer');
+        const ServiceIdentity = require('../models/ServiceIdentity');
+
+        // Lookup (case-insensitive)
+        let service = await Service.findOne({ 
+            code: { $regex: new RegExp(`^${variation_code || serviceID}$`, 'i') }, 
+            category: 'pin' 
+        }).populate('identityId');
 
         // Fallback
         if (!service) {
-            const ServiceIdentity = require('../models/ServiceIdentity');
             const identity = await ServiceIdentity.findOne({ slug: String(serviceID || variation_code).toLowerCase() });
             if (identity) {
                 service = await Service.findOne({ identityId: identity._id }).populate('identityId');
             }
         }
 
+        let vendorServiceID = serviceID;
+        let variationProviderCode = variation_code;
+
+        if (service) {
+            const activeMapping = await ProviderOffer.findOne({ serviceId: service._id, status: true }).sort({ priority: 1 });
+            variationProviderCode = activeMapping?.providerCode || service.providerCode || variation_code;
+            vendorServiceID = service.identityId?.providerCode || serviceID;
+        }
+
         const provider = service?.provider || 'VTPass';
-        const vendorServiceID = service?.identityId?.providerCode || service?.providerCode || serviceID;
 
         const parsedQuantity = quantity ? Number(quantity) : 1;
         const totalAmount = amount * parsedQuantity;
