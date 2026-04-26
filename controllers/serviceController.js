@@ -6,10 +6,11 @@ const Service = require('../models/Service');
  */
 exports.getAdminServices = async (req, res) => {
     try {
-        const { category, status, brandId } = req.query;
+        const { category, status, brandId, identityId } = req.query;
         let filter = {};
         if (category) filter.category = category;
         if (brandId) filter.brandId = brandId;
+        if (identityId) filter.identityId = identityId;
         if (status !== undefined) filter.status = status === 'true';
 
         const services = await Service.find(filter).sort({ category: 1, name: 1 });
