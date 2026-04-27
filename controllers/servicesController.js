@@ -8,6 +8,7 @@ const { generateVTPassRequestId } = require('../utils/generateID')
 const { fetchPlans, verifyMeterWithProvider } = require('../utils/vtuService')
 const { sendResponse } = require('../utils/response')
 const notificationService = require('../services/notification.service')
+const pricingService = require('../services/pricing.service')
 const mongoose = require('mongoose')
 
 const purchaseAirtime = async (req, res) => {
@@ -241,19 +242,28 @@ const getPlans = async (req, res) => {
         const ProviderOffer = require('../models/ProviderOffer');
 
         const variations = await Promise.all(plans.map(async (p) => {
+            const bestOffer = await ProviderOffer.findOne({ serviceId: p._id, status: true }).sort({ priority: -1 });
+            
             let displayPrice = p.price;
+            let isPricingPending = false;
 
-            // If price is 0, try to find a provider offer cost as fallback
-            if (displayPrice === 0) {
-                const bestOffer = await ProviderOffer.findOne({ serviceId: p._id, status: true }).sort({ priority: -1 });
-                if (bestOffer) {
-                    displayPrice = bestOffer.costPrice;
+            if (bestOffer) {
+                // Apply our layered pricing logic
+                const pricing = await pricingService.resolvePricing(req.user, p, bestOffer);
+                
+                if (pricing) {
+                    displayPrice = pricing.salePrice;
+                } else {
+                    // Fallback: If no rule, add a safe system default (e.g. 1.5%) to the cost
+                    displayPrice = Math.round(bestOffer.costPrice * 1.015);
                 }
+            } else if (p.price === 0) {
+                isPricingPending = true;
             }
 
             return {
                 variation_code: p.code,
-                name: p.name,
+                name: isPricingPending ? `${p.name} (Contact Admin)` : p.name,
                 variation_amount: displayPrice || 0,
                 fixedPrice: displayPrice > 0 ? "Yes" : "No"
             };
