@@ -38,8 +38,10 @@ class PricingService {
                 salePrice = costPrice * (1 + (rule.markupValue / 100));
             }
         } else {
-            // Fallback: If no rule, we might use a default system markup or return null to signal legacy fallback
-            return null; 
+            // Fallback: If no rule, apply a safe system default (1.5% markup)
+            markupType = 'percent_fallback';
+            markupValue = 1.5;
+            salePrice = costPrice * 1.015;
         }
 
         const rawSalePrice = salePrice;
