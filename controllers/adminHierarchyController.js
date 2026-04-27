@@ -246,6 +246,32 @@ class AdminHierarchyController {
         }
     }
 
+    async deleteServiceIdentity(req, res) {
+        try {
+            const { id } = req.params;
+            
+            // 1. Find all plans linked to this identity
+            const plans = await Service.find({ identityId: id });
+            const planIds = plans.map(p => p._id);
+
+            // 2. Delete all fulfillment mappings for those plans
+            await ProviderOffer.deleteMany({ serviceId: { $in: planIds } });
+
+            // 3. Delete the plans
+            await Service.deleteMany({ identityId: id });
+
+            // 4. Delete the identity itself
+            const deleted = await ServiceIdentity.findByIdAndDelete(id);
+            if (!deleted) return sendResponse(res, { status: 404, success: false, message: 'Identity not found' });
+
+            await logAction(req.user.id, req.user.name, 'SERVICE_IDENTITY_DELETE', `Identity: ${id}`, { name: deleted.name }, 'success', req);
+            
+            return sendResponse(res, { success: true, message: 'Service identity and all linked data deleted successfully' });
+        } catch (error) {
+            return sendResponse(res, { status: 500, success: false, message: error.message });
+        }
+    }
+
     async getHierarchyMetadata(req, res) {
         try {
             const { typeId } = req.query;

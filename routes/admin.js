@@ -96,6 +96,7 @@ router.delete('/hierarchy/provider-offers/:id', adminHierarchyController.deleteP
 router.get('/hierarchy/identities', adminHierarchyController.getServiceIdentities)
 router.post('/hierarchy/identities', adminHierarchyController.createServiceIdentity)
 router.put('/hierarchy/identities/:id', adminHierarchyController.updateServiceIdentity)
+router.delete('/hierarchy/identities/:id', adminHierarchyController.deleteServiceIdentity)
 router.get('/hierarchy/metadata', adminHierarchyController.getHierarchyMetadata)
 router.post('/hierarchy/purge-noisy-data', adminHierarchyController.safePurgeNoisyData)
 
