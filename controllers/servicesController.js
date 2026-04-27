@@ -242,31 +242,41 @@ const getPlans = async (req, res) => {
         const ProviderOffer = require('../models/ProviderOffer');
 
         const variations = await Promise.all(plans.map(async (p) => {
-            const bestOffer = await ProviderOffer.findOne({ serviceId: p._id, status: true }).sort({ priority: -1 });
-            
-            let displayPrice = p.price;
-            let isPricingPending = false;
-
-            if (bestOffer) {
-                // Apply our layered pricing logic
-                const pricing = await pricingService.resolvePricing(req.user, p, bestOffer);
+            try {
+                const bestOffer = await ProviderOffer.findOne({ serviceId: p._id, status: true }).sort({ priority: -1 });
                 
-                if (pricing) {
-                    displayPrice = pricing.salePrice;
-                } else {
-                    // Fallback: If no rule, add a safe system default (e.g. 1.5%) to the cost
-                    displayPrice = Math.round(bestOffer.costPrice * 1.015);
-                }
-            } else if (p.price === 0) {
-                isPricingPending = true;
-            }
+                let displayPrice = p.price;
+                let isPricingPending = false;
 
-            return {
-                variation_code: p.code,
-                name: isPricingPending ? `${p.name} (Contact Admin)` : p.name,
-                variation_amount: displayPrice || 0,
-                fixedPrice: displayPrice > 0 ? "Yes" : "No"
-            };
+                if (bestOffer) {
+                    // Apply our layered pricing logic with safety guard
+                    const pricing = await pricingService.resolvePricing(req.user || { role: 'all' }, p, bestOffer).catch(() => null);
+                    
+                    if (pricing) {
+                        displayPrice = pricing.salePrice;
+                    } else {
+                        // Fallback: If engine fails or no rule, add a safe system default (1.5%) to the cost
+                        displayPrice = Math.round((bestOffer.costPrice || p.price || 0) * 1.015);
+                    }
+                } else if (p.price === 0) {
+                    isPricingPending = true;
+                }
+
+                return {
+                    variation_code: p.code,
+                    name: isPricingPending ? `${p.name} (Contact Admin)` : p.name,
+                    variation_amount: displayPrice || 0,
+                    fixedPrice: displayPrice > 0 ? "Yes" : "No"
+                };
+            } catch (err) {
+                console.error(`[getPlans] Error processing plan ${p.code}:`, err);
+                return {
+                    variation_code: p.code,
+                    name: p.name,
+                    variation_amount: p.price || 0,
+                    fixedPrice: p.price > 0 ? "Yes" : "No"
+                };
+            }
         }));
 
         return sendResponse(res, {
