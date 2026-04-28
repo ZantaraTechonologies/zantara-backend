@@ -50,4 +50,20 @@ const changePin = async (req, res) => {
     }
 };
 
-module.exports = { setPin, changePin };
+const verifyPin = async (req, res) => {
+    try {
+        const { pin } = req.body;
+        const userId = req.user.id;
+
+        if (!pin) {
+            return sendResponse(res, { status: 400, success: false, message: 'PIN is required' });
+        }
+
+        await pinService.verifyPin(userId, pin);
+        return sendResponse(res, { success: true, message: 'PIN verified successfully' });
+    } catch (err) {
+        return sendResponse(res, { status: 400, success: false, message: err.message });
+    }
+};
+
+module.exports = { setPin, changePin, verifyPin };

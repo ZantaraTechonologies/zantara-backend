@@ -18,7 +18,7 @@ const {
     verifyResetOTP,
     savePushToken
 } = require('../controllers/authController')
-const { setPin, changePin } = require('../controllers/pinController')
+const { setPin, changePin, verifyPin } = require('../controllers/pinController')
 const { verifyJWT } = require('../middlewares/auth')
 const { loginLimiter, pinLimiter } = require('../middlewares/limiter')
 const multer = require('multer')
@@ -41,6 +41,7 @@ router.post('/change-password', verifyJWT, changePassword)
 router.post('/logout', logout)
 router.post('/set-pin', verifyJWT, pinLimiter, setPin)
 router.post('/change-pin', verifyJWT, pinLimiter, changePin)
+router.post('/verify-pin', verifyJWT, pinLimiter, verifyPin)
 
 router.post('/send-otp', verifyJWT, sendOTP)
 router.post('/verify-otp', verifyJWT, verifyOTP)
