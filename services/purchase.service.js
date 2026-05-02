@@ -150,7 +150,7 @@ class PurchaseService {
                 agentPrice: finalAmount, 
                 profit, // Authoritative (estimated for now)
                 estimatedProfit: profit,
-                userRole: user.accountType || user.role,
+                userRole: user.role && user.role !== 'user' ? user.role : (user.accountType || user.role),
                 provider: currentProvider,
                 status: 'pending',
                 details: { ...details, originalAmount: amount, request_id: reference },

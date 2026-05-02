@@ -19,7 +19,10 @@ class PricingService {
             ? Number(requestedAmount) 
             : providerOffer.costPrice;
             
-        const userRole = user ? user.accountType || user.role : 'all';
+        // Priority: Role (agent, admin, etc.) > AccountType (reseller, retail)
+        const userRole = user 
+            ? (user.role && user.role !== 'user' ? user.role : (user.accountType || user.role))
+            : 'all';
 
         // 1. Find the best applicable rule (priority-layered)
         const rule = await this._findBestRule(service, userRole);
