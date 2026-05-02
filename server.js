@@ -128,6 +128,16 @@ app.get('/', (req, res) => {
     res.send('API is live');
 });
 
+app.get('/api/health-debug', (req, res) => {
+    res.json({
+        ok: true,
+        secretSet: !!process.env.JWT_SECRET,
+        secretLength: process.env.JWT_SECRET?.length,
+        nodeEnv: process.env.NODE_ENV,
+        mongoSet: !!process.env.MONGO_URI
+    });
+});
+
 // Boot
 const PORT = process.env.PORT || 7000;
 const MONGOURI = process.env.MONGO_URI;
