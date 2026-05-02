@@ -118,8 +118,8 @@ class PurchaseService {
 
             // --- PROFIT SAFETY CHECK ---
             const profit = finalAmount - costPrice;
-            if (profit <= 0) {
-                throw new Error(`Transaction aborted: Unsafe pricing (Potential Loss or Zero Margin). Cost: ${costPrice}, Sale: ${finalAmount}.`);
+            if (profit < 0) {
+                throw new Error(`Transaction aborted: Unsafe pricing (Potential Loss). Cost: ${costPrice}, Sale: ${finalAmount}.`);
             }
 
             const wallet = await Wallet.findOne({ userId });

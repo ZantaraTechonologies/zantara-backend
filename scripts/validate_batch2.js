@@ -46,7 +46,7 @@ async function validate() {
         });
         const price4 = await pricingEngine.resolvePricing(user, service, offer1, 300);
         console.log('Price Result:', price4.salePrice, 'Profit:', price4.profit);
-        if (price4.profit <= 0) console.log('Safety Check Result: Abort would happen in purchase service.');
+        if (price4.profit < 0) console.log('Safety Check Result: Abort would happen in purchase service.');
         await rule4.deleteOne();
 
         console.log('\n--- Scenario 5: Determinism Check (Tie Priority) ---');

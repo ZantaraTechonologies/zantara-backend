@@ -64,7 +64,7 @@ async function testPricing() {
             console.error('❌ Failed: Expected 311');
         }
 
-        console.log('\n--- Test 3: Profit Safety (Markup resulting in <= 0 profit) ---');
+        console.log('\n--- Test 3: Profit Safety (Markup resulting in < 0 profit) ---');
         await PricingRule.deleteMany({ targetId: service._id });
         // Use a very low markup or negative
         const ruleSafe = await PricingRule.create({
@@ -80,8 +80,8 @@ async function testPricing() {
         const result3 = await pricingEngine.resolvePricing({ role: 'user' }, service, offer, 300);
         console.log('Engine Result:', result3);
         const profit = result3.salePrice - offer.costPrice;
-        if (profit <= 0) {
-            console.log('✅ Engine correctly returned profit <= 0');
+        if (profit < 0) {
+            console.log('✅ Engine correctly returned profit < 0');
         }
 
         // Cleanup
