@@ -14,6 +14,7 @@ const serviceSchema = new mongoose.Schema({
     price: Number, // Selling price
     resellerPrice: Number,
     costPrice: Number, // Cost from the provider
+    suggestedRetailPrice: Number, // Reference price for marketing (Market Price)
     provider: { type: String, default: 'VTPass' },
     status: { type: Boolean, default: true }
 })

@@ -48,6 +48,9 @@ const serviceIdentitySchema = new mongoose.Schema({
         type: Boolean,
         default: true
     },
+    suggestedRetailPrice: {
+        type: Number
+    },
     metadata: {
         type: Map,
         of: String
