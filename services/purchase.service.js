@@ -197,6 +197,8 @@ class PurchaseService {
                     transaction.profit = transaction.actualProfit;
                 }
                 
+                await transaction.save({ session });
+
                 // 6. Referral Bonus (Lifetime Commission)
                 // Note: processLifetimeCommission also writes netProfitAfterCommission on the parent txn
                 const { processLifetimeCommission } = require('../utils/referral');
