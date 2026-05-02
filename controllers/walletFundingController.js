@@ -5,6 +5,8 @@ const { generateReference } = require('../utils/generateID');
 const axios = require('axios');
 const Wallet = require('../models/Wallet');
 const { logTransaction } = require('../utils/transaction');
+const investmentService = require('../services/investment.service');
+
 
 const ALLOWED_CHANNELS = ['card', 'ussd', 'bank_transfer'];
 const MIN_AMOUNT = 50; // ₦
@@ -117,14 +119,20 @@ const verifyFunding = async (req, res) => {
                     );
 
                     if (upd.modifiedCount === 1) {
-                        // 4. Ledger-backed Credit via Service
-                        await walletService.credit(row.userId, amountNaira, reference, 'funding');
+                        // 4. Ledger-backed Credit or Investment Fulfillment
+                        if (row.type === 'investment_buy') {
+                            const meta = typeof data.metadata === 'string' ? JSON.parse(data.metadata) : (data.metadata || {});
+                            const qty = Number(meta.qty);
+                            await investmentService.fulfillSharePurchase(row.userId, qty, reference, false);
+                        } else {
+                            await walletService.credit(row.userId, amountNaira, reference, 'funding');
+                        }
 
                         // Log Transaction
                         await logTransaction({
                             userId: row.userId,
                             refId: reference,
-                            type: 'funding',
+                            type: row.type || 'funding',
                             service: 'Paystack',
                             amount: amountNaira,
                             status: 'success',
@@ -133,15 +141,17 @@ const verifyFunding = async (req, res) => {
 
                         const notificationService = require('../services/notification.service');
                         await notificationService.sendInApp(row.userId, {
-                            title: 'Wallet Funded Successfully',
-                            message: `Your wallet has been credited with ₦${amountNaira.toLocaleString()} via ${row.service}.`,
+                            title: row.type === 'investment_buy' ? 'Shares Purchased Successfully' : 'Wallet Funded Successfully',
+                            message: row.type === 'investment_buy' 
+                                ? `Your purchase of platform shares has been confirmed. Welcome aboard!`
+                                : `Your wallet has been credited with ₦${amountNaira.toLocaleString()} via ${row.service}.`,
                             type: 'transaction',
                             metadata: { reference }
                         });
-                        return res.json({ status: 'success' });
+                        return res.json({ status: 'success', type: row.type });
                     } else {
                         // Already processed by webhook
-                        return res.json({ status: 'success' });
+                        return res.json({ status: 'success', type: row.type });
                     }
                 } else if (['failed', 'abandoned'].includes(paystackStatus)) {
                     await TransactionStatus.updateOne(

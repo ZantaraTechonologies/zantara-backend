@@ -199,7 +199,7 @@ const webhook = async (req, res) => {
         // 3. Process Logic
         if (eventData.event === 'charge.success') {
             const refId = eventData.data.reference;
-            const meta = eventData.data.metadata || {};
+            const meta = parseMetadata(eventData.data.metadata);
             const userId = meta.userId;
             const amountNaira = eventData.data.amount / 100;
 
