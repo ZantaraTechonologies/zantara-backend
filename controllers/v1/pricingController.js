@@ -106,6 +106,8 @@ class PricingController {
                     serviceName: service.name,
                     baseCostPrice: pricing.baseCostPrice,
                     salePrice: pricing.salePrice, // This is what the user pays
+                    retailPrice: pricing.retailPrice,
+                    savings: pricing.savings,
                     fee: pricing.salePrice - requestedAmount > 0 ? pricing.salePrice - requestedAmount : 0,
                     currency: 'NGN',
                     isPreview: true,

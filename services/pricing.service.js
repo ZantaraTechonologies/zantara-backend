@@ -64,10 +64,28 @@ class PricingService {
         const roundedSalePrice = Math.round(salePrice);
         const profit = roundedSalePrice - costPrice;
 
+        // Calculate a "Retail Reference Price" to show discount/savings
+        // If the current user is already retail, retailPrice = salePrice
+        let retailPrice = roundedSalePrice;
+        if (userRole !== 'retail') {
+            const retailRule = await this._findBestRule(service, 'retail');
+            let retailMarkup = costPrice * 0.015; // default fallback
+            if (retailRule) {
+                retailMarkup = retailRule.markupType === 'fixed' 
+                    ? retailRule.markupValue 
+                    : (costPrice * (retailRule.markupValue / 100));
+            }
+            retailPrice = Math.round(costPrice + retailMarkup);
+        }
+
+        const savings = Math.max(0, retailPrice - roundedSalePrice);
+
         return {
             baseCostPrice: costPrice,
             rawSalePrice: rawSalePrice, // Pre-rounded for audit
             salePrice: roundedSalePrice,
+            retailPrice: retailPrice,
+            savings: savings,
             profit: profit,
             appliedPricingRuleId: rule ? rule._id : null,
             markupType: markupType,
