@@ -161,7 +161,7 @@ class PurchaseService {
             await walletService.debit(userId, finalAmount, reference, `${type}_purchase`, transaction._id);
 
             // 3. Call External Provider
-            const response = await providerCall(reference);
+            const response = await providerCall(reference, costPrice);
 
             if (!response.success) {
 

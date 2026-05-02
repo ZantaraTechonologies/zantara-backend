@@ -146,13 +146,13 @@ const purchaseData = async (req, res) => {
             provider,
             expectedPrice,
             details: { phone: finalPhone, serviceID: finalServiceID, variation_code, roles: req.user.roles },
-            providerCall: (refId) => providerService.purchaseData({
+            providerCall: (refId, resolvedCost) => providerService.purchaseData({
                 request_id: refId,
                 serviceID: vendorServiceID,
                 billersCode: finalBillersCode,
                 variation_code: variationProviderCode,
                 phone: finalPhone,
-                amount: service?.costPrice || service?.price || amount
+                amount: resolvedCost || service?.costPrice || service?.price || amount
             }, provider)
         })
 
@@ -416,12 +416,12 @@ const payElectricityBill = async (req, res) => {
             provider,
             expectedPrice,
             details: { request_id: generateVTPassRequestId(), meter_number: finalMeterNumber, meter_type: finalMeterType, phone: finalPhone, roles: req.user.roles },
-            providerCall: (refId) => providerService.purchaseElectricity({
+            providerCall: (refId, resolvedCost) => providerService.purchaseElectricity({
                 request_id: refId,
                 serviceID: vendorServiceID,
                 billersCode: finalMeterNumber,
                 variation_code: finalMeterType,
-                amount,
+                amount: resolvedCost || amount,
                 phone: finalPhone
             }, provider)
         })
@@ -494,12 +494,12 @@ const rechargeCable = async (req, res) => {
             provider,
             expectedPrice,
             details: { request_id: generateVTPassRequestId(), serviceID: finalServiceID, billersCode: finalBillersCode, variation_code, roles: req.user.roles },
-            providerCall: (refId) => providerService.purchaseCable({
+            providerCall: (refId, resolvedCost) => providerService.purchaseCable({
                 request_id: refId,
                 serviceID: vendorServiceID,
                 billersCode: finalBillersCode,
                 variation_code: variationProviderCode,
-                amount: service?.costPrice || service?.price || amount,
+                amount: resolvedCost || service?.costPrice || service?.price || amount,
                 phone: finalPhone
             }, provider)
         })
@@ -568,11 +568,11 @@ const purchaseExamPin = async (req, res) => {
             provider,
             expectedPrice,
             details: { request_id: generateVTPassRequestId(), serviceID, variation_code, quantity, phone, billersCode, roles: req.user.roles },
-            providerCall: (refId) => providerService.purchaseExamPin({
+            providerCall: (refId, resolvedCost) => providerService.purchaseExamPin({
                 request_id: refId,
                 serviceID: vendorServiceID,
                 variation_code: service?.providerCode || variation_code,
-                amount: (service?.costPrice || service?.price || amount) * parsedQuantity,
+                amount: resolvedCost || (service?.costPrice || service?.price || amount) * parsedQuantity,
                 quantity,
                 phone,
                 billersCode
