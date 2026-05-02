@@ -117,7 +117,7 @@ class VTPassAdapter extends BaseAdapter {
     async purchaseData({ request_id, serviceID, billersCode, variation_code, phone, amount }) {
         try {
             const finalServiceID = (serviceID || '').toLowerCase();
-            const finalVarCode = (variation_code || '').toLowerCase();
+            const finalVarCode = (variation_code || '');
             const raw = await this._pay({ request_id, serviceID: finalServiceID, billersCode, variation_code: finalVarCode, phone, amount });
             return this.mapResponse(raw);
         } catch (err) {
@@ -128,7 +128,7 @@ class VTPassAdapter extends BaseAdapter {
     async purchaseElectricity({ request_id, serviceID, billersCode, variation_code, amount, phone }) {
         try {
             const finalServiceID = (serviceID || '').toLowerCase();
-            const finalVarCode = (variation_code || '').toLowerCase();
+            const finalVarCode = (variation_code || '');
             const raw = await this._pay({ request_id, serviceID: finalServiceID, billersCode, variation_code: finalVarCode, amount, phone });
             return this.mapResponse(raw);
         } catch (err) {
@@ -139,7 +139,7 @@ class VTPassAdapter extends BaseAdapter {
     async purchaseCable({ request_id, serviceID, billersCode, variation_code, amount, phone, quantity }) {
         try {
             const finalServiceID = (serviceID || '').toLowerCase();
-            const finalVarCode = (variation_code || '').toLowerCase();
+            const finalVarCode = (variation_code || '');
             const raw = await this._pay({ request_id, serviceID: finalServiceID, billersCode, variation_code: finalVarCode, amount, phone, quantity });
             return this.mapResponse(raw);
         } catch (err) {
@@ -155,7 +155,7 @@ class VTPassAdapter extends BaseAdapter {
             }
             
             finalServiceID = finalServiceID.toLowerCase();
-            const finalVarCode = (variation_code || '').toLowerCase();
+            const finalVarCode = (variation_code || '');
             
             const payload = { 
                 request_id, 
