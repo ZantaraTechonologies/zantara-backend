@@ -84,36 +84,29 @@ const getUserEarningsSummary = async (req, res) => {
         const userId = req.user.id;
         const WalletLedger = require('../models/WalletLedger');
 
-        const [referralStats, agentStats, cappedCount, skippedCount, totalReferrals, userDoc] = await Promise.all([
+        const [referralStats, cappedCount, skippedCount, totalReferrals, userDoc] = await Promise.all([
             // 1. Referral Commissions
             Transaction.aggregate([
                 { $match: { userId: new mongoose.Types.ObjectId(userId), type: 'referral_bonus', status: 'success' } },
                 { $group: { _id: null, total: { $sum: "$amount" } } }
             ]),
-            // 2. Agent Sales Profit
-            Transaction.aggregate([
-                { $match: { userId: new mongoose.Types.ObjectId(userId), userRole: 'agent', status: 'success' } },
-                { $group: { _id: null, total: { $sum: "$profit" } } }
-            ]),
-            // 3. Capped Commissions Count
+            // 2. Capped Commissions Count
             Transaction.countDocuments({ userId, type: 'referral_bonus', "details.wasCapped": true }),
-            // 4. Skipped Commissions Count
+            // 3. Skipped Commissions Count
             WalletLedger.countDocuments({ userId, source: 'REFERRAL_SKIPPED' }),
-            // 5. Total Referrals Count
+            // 4. Total Referrals Count
             User.countDocuments({ referredBy: userId }),
-            // 6. User Doc for referralBalance and myReferralCode
+            // 5. User Doc for referralBalance and myReferralCode
             User.findById(userId).select('referralBalance myReferralCode')
         ]);
 
         const referralEarnings = referralStats.length > 0 ? referralStats[0].total : 0;
-        const agentProfit = agentStats.length > 0 ? agentStats[0].total : 0;
 
         res.json({
             success: true,
             data: {
                 referralEarnings,
-                agentProfit,
-                totalEarnings: referralEarnings + agentProfit,
+                totalEarnings: referralEarnings,
                 totalReferrals,
                 referralBalance: userDoc ? userDoc.referralBalance : 0,
                 myReferralCode: userDoc ? userDoc.myReferralCode : null,
@@ -141,8 +134,7 @@ const getUserEarningsHistory = async (req, res) => {
             status: 'success',
             $or: [
                 { type: 'referral_bonus' },
-                { type: 'referral_redeem' },
-                { userRole: 'agent' }
+                { type: 'referral_redeem' }
             ]
         })
             .sort({ createdAt: -1 })
@@ -160,8 +152,8 @@ const getUserEarningsHistory = async (req, res) => {
         const formattedHistory = [
             ...historyTxs.map(t => ({
                 id: t._id,
-                type: t.type === 'referral_bonus' ? 'referral_bonus' : t.type === 'referral_redeem' ? 'referral_redeem' : 'agent_profit',
-                amount: t.type === 'referral_bonus' ? (t.amount || 0) : t.type === 'referral_redeem' ? (t.amount || 0) : (t.profit || 0),
+                type: t.type === 'referral_bonus' ? 'referral_bonus' : 'referral_redeem',
+                amount: t.type === 'referral_bonus' ? (t.amount || 0) : (t.amount || 0),
                 refId: t.refId || t.transactionId,
                 transactionId: t.transactionId,
                 wasCapped: t.details ? t.details.wasCapped : false,
@@ -250,7 +242,6 @@ const getAdminEarningsAnalytics = async (req, res) => {
         // 2. Aggregate Payout Stats & Performers (Applying Filters)
         const [
             payoutStats,
-            agentStatsResult,
             cappedCount,
             skippedCount,
             caps
@@ -259,11 +250,6 @@ const getAdminEarningsAnalytics = async (req, res) => {
             Transaction.aggregate([
                 { $match: { type: 'referral_bonus', status: 'success', ...dateFilter } },
                 { $group: { _id: null, total: { $sum: "$amount" } } }
-            ]),
-            // Total Agent Profits
-            Transaction.aggregate([
-                { $match: { userRole: 'agent', status: 'success', ...dateFilter } },
-                { $group: { _id: null, total: { $sum: "$profit" } } }
             ]),
             // Capped Count
             Transaction.countDocuments({ type: 'referral_bonus', "details.wasCapped": true, ...dateFilter }),
@@ -291,26 +277,12 @@ const getAdminEarningsAnalytics = async (req, res) => {
             { $project: { name: "$user.name", email: "$user.email", totalEarned: 1, count: 1 } }
         ]);
 
-        const agentMatch = { userRole: 'agent', status: 'success', ...dateFilter };
-        const topAgents = await Transaction.aggregate([
-            { $match: agentMatch },
-            { $group: { _id: "$userId", totalProfit: { $sum: "$profit" }, count: { $sum: 1 } } },
-            { $sort: { totalProfit: -1 } },
-            { $limit: 10 },
-            { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'user' } },
-            { $unwind: "$user" },
-            { $match: userMatch },
-            { $project: { name: "$user.name", email: "$user.email", totalProfit: 1, count: 1 } }
-        ]);
-
         // 4. Combined Paginated History
-        // To do this "The Professional Way" with mixed collections, we combine, sort, and slice.
         const historyMatch = {
             status: 'success',
             $or: [
                 { type: 'referral_bonus' },
-                { type: 'referral_redeem' },
-                { userRole: 'agent' }
+                { type: 'referral_redeem' }
             ],
             ...dateFilter
         };
@@ -335,8 +307,8 @@ const getAdminEarningsAnalytics = async (req, res) => {
                 id: t._id,
                 userName: t.userId ? t.userId.name : 'Unknown User',
                 userEmail: t.userId ? t.userId.email : '',
-                type: t.type === 'referral_bonus' ? 'referral_bonus' : t.type === 'referral_redeem' ? 'referral_redeem' : 'agent_profit',
-                amount: t.type === 'referral_bonus' ? (t.amount || 0) : t.type === 'referral_redeem' ? (t.amount || 0) : (t.profit || 0),
+                type: t.type === 'referral_bonus' ? 'referral_bonus' : 'referral_redeem',
+                amount: t.type === 'referral_bonus' ? (t.amount || 0) : (t.amount || 0),
                 refId: t.refId || t.transactionId,
                 wasCapped: t.details?.wasCapped || false,
                 buyerRole: t.userRole || t.details?.buyerRole || 'user',
@@ -375,13 +347,11 @@ const getAdminEarningsAnalytics = async (req, res) => {
             data: {
                 overview: {
                     totalReferralPayouts: payoutStats[0]?.total || 0,
-                    totalAgentProfits: agentStatsResult[0]?.total || 0,
                     cappedCommissionsCount: cappedCount,
                     skippedCommissionsCount: skippedCount
                 },
                 performers: {
-                    topReferrers,
-                    topAgents
+                    topReferrers
                 },
                 caps: {
                     maxReferralProfitShare: caps[0] ? Number(caps[0].value) : 0.9,
