@@ -16,8 +16,10 @@ class PricingController {
      */
     async calculatePrice(req, res) {
         const { serviceId, serviceCode, amount, quantity } = req.body;
-        const user = req.user; // From verifyJWT middleware
-        const userId = user?._id || user?.id;
+        const userPayload = req.user; 
+        const userId = userPayload?._id || userPayload?.id;
+        const User = require('../../models/User');
+        const user = await User.findById(userId);
 
         try {
             if (!serviceId && !serviceCode) {

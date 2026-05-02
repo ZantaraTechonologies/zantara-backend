@@ -19,10 +19,21 @@ class PricingService {
             ? Number(requestedAmount) 
             : providerOffer.costPrice;
             
-        // Priority: Role (agent, admin, etc.) > AccountType (reseller, retail)
-        const userRole = user 
-            ? (user.role && user.role !== 'user' ? user.role : (user.accountType || user.role))
-            : 'all';
+        // Priority: Explicit Role (agent, admin, etc.) > AccountType (reseller, retail)
+        let userRole = 'all';
+        if (user) {
+            const rolesArray = Array.isArray(user.roles) ? user.roles : [];
+            const allRoles = new Set([user.role, ...rolesArray].filter(Boolean));
+            
+            // Prioritize agent if present in any role field
+            if (allRoles.has('agent')) {
+                userRole = 'agent';
+            } else if (user.role && user.role !== 'user') {
+                userRole = user.role;
+            } else {
+                userRole = user.accountType || 'retail';
+            }
+        }
 
         // 1. Find the best applicable rule (priority-layered)
         const rule = await this._findBestRule(service, userRole);
