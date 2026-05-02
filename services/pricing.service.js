@@ -64,27 +64,30 @@ class PricingService {
         const roundedSalePrice = Math.round(salePrice);
         const profit = roundedSalePrice - costPrice;
 
-        // Calculate a "Retail Reference Price" to show discount/savings
-        // If the current user is already retail, retailPrice = salePrice
-        let retailPrice = roundedSalePrice;
-        if (userRole !== 'retail') {
+        // Calculate "Market Reference Price" (SRP)
+        // If the service has a suggestedRetailPrice (SRP), use it as the benchmark.
+        // Otherwise, fall back to what a standard retail user would pay.
+        let referencePrice = service.suggestedRetailPrice || roundedSalePrice;
+        
+        if (!service.suggestedRetailPrice || service.suggestedRetailPrice <= costPrice) {
             const retailRule = await this._findBestRule(service, 'retail');
-            let retailMarkup = costPrice * 0.015; // default fallback
+            let retailMarkup = costPrice * 0.015; // fallback
             if (retailRule) {
                 retailMarkup = retailRule.markupType === 'fixed' 
                     ? retailRule.markupValue 
                     : (costPrice * (retailRule.markupValue / 100));
             }
-            retailPrice = Math.round(costPrice + retailMarkup);
+            referencePrice = Math.round(costPrice + retailMarkup);
         }
 
-        const savings = Math.max(0, retailPrice - roundedSalePrice);
+        // The savings is what the user is gaining compared to the market/standard price
+        const savings = Math.max(0, referencePrice - roundedSalePrice);
 
         return {
             baseCostPrice: costPrice,
-            rawSalePrice: rawSalePrice, // Pre-rounded for audit
+            rawSalePrice: rawSalePrice, 
             salePrice: roundedSalePrice,
-            retailPrice: retailPrice,
+            retailPrice: referencePrice, // Renamed internally to referencePrice but kept as retailPrice for API compatibility
             savings: savings,
             profit: profit,
             appliedPricingRuleId: rule ? rule._id : null,
