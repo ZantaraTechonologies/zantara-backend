@@ -57,8 +57,8 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
             return 0;
         }
 
-        // 4.1 Calculate Commission based on PROFIT MARGIN, not the transaction amount
-        const profitMargin = parentTxn.profit || 0;
+        // 4.1 Calculate Commission based on MARKUP (Estimated Profit), not the full reconciled profit
+        const profitMargin = parentTxn.estimatedProfit || parentTxn.profit || 0;
         let commissionAmount = profitMargin * rate;
         
         if (commissionAmount <= 0) {

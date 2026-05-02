@@ -459,7 +459,7 @@ const getDashboardStats = async (req, res) => {
             ]),
             Transaction.aggregate([
                 { $match: { status: 'success', createdAt: { $gte: todayStart } } },
-                { $group: { _id: null, total: { $sum: "$profit" } } }
+                { $group: { _id: null, total: { $sum: { $ifNull: ["$netProfitAfterCommission", "$profit"] } } } }
             ])
         ]);
 
