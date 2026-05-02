@@ -55,7 +55,7 @@ class PricingService {
             rawSalePrice: rawSalePrice, // Pre-rounded for audit
             salePrice: roundedSalePrice,
             profit: profit,
-            appliedPricingRuleId: rule._id,
+            appliedPricingRuleId: rule ? rule._id : null,
             markupType: markupType,
             markupValue: markupValue,
             userRole: userRole
