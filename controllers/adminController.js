@@ -250,66 +250,7 @@ const updateUserCommissionRate = async (req, res) => {
 
 // --- Agent Settings (Step 3) ---
 
-const getAgentSettings = async (req, res) => {
-    try {
-        const Setting = require('../models/Setting');
-        const setting = await Setting.findOne({ key: 'defaultAgentDiscountRate' });
-        res.json({ success: true, defaultAgentDiscountRate: setting ? setting.value : 0 });
-    } catch (e) {
-        res.status(500).json({ message: e.message });
-    }
-};
-
-const updateAgentSettings = async (req, res) => {
-    try {
-        const { defaultAgentDiscountRate } = req.body;
-        const rate = Number(defaultAgentDiscountRate);
-
-        if (isNaN(rate) || rate < 0 || rate > 0.5) {
-            return res.status(400).json({ message: 'Invalid rate. Must be between 0 and 0.5 (0% - 50%)' });
-        }
-
-        const Setting = require('../models/Setting');
-        await Setting.findOneAndUpdate(
-            { key: 'defaultAgentDiscountRate' },
-            { key: 'defaultAgentDiscountRate', value: rate },
-            { upsert: true, new: true }
-        );
-        const { logAction } = require('./auditController');
-        await logAction(req.user.id, req.user.name, 'AGENT_DISCOUNT_SETTING_UPDATE', 'Global Rate', { defaultAgentDiscountRate: rate }, 'success', req);
-
-        res.json({ success: true, message: 'Global agent discount rate updated successfully', defaultAgentDiscountRate: rate });
-    } catch (e) {
-        res.status(500).json({ message: e.message });
-    }
-};
-
-const updateUserAgentDiscount = async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { agentDiscountRate } = req.body;
-
-        // Validation
-        if (agentDiscountRate !== null && agentDiscountRate !== undefined) {
-            const rate = Number(agentDiscountRate);
-            if (isNaN(rate) || rate < 0 || rate > 0.5) {
-                return res.status(400).json({ message: 'Invalid rate. Must be between 0 and 0.5 (0% - 50%)' });
-            }
-        }
-
-        const User = require('../models/User');
-        const user = await User.findByIdAndUpdate(id, { agentDiscountRate }, { new: true });
-        
-        if (!user) return res.status(404).json({ message: 'User not found' });
-
-        const { logAction } = require('./auditController');
-        await logAction(req.user.id, req.user.name, 'USER_AGENT_DISCOUNT_OVERRIDE', `User: ${user.name}`, { agentDiscountRate: user.agentDiscountRate }, 'success', req);
-
-        res.json({ success: true, message: 'User agent discount override updated successfully', agentDiscountRate: user.agentDiscountRate });
-    } catch (e) {
-        res.status(500).json({ message: e.message });
-    }
-};
+// --- Agent Settings (Step 3) - DEPRECATED in favor of Pricing Rules ---
 
 // --- Commission Profit-Share Caps (Step 5) ---
 const getCommissionCaps = async (req, res) => {
@@ -624,9 +565,6 @@ module.exports = {
     getCommissionSettings,
     updateCommissionSettings,
     updateUserCommissionRate,
-    getAgentSettings,
-    updateAgentSettings,
-    updateUserAgentDiscount,
     getCommissionCaps,
     updateCommissionCaps,
     adminCreditWallet,

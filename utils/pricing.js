@@ -8,37 +8,9 @@ const Setting = require('../models/Setting');
  * @returns {number} - The discounted price for agents, or base price for users
  */
 const calculateServicePrice = async (user, baseAmount, costPrice = baseAmount) => {
-    if (!user) return baseAmount;
-
-    // Check if user is an agent
-    const isAgent = user.role === 'agent' || (Array.isArray(user.roles) && user.roles.includes('agent'));
-
-    if (!isAgent) return baseAmount;
-
-    // Fetch Global Agent Discount Setting (In this context, this is a Margin Share Rate)
-    const discountSetting = await Setting.findOne({ key: 'defaultAgentDiscountRate' });
-    const globalRate = discountSetting ? Number(discountSetting.value) : 0;
-
-    // Resolve Final Margin-Share Rate
-    // Logic: User Override > Global Default > 0% Fallback
-    const rate = (user.agentDiscountRate !== undefined && user.agentDiscountRate !== null)
-        ? user.agentDiscountRate
-        : globalRate;
-
-    if (rate <= 0) return baseAmount;
-
-    // Calculate Margin
-    const margin = baseAmount - costPrice;
-    if (margin <= 0) return baseAmount; // No margin to share
-
-    // Apply discount against the MARGIN, not the principal baseAmount
-    const marginDiscount = margin * rate;
-    const discountedPrice = baseAmount - marginDiscount;
-
-    // Double-check: Ensure discounted price never drops below costPrice
-    const safeDiscountedPrice = Math.max(discountedPrice, costPrice);
-    
-    return Math.round(safeDiscountedPrice * 100) / 100; // Round to 2 decimal places
+    // Legacy agentDiscountRate logic removed in favor of Pricing Rules.
+    // This fallback now returns the base price.
+    return baseAmount;
 };
 
 /**

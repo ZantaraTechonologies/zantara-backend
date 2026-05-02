@@ -256,10 +256,7 @@ const getAdminEarningsAnalytics = async (req, res) => {
             // Skipped Count
             WalletLedger.countDocuments({ source: 'REFERRAL_SKIPPED', ...dateFilter }),
             // Caps Settings
-            Promise.all([
-                Setting.findOne({ key: 'maxReferralProfitShare' }),
-                Setting.findOne({ key: 'maxAgentReferralShare' })
-            ])
+            Setting.findOne({ key: 'maxReferralProfitShare' })
         ]);
 
         // 3. Top Performers (Dynamic with Filters)
@@ -354,8 +351,7 @@ const getAdminEarningsAnalytics = async (req, res) => {
                     topReferrers
                 },
                 caps: {
-                    maxReferralProfitShare: caps[0] ? Number(caps[0].value) : 0.9,
-                    maxAgentReferralShare: caps[1] ? Number(caps[1].value) : 0.5
+                    maxReferralProfitShare: caps ? Number(caps.value) : 0.9
                 },
                 history: paginatedHistory,
                 pagination: {

@@ -22,7 +22,6 @@ const userSchema = new mongoose.Schema({
     referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     myReferralCode: String,
     commissionRate: { type: Number, min: 0, max: 0.1 },
-    agentDiscountRate: { type: Number, min: 0, max: 0.5 },
     totalReferralBonus: { type: Number, default: 0 },
     referralBalance: { type: Number, default: 0 },
     firstFundingBonusProcessed: { type: Boolean, default: false },
