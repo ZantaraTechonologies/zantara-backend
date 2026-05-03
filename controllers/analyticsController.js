@@ -99,21 +99,41 @@ const getUserEarningsSummary = async (req, res) => {
             WalletLedger.countDocuments({ userId, source: 'REFERRAL_SKIPPED' }),
             // 4. Total Referrals Count
             User.countDocuments({ referredBy: userId }),
-            // 5. Agent Profit: sum of (retailPrice - salePrice) from their own purchases
-            //    pricingSnapshot.savings holds this per-transaction value
+            // 5. Agent Profit: sum savings per transaction.
+            //    Uses pricingSnapshot.savings if present, else falls back to retailPrice - salePrice
             isAgent ? Transaction.aggregate([
                 {
                     $match: {
                         userId: new mongoose.Types.ObjectId(userId),
                         status: 'success',
-                        type: { $nin: ['referral_bonus', 'referral_redeem', 'wallet_funding'] },
-                        'pricingSnapshot.savings': { $gt: 0 }
+                        type: { $nin: ['referral_bonus', 'referral_redeem', 'wallet_funding', 'share_purchase'] },
+                        pricingSnapshot: { $exists: true }
+                    }
+                },
+                {
+                    $addFields: {
+                        effectiveSavings: {
+                            $max: [
+                                { $ifNull: ['$pricingSnapshot.savings', 0] },
+                                {
+                                    $max: [
+                                        0,
+                                        {
+                                            $subtract: [
+                                                { $ifNull: ['$pricingSnapshot.retailPrice', 0] },
+                                                { $ifNull: ['$pricingSnapshot.salePrice', 0] }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
                     }
                 },
                 {
                     $group: {
                         _id: null,
-                        agentProfit: { $sum: '$pricingSnapshot.savings' },
+                        agentProfit: { $sum: '$effectiveSavings' },
                         totalTxCount: { $sum: 1 }
                     }
                 }
@@ -171,8 +191,8 @@ const getUserEarningsHistory = async (req, res) => {
             agentTxs = await Transaction.find({
                 userId,
                 status: 'success',
-                type: { $nin: ['referral_bonus', 'referral_redeem', 'wallet_funding'] },
-                'pricingSnapshot.savings': { $gt: 0 }
+                type: { $nin: ['referral_bonus', 'referral_redeem', 'wallet_funding', 'share_purchase'] },
+                pricingSnapshot: { $exists: true }
             })
                 .sort({ createdAt: -1 })
                 .limit(200);
@@ -199,19 +219,24 @@ const getUserEarningsHistory = async (req, res) => {
                 createdAt: t.createdAt,
                 status: 'success'
             })),
-            ...agentTxs.map(t => ({
-                id: t._id,
-                type: 'agent_profit',
-                amount: t.pricingSnapshot?.savings || 0,
-                service: t.type,
-                serviceId: t.service,
-                refId: t.refId || t.transactionId,
-                transactionId: t.transactionId,
-                salePrice: t.amount,
-                retailPrice: t.pricingSnapshot?.retailPrice,
-                createdAt: t.createdAt,
-                status: 'success'
-            })),
+            ...agentTxs.map(t => {
+                const savings = t.pricingSnapshot?.savings > 0
+                    ? t.pricingSnapshot.savings
+                    : Math.max(0, (t.pricingSnapshot?.retailPrice || 0) - (t.pricingSnapshot?.salePrice || 0));
+                return {
+                    id: t._id,
+                    type: 'agent_profit',
+                    amount: savings,
+                    service: t.type,
+                    serviceId: t.service,
+                    refId: t.refId || t.transactionId,
+                    transactionId: t.transactionId,
+                    salePrice: t.amount,
+                    retailPrice: t.pricingSnapshot?.retailPrice,
+                    createdAt: t.createdAt,
+                    status: 'success'
+                };
+            }),
             ...skippedLogs.map(l => ({
                 id: l._id,
                 type: 'referral_skipped',
