@@ -4,17 +4,7 @@ const { submitKyc, getMyKyc, getAllKyc, reviewKyc } = require('../controllers/ky
 const { verifyJWT, checkRoles } = require('../middlewares/auth');
 const { kycLimiter } = require('../middlewares/limiter');
 const multer = require('multer');
-const path = require('path');
-
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, 'uploads/kyc/');
-    },
-    filename: (req, file, cb) => {
-        cb(null, `${req.user.id}-${Date.now()}${path.extname(file.originalname)}`);
-    }
-});
-
+const { storage } = require('../utils/cloudinary');
 const upload = multer({ storage });
 
 // User Routes
