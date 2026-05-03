@@ -50,6 +50,16 @@ const getAllKyc = async (req, res) => {
     }
 };
 
+const getKycById = async (req, res) => {
+    try {
+        const kyc = await Kyc.findById(req.params.id).populate('userId', 'name email phone');
+        if (!kyc) return sendResponse(res, { status: 404, success: false, message: 'KYC not found' });
+        return sendResponse(res, { data: kyc });
+    } catch (err) {
+        return sendResponse(res, { status: 500, success: false, message: err.message });
+    }
+};
+
 const reviewKyc = async (req, res) => {
     try {
         const { id } = req.params;
@@ -100,4 +110,4 @@ const reviewKyc = async (req, res) => {
     }
 };
 
-module.exports = { submitKyc, getMyKyc, getAllKyc, reviewKyc };
+module.exports = { submitKyc, getMyKyc, getAllKyc, getKycById, reviewKyc };

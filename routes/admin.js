@@ -18,7 +18,7 @@ const {
     exportUsersCSV,
     getPricingIntegrityReport
 } = require('../controllers/adminController')
-const { getAllKyc, reviewKyc } = require('../controllers/kycController')
+const { getAllKyc, getKycById, reviewKyc } = require('../controllers/kycController')
 const serviceController = require('../controllers/serviceController')
 const providerController = require('../controllers/providerController')
 const adminSettingController = require('../controllers/adminSettingController')
@@ -35,6 +35,7 @@ router.get('/transactions/:id', (req, res, next) => {
 })
 
 // KYC Admin Routes
+router.get('/kyc/:id', verifyJWT, checkRoles('admin', 'superAdmin'), getKycById)
 router.get('/kyc/queue', verifyJWT, checkRoles('admin', 'superAdmin'), getAllKyc)
 router.post('/kyc/approve/:id', verifyJWT, checkRoles('admin', 'superAdmin'), (req, res, next) => {
     req.body.status = 'approved';
