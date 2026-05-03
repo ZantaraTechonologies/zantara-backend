@@ -35,8 +35,8 @@ router.get('/transactions/:id', (req, res, next) => {
 })
 
 // KYC Admin Routes
-router.get('/kyc/:id', verifyJWT, checkRoles('admin', 'superAdmin'), getKycById)
 router.get('/kyc/queue', verifyJWT, checkRoles('admin', 'superAdmin'), getAllKyc)
+router.get('/kyc/:id', verifyJWT, checkRoles('admin', 'superAdmin'), getKycById)
 router.post('/kyc/approve/:id', verifyJWT, checkRoles('admin', 'superAdmin'), (req, res, next) => {
     req.body.status = 'approved';
     reviewKyc(req, res, next);

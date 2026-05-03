@@ -43,7 +43,10 @@ const getMyKyc = async (req, res) => {
 // Admin Endpoints
 const getAllKyc = async (req, res) => {
     try {
-        const kycList = await Kyc.find().populate('userId', 'name email').sort({ createdAt: -1 });
+        const { status } = req.query;
+        const query = status ? { status } : {};
+        
+        const kycList = await Kyc.find(query).populate('userId', 'name email').sort({ createdAt: -1 });
         return sendResponse(res, { data: kycList });
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: err.message });
