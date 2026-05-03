@@ -9,6 +9,8 @@ const submitKyc = async (req, res) => {
         const userId = req.user.id;
         const documentImage = req.file ? req.file.path : null;
 
+        console.log('KYC Submission:', { tier, documentType, documentNumber, userId, hasImage: !!req.file });
+
         if (!tier || !documentType || !documentNumber) {
             return sendResponse(res, { status: 400, success: false, message: 'Missing required fields' });
         }
@@ -24,6 +26,7 @@ const submitKyc = async (req, res) => {
 
         return sendResponse(res, { message: 'KYC submitted successfully and is pending review', data: kyc });
     } catch (err) {
+        console.error('KYC Submission Error:', err);
         return sendResponse(res, { status: 500, success: false, message: err.message });
     }
 };
