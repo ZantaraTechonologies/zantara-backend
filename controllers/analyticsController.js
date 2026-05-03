@@ -83,8 +83,11 @@ const getUserEarningsSummary = async (req, res) => {
     try {
         const userId = req.user.id;
         const WalletLedger = require('../models/WalletLedger');
+        const user = await User.findById(userId).select('role referralBalance myReferralCode');
 
-        const [referralStats, cappedCount, skippedCount, totalReferrals, userDoc] = await Promise.all([
+        const isAgent = user?.role === 'agent';
+
+        const [referralStats, cappedCount, skippedCount, totalReferrals, agentStats] = await Promise.all([
             // 1. Referral Commissions
             Transaction.aggregate([
                 { $match: { userId: new mongoose.Types.ObjectId(userId), type: 'referral_bonus', status: 'success' } },
@@ -96,20 +99,40 @@ const getUserEarningsSummary = async (req, res) => {
             WalletLedger.countDocuments({ userId, source: 'REFERRAL_SKIPPED' }),
             // 4. Total Referrals Count
             User.countDocuments({ referredBy: userId }),
-            // 5. User Doc for referralBalance and myReferralCode
-            User.findById(userId).select('referralBalance myReferralCode')
+            // 5. Agent Profit: sum of (retailPrice - salePrice) from their own purchases
+            //    pricingSnapshot.savings holds this per-transaction value
+            isAgent ? Transaction.aggregate([
+                {
+                    $match: {
+                        userId: new mongoose.Types.ObjectId(userId),
+                        status: 'success',
+                        type: { $nin: ['referral_bonus', 'referral_redeem', 'wallet_funding'] },
+                        'pricingSnapshot.savings': { $gt: 0 }
+                    }
+                },
+                {
+                    $group: {
+                        _id: null,
+                        agentProfit: { $sum: '$pricingSnapshot.savings' },
+                        totalTxCount: { $sum: 1 }
+                    }
+                }
+            ]) : Promise.resolve([])
         ]);
 
         const referralEarnings = referralStats.length > 0 ? referralStats[0].total : 0;
+        const agentProfit = agentStats.length > 0 ? agentStats[0].agentProfit : 0;
+        const totalEarnings = referralEarnings + agentProfit;
 
         res.json({
             success: true,
             data: {
                 referralEarnings,
-                totalEarnings: referralEarnings,
+                agentProfit,
+                totalEarnings,
                 totalReferrals,
-                referralBalance: userDoc ? userDoc.referralBalance : 0,
-                myReferralCode: userDoc ? userDoc.myReferralCode : null,
+                referralBalance: user ? user.referralBalance : 0,
+                myReferralCode: user ? user.myReferralCode : null,
                 cappedCommissionsCount: cappedCount,
                 skippedCommissionsCount: skippedCount
             }
@@ -127,8 +150,10 @@ const getUserEarningsHistory = async (req, res) => {
         const skip = (page - 1) * limit;
 
         const WalletLedger = require('../models/WalletLedger');
+        const user = await User.findById(userId).select('role');
+        const isAgent = user?.role === 'agent';
 
-        // 1. Fetch relevant Transactions (Bonuses, Agent Profits, & Redemptions)
+        // 1. Fetch referral transactions
         const historyTxs = await Transaction.find({
             userId,
             status: 'success',
@@ -138,9 +163,22 @@ const getUserEarningsHistory = async (req, res) => {
             ]
         })
             .sort({ createdAt: -1 })
-            .limit(200); // Fetch a reasonable chunk for merging
+            .limit(200);
 
-        // 2. Fetch relevant WalletLedger (Skipped Commissions)
+        // 2. Fetch agent's own purchase transactions (if agent)
+        let agentTxs = [];
+        if (isAgent) {
+            agentTxs = await Transaction.find({
+                userId,
+                status: 'success',
+                type: { $nin: ['referral_bonus', 'referral_redeem', 'wallet_funding'] },
+                'pricingSnapshot.savings': { $gt: 0 }
+            })
+                .sort({ createdAt: -1 })
+                .limit(200);
+        }
+
+        // 3. Fetch skipped commissions from ledger
         const skippedLogs = await WalletLedger.find({
             userId,
             source: 'REFERRAL_SKIPPED'
@@ -148,16 +186,29 @@ const getUserEarningsHistory = async (req, res) => {
             .sort({ createdAt: -1 })
             .limit(200);
 
-        // 3. Format and Merge
+        // 4. Format and Merge
         const formattedHistory = [
             ...historyTxs.map(t => ({
                 id: t._id,
                 type: t.type === 'referral_bonus' ? 'referral_bonus' : 'referral_redeem',
-                amount: t.type === 'referral_bonus' ? (t.amount || 0) : (t.amount || 0),
+                amount: t.amount || 0,
                 refId: t.refId || t.transactionId,
                 transactionId: t.transactionId,
                 wasCapped: t.details ? t.details.wasCapped : false,
                 buyerRole: t.userRole || (t.details ? t.details.buyerRole : 'user'),
+                createdAt: t.createdAt,
+                status: 'success'
+            })),
+            ...agentTxs.map(t => ({
+                id: t._id,
+                type: 'agent_profit',
+                amount: t.pricingSnapshot?.savings || 0,
+                service: t.type,
+                serviceId: t.service,
+                refId: t.refId || t.transactionId,
+                transactionId: t.transactionId,
+                salePrice: t.amount,
+                retailPrice: t.pricingSnapshot?.retailPrice,
                 createdAt: t.createdAt,
                 status: 'success'
             })),
@@ -175,7 +226,7 @@ const getUserEarningsHistory = async (req, res) => {
             }))
         ];
 
-        // 4. Final Sort and Paginate
+        // 5. Final Sort and Paginate
         formattedHistory.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
         const total = formattedHistory.length;
