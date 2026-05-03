@@ -19,7 +19,9 @@ const storage = new CloudinaryStorage({
         allowed_formats: ['jpg', 'jpeg', 'png', 'pdf'],
         public_id: (req, file) => {
             const userId = req.user ? req.user.id : 'anonymous';
-            return `${userId}-${Date.now()}`;
+            const pid = `${userId}-${Date.now()}`;
+            console.log(`Cloudinary Upload Attempt: userId=${userId}, file=${file.originalname}, public_id=${pid}`);
+            return pid;
         }
     }
 });
