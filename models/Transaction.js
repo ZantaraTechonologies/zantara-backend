@@ -35,6 +35,8 @@ const transactionSchema = new mongoose.Schema({
         baseCostPrice: Number,
         rawSalePrice: Number, // Pre-rounded
         salePrice: Number,    // Final rounded
+        retailPrice: Number,  // Reference/standard price for comparison
+        savings: Number,      // retailPrice - salePrice (agent discount benefit)
         profit: Number,
         appliedPricingRuleId: { type: mongoose.Schema.Types.ObjectId, ref: 'PricingRule' },
         markupType: String,
