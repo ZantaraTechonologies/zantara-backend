@@ -5,11 +5,11 @@ const notificationService = require('../services/notification.service');
 
 const submitKyc = async (req, res) => {
     try {
-        const { tier, documentType, documentNumber } = req.body;
+        const { tier, documentType, documentNumber, address } = req.body;
         const userId = req.user.id;
         const documentImage = req.file ? req.file.path : null;
 
-        console.log('KYC Submission:', { tier, documentType, documentNumber, userId, hasImage: !!req.file });
+        console.log('KYC Submission:', { tier, documentType, documentNumber, address, userId, hasImage: !!req.file });
 
         if (!tier || !documentType || !documentNumber) {
             return sendResponse(res, { status: 400, success: false, message: 'Missing required fields' });
@@ -20,6 +20,7 @@ const submitKyc = async (req, res) => {
             tier,
             documentType,
             documentNumber,
+            address,
             documentImage,
             status: 'pending'
         });
