@@ -98,11 +98,16 @@ const webhook = async (req, res) => {
             const refId = data.paymentReference;
             const amountPaid = data.amountPaid;
             let userId = data.metaData?.userId;
+            const accountRef = data.accountReference || data.destinationAccountReference;
 
-            // If userId is missing (Reserved Account payment), find user by email
-            if (!userId && data.customer?.email) {
-                const user = await User.findOne({ email: data.customer.email.toLowerCase() });
-                if (user) userId = user._id;
+            // If userId is missing (Reserved Account payment), try to extract from accountReference or find by email
+            if (!userId) {
+                if (accountRef && accountRef.startsWith('VIRTUAL_')) {
+                    userId = accountRef.replace('VIRTUAL_', '');
+                } else if (data.customer?.email) {
+                    const user = await User.findOne({ email: data.customer.email.toLowerCase() });
+                    if (user) userId = user._id;
+                }
             }
 
             // Idempotency (TransactionStatus layer)

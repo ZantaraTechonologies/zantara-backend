@@ -80,7 +80,7 @@ async function createReservedAccount(user) {
     if (!user.email && !user.phone) throw new Error('Monnify Reserved: Email or Phone is required');
 
     const token = await getAccessToken();
-    const accountReference = `REF_${user._id}_${Date.now()}`;
+    const accountReference = `VIRTUAL_${user._id}`;
 
     const body = {
         accountReference: accountReference,
