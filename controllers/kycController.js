@@ -15,6 +15,12 @@ const submitKyc = async (req, res) => {
             return sendResponse(res, { status: 400, success: false, message: 'Missing required fields' });
         }
 
+        // ⬇️ Check for existing pending request
+        const existingPending = await Kyc.findOne({ userId, status: 'pending' });
+        if (existingPending) {
+            return sendResponse(res, { status: 400, success: false, message: 'You already have a verification request under review' });
+        }
+
         const kyc = await Kyc.create({
             userId,
             tier,
