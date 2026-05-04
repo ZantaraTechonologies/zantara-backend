@@ -9,6 +9,7 @@ const { sendEmail } = require('../utils/mailer')
 const { sendSMS } = require('../utils/sms')
 const notificationService = require('../services/notification.service')
 const ActivityLog = require('../models/ActivityLog')
+const { createReservedAccount } = require('../utils/monnify')
 
 const register = async (req, res) => {
     let { name, email, phone, password, referrerCode, referralCode, role } = req.body
@@ -70,6 +71,23 @@ const register = async (req, res) => {
         const user = await User.create(userData);
 
         await Wallet.create({ userId: user._id })
+
+        // Auto-generate Virtual Accounts (Monnify)
+        try {
+            const vaResult = await createReservedAccount(user);
+            if (vaResult.status) {
+                user.virtualAccounts = vaResult.accounts.map(acc => ({
+                    bankName: acc.bankName,
+                    accountName: acc.accountName,
+                    accountNumber: acc.accountNumber
+                }));
+                await user.save();
+                console.log(`Virtual accounts auto-generated for ${phone}`);
+            }
+        } catch (vaError) {
+            console.error(`Virtual account auto-generation failed for ${phone}:`, vaError.message);
+            // We don't block registration if VA generation fails
+        }
 
         await ActivityLog.create({ 
             userId: user._id, 

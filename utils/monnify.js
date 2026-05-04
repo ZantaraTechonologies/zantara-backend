@@ -76,4 +76,39 @@ async function initializePayment(email, amount, metadata = {}, reference) {
     }
 }
 
-module.exports = { initializePayment };
+async function createReservedAccount(user) {
+    if (!user.email && !user.phone) throw new Error('Monnify Reserved: Email or Phone is required');
+
+    const token = await getAccessToken();
+    const accountReference = `REF_${user._id}_${Date.now()}`;
+
+    const body = {
+        accountReference: accountReference,
+        accountName: user.name || 'Customer',
+        currencyCode: 'NGN',
+        contractCode: CONTRACT_CODE,
+        customerEmail: user.email || `${user.phone}@zantara.com`, // Fallback for email-less users
+        customerName: user.name || 'Customer',
+        getAllAvailableBanks: true
+    };
+
+    try {
+        const response = await axios.post(`${MONNIFY_BASE_URL}/api/v1/bank-transfer/reserved-accounts`, body, {
+            headers: { Authorization: `Bearer ${token}` }
+        });
+
+        if (response.data.requestSuccessful) {
+            return {
+                status: true,
+                accounts: response.data.responseBody.accounts, // Array of {bankCode, bankName, accountNumber}
+                accountReference: response.data.responseBody.accountReference
+            };
+        } else {
+            throw new Error(response.data.responseMessage);
+        }
+    } catch (error) {
+        throw new Error('Monnify Reserved Account Error: ' + (error.response?.data?.responseMessage || error.message));
+    }
+}
+
+module.exports = { initializePayment, createReservedAccount };
