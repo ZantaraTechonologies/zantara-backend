@@ -149,12 +149,26 @@ class VTPassAdapter extends BaseAdapter {
 
     async purchaseExamPin({ request_id, serviceID, variation_code, amount, quantity, phone, billersCode }) {
         try {
-            let finalServiceID = serviceID || (variation_code ? variation_code.split('-')[0] : '');
-            if (variation_code && variation_code.startsWith('utme')) {
+            let finalServiceID = (serviceID || '').toLowerCase();
+            
+            // Map common slugs to VTPass serviceIDs
+            if (finalServiceID.includes('waec') && finalServiceID.includes('registration')) {
+                finalServiceID = 'waec-registration';
+            } else if (finalServiceID.includes('waec')) {
+                finalServiceID = 'waec';
+            } else if (finalServiceID.includes('jamb')) {
                 finalServiceID = 'jamb';
+            } else if (finalServiceID.includes('neco')) {
+                finalServiceID = 'neco';
+            } else if (finalServiceID.includes('nabteb')) {
+                finalServiceID = 'nabteb';
             }
             
-            finalServiceID = finalServiceID.toLowerCase();
+            // Fallback to variation code prefix if still empty
+            if (!finalServiceID && variation_code) {
+                finalServiceID = variation_code.split('-')[0].toLowerCase();
+            }
+            
             const finalVarCode = (variation_code || '');
             
             const payload = { 
