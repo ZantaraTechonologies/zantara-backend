@@ -21,9 +21,9 @@ const register = async (req, res) => {
     if (email) email = email.trim().toLowerCase();
     if (phone) phone = phone.trim();
 
-    // Email is now optional, Phone is REQUIRED
-    if (!name || !phone || !password) {
-        return res.status(400).json({ message: "Name, phone and password are required" });
+    // Email, Phone, Name, and Password are REQUIRED
+    if (!name || !phone || !email || !password) {
+        return res.status(400).json({ message: "Name, email, phone and password are required" });
     }
 
     try {
