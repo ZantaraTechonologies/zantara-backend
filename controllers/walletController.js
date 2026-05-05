@@ -210,8 +210,23 @@ const transferMoney = async (req, res) => {
         if (!receiver) throw new Error('Recipient not found');
         if (receiver._id.toString() === senderId) throw new Error('Cannot transfer to yourself');
 
-        // 3. Fee Calculation (₦20 per ₦500 increment)
-        const fee = Math.ceil(amountNum / 500) * 20;
+        // 3. Fee Calculation
+        const settingsService = require('../services/settings.service');
+        const feeConfig = await settingsService.getSetting('TRANSFER_FEE_CONFIG', {
+            type: 'tiered',
+            increment: 500,
+            feePerIncrement: 20
+        });
+
+        let fee = 0;
+        if (feeConfig.type === 'tiered') {
+            fee = Math.ceil(amountNum / (feeConfig.increment || 500)) * (feeConfig.feePerIncrement || 20);
+        } else if (feeConfig.type === 'flat') {
+            fee = feeConfig.value || 0;
+        } else if (feeConfig.type === 'percentage') {
+            fee = (amountNum * (feeConfig.value || 0)) / 100;
+        }
+
         const totalDebit = amountNum + fee;
 
         const reference = 'TRF-' + Date.now();
