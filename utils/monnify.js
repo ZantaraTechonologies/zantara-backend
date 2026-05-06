@@ -111,4 +111,26 @@ async function createReservedAccount(user) {
     }
 }
 
-module.exports = { initializePayment, createReservedAccount };
+async function getReservedAccount(accountReference) {
+    const token = await getAccessToken();
+
+    try {
+        const response = await axios.get(`${MONNIFY_BASE_URL}/api/v1/bank-transfer/reserved-accounts/${accountReference}`, {
+            headers: { Authorization: `Bearer ${token}` }
+        });
+
+        if (response.data.requestSuccessful) {
+            return {
+                status: true,
+                accounts: response.data.responseBody.accounts,
+                accountReference: response.data.responseBody.accountReference
+            };
+        } else {
+            throw new Error(response.data.responseMessage);
+        }
+    } catch (error) {
+        throw new Error('Monnify Get Reserved Account Error: ' + (error.response?.data?.responseMessage || error.message));
+    }
+}
+
+module.exports = { initializePayment, createReservedAccount, getReservedAccount };

@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const TransactionStatus = require('../models/TransactionStatus');
 const Wallet = require('../models/Wallet');
 const { logTransaction } = require('../utils/transaction');
-const { initializePayment, createReservedAccount } = require('../utils/monnify');
+const { initializePayment, createReservedAccount, getReservedAccount } = require('../utils/monnify');
 const User = require('../models/User');
 
 const payment = async (req, res) => {
@@ -55,6 +55,36 @@ const generateVirtualAccounts = async (req, res) => {
         }
     } catch (err) {
         console.error('Generate Virtual Accounts Error:', err);
+        
+        // Handle "duplicate reference" by syncing existing accounts
+        if (err.message.includes('same reference')) {
+            try {
+                console.log(`Reference already exists. Syncing accounts for user: ${req.user.id}`);
+                const accountReference = `VIRTUAL_${req.user.id}`;
+                const syncResult = await getReservedAccount(accountReference);
+                
+                if (syncResult.status && syncResult.accounts) {
+                    const accounts = syncResult.accounts.map(acc => ({
+                        bankName: acc.bankName,
+                        accountName: acc.accountName,
+                        accountNumber: acc.accountNumber
+                    }));
+
+                    const user = await User.findById(req.user.id);
+                    user.virtualAccounts = accounts;
+                    await user.save();
+
+                    return res.json({ 
+                        message: 'Virtual accounts synced successfully', 
+                        accounts,
+                        synced: true 
+                    });
+                }
+            } catch (syncErr) {
+                console.error('Sync failed:', syncErr);
+            }
+        }
+
         res.status(500).json({ error: err.message });
     }
 };
