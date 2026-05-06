@@ -62,6 +62,7 @@ const generateVirtualAccounts = async (req, res) => {
                 console.log(`Reference already exists. Syncing accounts for user: ${req.user.id}`);
                 const accountReference = `VIRTUAL_${req.user.id}`;
                 const syncResult = await getReservedAccount(accountReference);
+                console.log(`Sync Result for ${accountReference}:`, JSON.stringify(syncResult));
                 
                 if (syncResult.status && syncResult.accounts) {
                     const accounts = syncResult.accounts.map(acc => ({

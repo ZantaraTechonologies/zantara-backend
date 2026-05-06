@@ -119,6 +119,8 @@ async function getReservedAccount(accountReference) {
             headers: { Authorization: `Bearer ${token}` }
         });
 
+        console.log(`Monnify Get Account Response for ${accountReference}:`, JSON.stringify(response.data));
+
         if (response.data.requestSuccessful) {
             return {
                 status: true,
