@@ -119,13 +119,25 @@ async function getReservedAccount(accountReference) {
             headers: { Authorization: `Bearer ${token}` }
         });
 
-        console.log(`Monnify Get Account Response for ${accountReference}:`, JSON.stringify(response.data));
-
         if (response.data.requestSuccessful) {
+            const body = response.data.responseBody;
+            let accounts = [];
+
+            if (body.accounts && Array.isArray(body.accounts)) {
+                accounts = body.accounts;
+            } else if (body.accountNumber) {
+                // Flattened single account response
+                accounts = [{
+                    bankCode: body.bankCode,
+                    bankName: body.bankName,
+                    accountNumber: body.accountNumber
+                }];
+            }
+
             return {
                 status: true,
-                accounts: response.data.responseBody.accounts,
-                accountReference: response.data.responseBody.accountReference
+                accounts,
+                accountReference: body.accountReference
             };
         } else {
             throw new Error(response.data.responseMessage);
