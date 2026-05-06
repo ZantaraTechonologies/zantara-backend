@@ -3,6 +3,7 @@ const Transaction = require('../models/Transaction')
 const Log = require('../models/Logs')
 const mongoose = require('mongoose')
 const { EVENTS } = require('../utils/pricingLogger')
+const notificationService = require('../services/notification.service');
 
 const getFilteredTransactions = async (req, res) => {
     try {
@@ -404,6 +405,13 @@ const adminCreditWallet = async (req, res) => {
             { amount: amountNum, reason, refId, newBalance: result.balance }
         );
 
+        await notificationService.sendInApp(userId, {
+            title: 'Wallet Credited',
+            message: `Your wallet has been credited with ₦${amountNum.toLocaleString()} by the administrator. Reason: ${reason}`,
+            type: 'system',
+            metadata: { transactionId: refId }
+        });
+
         res.json({
             success: true,
             message: `₦${amountNum.toLocaleString()} credited to ${targetUser.name}'s wallet`,
@@ -448,6 +456,13 @@ const adminDebitWallet = async (req, res) => {
             `User: ${targetUser.name} (${targetUser.phone})`,
             { amount: amountNum, reason, refId, newBalance: result.balance }
         );
+
+        await notificationService.sendInApp(userId, {
+            title: 'Wallet Debited',
+            message: `Your wallet was debited with ₦${amountNum.toLocaleString()} by the administrator. Reason: ${reason}`,
+            type: 'system',
+            metadata: { transactionId: refId }
+        });
 
         res.json({
             success: true,

@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 const Setting = require('../models/Setting');
+const notificationService = require('../services/notification.service');
 
 /**
  * Fetches all investment settings from the DB with safe defaults
@@ -132,6 +133,16 @@ const runDividendPayout = async () => {
 
         const totalPaid = txDocs.reduce((sum, t) => sum + t.amount, 0);
         console.log(`[DividendCron] ✅ SUCCESS: Paid ₦${totalPaid.toLocaleString()} to ${txDocs.length} shareholders for ${month}`);
+
+        // Notify all shareholders (Fire-and-forget push)
+        for (const tx of txDocs) {
+            notificationService.sendInApp(tx.userId, {
+                title: 'Dividend Paid! 📈',
+                message: `Your monthly dividend of ₦${tx.amount.toLocaleString()} for ${month} has been credited to your investment wallet.`,
+                type: 'investment',
+                metadata: { transactionId: tx.transactionId }
+            }).catch(err => console.error(`[DividendCron] Notification failed for ${tx.userId}:`, err.message));
+        }
 
         return { success: true, month, totalPaid, shareholders: txDocs.length };
     } catch (err) {

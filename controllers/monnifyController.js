@@ -130,7 +130,7 @@ const webhook = async (req, res) => {
                         title: 'Wallet Funded Successfully',
                         message: `Your wallet has been credited with ₦${amountPaid.toLocaleString()} via Bank Transfer.`,
                         type: 'transaction',
-                        metadata: { reference: refId }
+                        metadata: { transactionId: refId } // Mobile app can often resolve by refId if details lookup is smart
                     });
 
                     await logTransaction({
@@ -156,7 +156,7 @@ const webhook = async (req, res) => {
                         title: 'Wallet Funded Successfully',
                         message: `Your wallet has been credited with ₦${amountPaid.toLocaleString()} via Monnify.`,
                         type: 'transaction',
-                        metadata: { reference: refId }
+                        metadata: { transactionId: refId }
                     });
 
                     await logTransaction({

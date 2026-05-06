@@ -230,7 +230,7 @@ const webhook = async (req, res) => {
                              title: 'Wallet Funded Successfully',
                              message: `Your wallet has been credited with ₦${amountNaira.toLocaleString()} via Paystack.`,
                              type: 'transaction',
-                             metadata: { reference: refId }
+                             metadata: { transactionId: refId }
                         });
                     }
                     

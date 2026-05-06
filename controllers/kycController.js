@@ -31,6 +31,14 @@ const submitKyc = async (req, res) => {
             status: 'pending'
         });
 
+        // Notify user of successful submission
+        await notificationService.sendInApp(userId, {
+            title: 'KYC Documents Received',
+            message: 'Your verification documents have been received and are currently under review. Our team will notify you once processed.',
+            type: 'kyc',
+            metadata: { kycId: kyc._id, tier }
+        });
+
         return sendResponse(res, { message: 'KYC submitted successfully and is pending review', data: kyc });
     } catch (err) {
         console.error('KYC Submission Error:', err);

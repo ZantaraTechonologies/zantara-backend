@@ -6,6 +6,7 @@ const WalletLedger = require('../models/WalletLedger');
 const { logTransaction } = require('./transaction');
 const walletService = require('../services/wallet.service');
 const settingsService = require('../services/settings.service');
+const notificationService = require('../services/notification.service');
 
 /**
  * Note: processReferralBonus (Signup/First Funding Bonus) was removed 
@@ -183,6 +184,14 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
                 note: `Lifetime Commission (${buyerRole})`
             }
         }], { session });
+        
+        // Notify Referrer
+        await notificationService.sendInApp(referrer._id, {
+            title: 'Referral Commission Earned!',
+            message: `You earned ₦${commissionAmount.toLocaleString()} from ${user.name || user.phone}'s purchase.`,
+            type: 'referral',
+            metadata: { transactionId: commId }
+        });
 
         console.log(`[Referral] Lifetime commission of ${commissionAmount} credited to ${referrer.phone || referrer.email} (${wasCapped ? 'CAPPED' : 'FULL'})`);
         console.log("!!! COMPLETED processLifetimeCommission !!!");

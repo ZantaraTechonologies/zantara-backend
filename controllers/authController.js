@@ -70,6 +70,15 @@ const register = async (req, res) => {
 
         const user = await User.create(userData);
 
+        // Notify Referrer
+        if (referredBy) {
+            await notificationService.sendInApp(referredBy, {
+                title: 'New Network Member!',
+                message: `${user.name || user.phone} has joined your network using your referral link.`,
+                type: 'referral'
+            });
+        }
+
         await Wallet.create({ userId: user._id })
 
         // Auto-generate Virtual Accounts (Monnify)
@@ -161,6 +170,13 @@ const login = async (req, res) => {
 
         user.lastLogin = new Date();
         await user.save();
+
+        // Security notification for new login
+        await notificationService.sendInApp(user._id, {
+            title: 'Security Alert: New Login',
+            message: `A login was detected on your account from ${req.headers['user-agent']?.split(' ')[0] || 'Unknown Device'} (${req.ip}). If this wasn't you, secure your account immediately.`,
+            type: 'security'
+        });
 
         sendToken(user, res)
     } catch (error) {

@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const { runDividendPayout } = require('../utils/dividendCron');
 const investmentService = require('../services/investment.service');
 const Setting = require('../models/Setting');
+const notificationService = require('../services/notification.service');
 
 // ─────────────────────────────────────────────────────────────
 // HELPERS
@@ -142,6 +143,14 @@ exports.buyShares = async (req, res) => {
         const result = await investmentService.fulfillSharePurchase(userId, qty, refId, true, session);
 
         await session.commitTransaction();
+
+        // Notify user of successful share purchase
+        await notificationService.sendInApp(userId, {
+            title: 'Investment Successful 📈',
+            message: `You have successfully purchased ${qty} share${qty > 1 ? 's' : ''} in Zantara. Welcome to the board!`,
+            type: 'investment',
+            metadata: { sharesPurchased: qty, totalCost }
+        });
 
         res.json({
             success: true,
@@ -541,6 +550,18 @@ exports.processShareExit = async (req, res) => {
             req
         );
 
+        // Notify User
+        const statusMsg = action === 'approved' 
+            ? `Your share exit request of ${exitRequest.sharesRequested} shares has been approved. ₦${exitRequest.netAmount.toLocaleString()} has been added to your wallet.`
+            : `Your share exit request of ${exitRequest.sharesRequested} shares was rejected. ${adminNote ? 'Reason: ' + adminNote : ''}`;
+
+        await notificationService.sendInApp(exitRequest.userId, {
+            title: `Share Exit ${action.charAt(0).toUpperCase() + action.slice(1)}`,
+            message: statusMsg,
+            type: 'investment',
+            metadata: { exitRequestId: exitRequest._id }
+        });
+
         await session.commitTransaction();
         res.json({ success: true, message: `Exit request ${action}`, data: exitRequest });
     } catch (err) {
@@ -616,6 +637,18 @@ exports.processDividendWithdrawal = async (req, res) => {
                 `<p>Admin <b>${req.user.name}</b> approved a large investment withdrawal of <b>₦${withdrawal.amount.toLocaleString()}</b> for User ${withdrawal.userId}.</p>`
             );
         }
+
+        // Notify User
+        const statusMsg = action === 'approved'
+            ? `Your dividend withdrawal of ₦${withdrawal.amount.toLocaleString()} has been approved.`
+            : `Your dividend withdrawal of ₦${withdrawal.amount.toLocaleString()} was rejected. ${adminNote ? 'Reason: ' + adminNote : ''}`;
+
+        await notificationService.sendInApp(withdrawal.userId, {
+            title: `Withdrawal ${action.charAt(0).toUpperCase() + action.slice(1)}`,
+            message: statusMsg,
+            type: 'investment',
+            metadata: { withdrawalId: withdrawal._id }
+        });
 
         await session.commitTransaction();
         res.json({ success: true, message: `Withdrawal ${action}` });
