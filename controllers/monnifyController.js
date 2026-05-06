@@ -36,7 +36,7 @@ const generateVirtualAccounts = async (req, res) => {
 
         const result = await createReservedAccount(user);
         
-        if (result.status) {
+        if (result.status && result.accounts) {
             const accounts = result.accounts.map(acc => ({
                 bankName: acc.bankName,
                 accountName: acc.accountName,
@@ -47,6 +47,9 @@ const generateVirtualAccounts = async (req, res) => {
             await user.save();
 
             res.json({ message: 'Virtual accounts generated successfully', accounts });
+        } else if (result.status && !result.accounts) {
+            console.error('Monnify returned success but no accounts:', result);
+            res.status(500).json({ message: 'Monnify returned no accounts. Please try again later.' });
         } else {
             res.status(400).json({ message: 'Failed to generate virtual accounts' });
         }

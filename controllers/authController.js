@@ -84,7 +84,7 @@ const register = async (req, res) => {
         // Auto-generate Virtual Accounts (Monnify)
         try {
             const vaResult = await createReservedAccount(user);
-            if (vaResult.status) {
+            if (vaResult.status && vaResult.accounts) {
                 user.virtualAccounts = vaResult.accounts.map(acc => ({
                     bankName: acc.bankName,
                     accountName: acc.accountName,
