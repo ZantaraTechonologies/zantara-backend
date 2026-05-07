@@ -78,6 +78,10 @@ router.get('/providers/:id/balance', providerController.getProviderBalance)
 router.get('/settings/business', adminSettingController.getBusinessSettings)
 router.post('/settings/business', adminSettingController.updateBusinessSettings)
 
+// Notification Settings
+router.get('/settings/notifications', adminSettingController.getNotificationSettings)
+router.post('/settings/notifications', adminSettingController.updateNotificationSettings)
+
 // Normalized Hierarchy & Pricing Rules (Batch 3)
 router.get('/hierarchy/pricing-rules', adminHierarchyController.getPricingRules)
 router.post('/hierarchy/pricing-rules', adminHierarchyController.createPricingRule)

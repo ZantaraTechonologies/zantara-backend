@@ -8,9 +8,18 @@
  */
 
 const axios = require('axios');
+const settingsService = require('../services/settings.service');
 
-const sendSMS = async (phone, message) => {
+const sendSMS = async (phone, message, activityType = null) => {
     try {
+        if (activityType) {
+            const notificationSettings = await settingsService.getSetting('NOTIFICATION_SETTINGS', {});
+            if (notificationSettings?.sms && notificationSettings.sms[activityType] === false) {
+                console.log(`[SMS Skipped] Activity '${activityType}' is disabled by Admin.`);
+                return { success: true, message: 'SMS disabled by admin settings' };
+            }
+        }
+
         const TERMII_API_KEY = process.env.TERMII_API_KEY;
         const SENDER_ID = process.env.TERMII_SENDER_ID || "Zantara";
 

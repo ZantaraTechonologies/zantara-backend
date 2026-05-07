@@ -94,9 +94,9 @@ class NotificationService {
     /**
      * Send an email notification (Wrapper for existing mailer)
      */
-    async sendEmail(to, subject, html) {
+    async sendEmail(to, subject, html, activityType = null) {
         try {
-            await sendEmail(to, subject, html);
+            await sendEmail(to, subject, html, activityType);
         } catch (err) {
             console.error('Email notification error:', err.message);
         }
@@ -105,10 +105,10 @@ class NotificationService {
     /**
      * Send both in-app and email
      */
-    async notify(user, { title, message, type, metadata, emailHtml, emailSubject }) {
+    async notify(user, { title, message, type, metadata, emailHtml, emailSubject, activityType }) {
         await this.sendInApp(user._id, { title, message, type, metadata });
         if (user.email && emailHtml) {
-            await this.sendEmail(user.email, emailSubject || title, emailHtml);
+            await this.sendEmail(user.email, emailSubject || title, emailHtml, activityType);
         }
     }
 }

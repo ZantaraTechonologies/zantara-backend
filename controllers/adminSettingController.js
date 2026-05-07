@@ -42,3 +42,49 @@ exports.updateBusinessSettings = async (req, res) => {
         res.status(500).json({ success: false, message: error.message });
     }
 };
+
+exports.getNotificationSettings = async (req, res) => {
+    try {
+        const defaultSettings = {
+            sms: {
+                phone_verification: true,
+                password_reset: true,
+                change_pin: true,
+                change_password: true,
+                email_verification: true,
+                withdrawal_approved: true,
+                critical_system: true
+            },
+            email: {
+                phone_verification: true,
+                password_reset: true,
+                email_verification: true,
+                withdrawal_approved: true,
+                critical_system: true
+            }
+        };
+
+        const notificationSettings = await settingsService.getSetting('NOTIFICATION_SETTINGS', defaultSettings);
+        
+        res.json({
+            success: true,
+            data: notificationSettings
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+exports.updateNotificationSettings = async (req, res) => {
+    try {
+        const settings = req.body;
+        
+        await settingsService.bulkUpdate({
+            NOTIFICATION_SETTINGS: settings
+        });
+
+        res.json({ success: true, message: 'Notification settings updated successfully' });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};

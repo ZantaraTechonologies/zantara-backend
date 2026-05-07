@@ -276,7 +276,22 @@ const forgotPassword = async (req, res) => {
 
         await User.findByIdAndUpdate(user._id, { otp, otpExpires });
 
-        await sendSMS(user.phone, `Your Zantara password reset code is: ${otp}. Valid for 10 minutes.`);
+        await sendSMS(user.phone, `Your Zantara password reset code is: ${otp}. Valid for 10 minutes.`, 'password_reset');
+
+        if (user.email) {
+            const html = `
+                <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
+                    <h2>Password Reset Request</h2>
+                    <p>Hello ${user.name || 'User'},</p>
+                    <p>We received a request to reset your password. Your verification code is:</p>
+                    <h1 style="color: #136A63; letter-spacing: 5px;">${otp}</h1>
+                    <p>This code is valid for 10 minutes. If you did not request this, please ignore this email.</p>
+                    <br />
+                    <p>Regards,<br>The Zantara Team</p>
+                </div>
+            `;
+            await sendEmail(user.email, 'Your Zantara Password Reset Code', html, 'password_reset');
+        }
 
         // Also send as in-app notification (security fallback)
         await notificationService.sendInApp(user._id, {
@@ -374,7 +389,27 @@ const sendOTP = async (req, res) => {
 
         await User.findByIdAndUpdate(user._id, { otp, otpExpires });
 
-        await sendSMS(user.phone, `Your Zantara verification code is: ${otp}. Valid for 10 minutes.`);
+        // Map the incoming 'purpose' to the correct admin-controlled activityType toggle
+        const purpose = req.body?.purpose || 'phone_verification';
+        const validPurposes = ['phone_verification', 'change_pin', 'change_password'];
+        const activityType = validPurposes.includes(purpose) ? purpose : 'phone_verification';
+
+        await sendSMS(user.phone, `Your Zantara verification code is: ${otp}. Valid for 10 minutes.`, activityType);
+
+        if (user.email) {
+            const html = `
+                <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
+                    <h2>Verification Code</h2>
+                    <p>Hello ${user.name || 'User'},</p>
+                    <p>Your Zantara verification code is:</p>
+                    <h1 style="color: #136A63; letter-spacing: 5px;">${otp}</h1>
+                    <p>This code is valid for 10 minutes. Please do not share this code with anyone.</p>
+                    <br />
+                    <p>Regards,<br>The Zantara Team</p>
+                </div>
+            `;
+            await sendEmail(user.email, 'Your Zantara Verification Code', html, activityType);
+        }
 
         // Also send as in-app notification (security fallback)
         await notificationService.sendInApp(user._id, {
@@ -501,7 +536,11 @@ const sendEmailOTP = async (req, res) => {
                 <p>Regards,<br>The Zantara Team</p>
             </div>
         `;
-        await sendEmail(user.email, 'Your Zantara Verification Code', html);
+        await sendEmail(user.email, 'Your Zantara Verification Code', html, 'email_verification');
+
+        if (user.phone) {
+            await sendSMS(user.phone, `Your Zantara verification code is: ${emailOtp}. Valid for 10 minutes.`, 'email_verification');
+        }
 
         res.json({ success: true, message: 'OTP sent to email successfully' });
 

@@ -1,6 +1,15 @@
 const nodemailer = require('nodemailer')
+const settingsService = require('../services/settings.service');
 
-const sendEmail = async (to, subject, html) => {
+const sendEmail = async (to, subject, html, activityType = null) => {
+    if (activityType) {
+        const notificationSettings = await settingsService.getSetting('NOTIFICATION_SETTINGS', {});
+        if (notificationSettings?.email && notificationSettings.email[activityType] === false) {
+            console.log(`[Email Skipped] Activity '${activityType}' is disabled by Admin.`);
+            return null;
+        }
+    }
+
     const transporter = nodemailer.createTransport({
         host: 'smtp.gmail.com',
         port: 465,

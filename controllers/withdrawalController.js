@@ -2,6 +2,7 @@ const Withdrawal = require('../models/Withdrawal')
 const Wallet = require('../models/Wallet')
 const User = require('../models/User')
 const { sendEmail } = require('../utils/mailer')
+const { sendSMS } = require('../utils/sms')
 const notificationService = require('../services/notification.service')
 const walletService = require('../services/wallet.service')
 const { createTransferRecipient, initiateTransfer } = require('../utils/paystack')
@@ -148,8 +149,17 @@ const processWithdrawal = async (req, res) => {
         await sendEmail(
             user.email,
             `Withdrawal ${status.charAt(0).toUpperCase() + status.slice(1)}`,
-            `<p>Hello ${user.name},</p><p>${statusMsg}</p>`
+            `<p>Hello ${user.name},</p><p>${statusMsg}</p>`,
+            'withdrawal_approved'
         )
+
+        if (user.phone) {
+            await sendSMS(
+                user.phone,
+                statusMsg,
+                'withdrawal_approved'
+            );
+        }
 
         // ⬇️ Push/In-App Notification
         await notificationService.sendInApp(request.userId, {
