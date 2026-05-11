@@ -1,7 +1,11 @@
 const mongoose = require('mongoose');
 require('dotenv').config();
 
-const uri = process.env.MONGO_URI || "mongodb+srv://vtu_user:Ly8CYdv3ejYiGlyJ@vtu-backend.mb06ubwy.mongodb.net/?retryWrites=true&w=majority&appName=vtu-backend";
+const uri = process.env.MONGO_URI;
+if (!uri) {
+  console.error('MONGO_URI not found in environment variables');
+  process.exit(1);
+}
 
 mongoose.connect(uri)
   .then(async () => {

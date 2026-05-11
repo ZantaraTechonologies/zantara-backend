@@ -159,12 +159,29 @@ const webhook = async (req, res) => {
                 if (userId) {
                     await walletService.credit(userId, amountPaid, refId, 'funding');
                     
-                    await notificationService.sendInApp(userId, {
-                        title: 'Wallet Funded Successfully',
-                        message: `Your wallet has been credited with ₦${amountPaid.toLocaleString()} via Bank Transfer.`,
-                        type: 'transaction',
-                        metadata: { transactionId: refId } // Mobile app can often resolve by refId if details lookup is smart
-                    });
+                    const user = await User.findById(userId);
+                    if (user) {
+                        await notificationService.notify(user, {
+                            title: 'Wallet Funded Successfully',
+                            message: `Your wallet has been credited with ₦${amountPaid.toLocaleString()} via Bank Transfer.`,
+                            smsMessage: `Your Zantara wallet has been credited with ₦${amountPaid.toLocaleString()} via Bank Transfer. Ref: ${refId}`,
+                            emailSubject: 'Wallet Funded Successfully - Zantara',
+                            emailHtml: `
+                                <div style="font-family: sans-serif; padding: 20px;">
+                                    <h2>Wallet Funded</h2>
+                                    <p>Hello ${user.name || 'User'},</p>
+                                    <p>Your wallet has been credited with <b>₦${amountPaid.toLocaleString()}</b>.</p>
+                                    <p><b>Method:</b> Bank Transfer</p>
+                                    <p><b>Reference:</b> ${refId}</p>
+                                    <br>
+                                    <p>Thank you for choosing Zantara!</p>
+                                </div>
+                            `,
+                            type: 'transaction',
+                            activityType: 'wallet_funding',
+                            metadata: { transactionId: refId }
+                        });
+                    }
 
                     await logTransaction({
                         userId,
@@ -185,12 +202,29 @@ const webhook = async (req, res) => {
                 if (userId) {
                     await walletService.credit(userId, amountPaid, refId, 'funding');
                     
-                    await notificationService.sendInApp(userId, {
-                        title: 'Wallet Funded Successfully',
-                        message: `Your wallet has been credited with ₦${amountPaid.toLocaleString()} via Monnify.`,
-                        type: 'transaction',
-                        metadata: { transactionId: refId }
-                    });
+                    const user = await User.findById(userId);
+                    if (user) {
+                        await notificationService.notify(user, {
+                            title: 'Wallet Funded Successfully',
+                            message: `Your wallet has been credited with ₦${amountPaid.toLocaleString()} via Monnify.`,
+                            smsMessage: `Your Zantara wallet has been credited with ₦${amountPaid.toLocaleString()} via Monnify. Ref: ${refId}`,
+                            emailSubject: 'Wallet Funded Successfully - Zantara',
+                            emailHtml: `
+                                <div style="font-family: sans-serif; padding: 20px;">
+                                    <h2>Wallet Funded</h2>
+                                    <p>Hello ${user.name || 'User'},</p>
+                                    <p>Your wallet has been credited with <b>₦${amountPaid.toLocaleString()}</b>.</p>
+                                    <p><b>Method:</b> Monnify Online</p>
+                                    <p><b>Reference:</b> ${refId}</p>
+                                    <br>
+                                    <p>Thank you for choosing Zantara!</p>
+                                </div>
+                            `,
+                            type: 'transaction',
+                            activityType: 'wallet_funding',
+                            metadata: { transactionId: refId }
+                        });
+                    }
 
                     await logTransaction({
                         userId,

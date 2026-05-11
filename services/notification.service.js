@@ -1,6 +1,7 @@
 const Notification = require('../models/Notification');
 const User = require('../models/User');
 const { sendEmail } = require('../utils/mailer');
+const { sendSMS } = require('../utils/sms');
 const https = require('https');
 
 class NotificationService {
@@ -103,12 +104,31 @@ class NotificationService {
     }
 
     /**
-     * Send both in-app and email
+     * Send an SMS notification (Wrapper for existing SMS utility)
      */
-    async notify(user, { title, message, type, metadata, emailHtml, emailSubject, activityType }) {
+    async sendSMS(phone, message, activityType = null) {
+        try {
+            await sendSMS(phone, message, activityType);
+        } catch (err) {
+            console.error('SMS notification error:', err.message);
+        }
+    }
+
+    /**
+     * Send both in-app, email and SMS
+     */
+    async notify(user, { title, message, type, metadata, emailHtml, emailSubject, smsMessage, activityType }) {
+        // 1. In-App & Push
         await this.sendInApp(user._id, { title, message, type, metadata });
+
+        // 2. Email
         if (user.email && emailHtml) {
             await this.sendEmail(user.email, emailSubject || title, emailHtml, activityType);
+        }
+
+        // 3. SMS
+        if (user.phone && smsMessage) {
+            await this.sendSMS(user.phone, smsMessage, activityType);
         }
     }
 }

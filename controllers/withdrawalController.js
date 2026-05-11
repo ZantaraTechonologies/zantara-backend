@@ -1,8 +1,6 @@
 const Withdrawal = require('../models/Withdrawal')
 const Wallet = require('../models/Wallet')
 const User = require('../models/User')
-const { sendEmail } = require('../utils/mailer')
-const { sendSMS } = require('../utils/sms')
 const notificationService = require('../services/notification.service')
 const walletService = require('../services/wallet.service')
 const { createTransferRecipient, initiateTransfer } = require('../utils/paystack')
@@ -143,29 +141,29 @@ const processWithdrawal = async (req, res) => {
 
         const user = await User.findById(request.userId)
         const statusMsg = status === 'approved'
-            ? `Your withdrawal of ₦${request.amount} has been approved.`
-            : `Your withdrawal of ₦${request.amount} was rejected. Reason: ${adminNote}`
+            ? `Your withdrawal of ₦${request.amount.toLocaleString()} has been approved.`
+            : `Your withdrawal of ₦${request.amount.toLocaleString()} was rejected. Reason: ${adminNote}`
 
-        await sendEmail(
-            user.email,
-            `Withdrawal ${status.charAt(0).toUpperCase() + status.slice(1)}`,
-            `<p>Hello ${user.name},</p><p>${statusMsg}</p>`,
-            'withdrawal_approved'
-        )
+        const activityType = status === 'approved' ? 'withdrawal_approved' : 'withdrawal_rejected';
 
-        if (user.phone) {
-            await sendSMS(
-                user.phone,
-                statusMsg,
-                'withdrawal_approved'
-            );
-        }
-
-        // ⬇️ Push/In-App Notification
-        await notificationService.sendInApp(request.userId, {
+        await notificationService.notify(user, {
             title: `Withdrawal ${status.charAt(0).toUpperCase() + status.slice(1)}`,
             message: statusMsg,
+            smsMessage: `${statusMsg} Ref: ${request.reference || request._id}`,
+            emailSubject: `Withdrawal ${status.charAt(0).toUpperCase() + status.slice(1)} - Zantara`,
+            emailHtml: `
+                <div style="font-family: sans-serif; padding: 20px;">
+                    <h2>Withdrawal ${status.charAt(0).toUpperCase() + status.slice(1)}</h2>
+                    <p>Hello ${user.name},</p>
+                    <p>${statusMsg}</p>
+                    <p><b>Amount:</b> ₦${request.amount.toLocaleString()}</p>
+                    <p><b>Reference:</b> ${request.reference || request._id}</p>
+                    <br>
+                    <p>The Zantara Team</p>
+                </div>
+            `,
             type: 'transaction',
+            activityType,
             metadata: { withdrawalId: request._id }
         });
 

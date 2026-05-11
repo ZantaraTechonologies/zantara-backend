@@ -234,10 +234,26 @@ class PurchaseService {
 
             // Notify user of success (outside of session for performance)
 
-            await notificationService.sendInApp(userId, {
+            // Notify user of success (outside of session for performance)
+            await notificationService.notify(user, {
                 title: `${type.toUpperCase()} Purchase Successful`,
-                message: `Your purchase of ${serviceId} for ${finalAmount} was successful.`,
+                message: `Your purchase of ${serviceId} for ₦${finalAmount} was successful.`,
+                smsMessage: `Your ${type} purchase of ${serviceId} for ₦${finalAmount} was successful. Transaction ID: ${transaction.transactionId}`,
+                emailSubject: `${type.toUpperCase()} Purchase Successful - Zantara`,
+                emailHtml: `
+                    <div style="font-family: sans-serif; padding: 20px;">
+                        <h2>Purchase Successful</h2>
+                        <p>Hello ${user.name},</p>
+                        <p>Your purchase of <b>${serviceId}</b> was successful.</p>
+                        <p><b>Amount:</b> ₦${finalAmount}</p>
+                        <p><b>Transaction ID:</b> ${transaction.transactionId}</p>
+                        <p><b>Reference:</b> ${reference}</p>
+                        <br>
+                        <p>Thank you for using Zantara!</p>
+                    </div>
+                `,
                 type: 'transaction',
+                activityType: 'purchase_success',
                 metadata: { transactionId: transaction._id }
             });
 
@@ -251,10 +267,25 @@ class PurchaseService {
                     await refundService.processRefund(transaction._id, err.message);
 
                     // Notify user of failure
-                    await notificationService.sendInApp(userId, {
+                    // Notify user of failure
+                    await notificationService.notify(user, {
                         title: `${type.toUpperCase()} Purchase Failed`,
                         message: `Your purchase of ${serviceId} failed: ${err.message}. Your wallet has been refunded.`,
+                        smsMessage: `Your ${type} purchase of ${serviceId} failed. Your wallet has been refunded. Reason: ${err.message}`,
+                        emailSubject: `${type.toUpperCase()} Purchase Failed - Zantara`,
+                        emailHtml: `
+                            <div style="font-family: sans-serif; padding: 20px;">
+                                <h2 style="color: #e74c3c;">Purchase Failed</h2>
+                                <p>Hello ${user.name},</p>
+                                <p>Your purchase of <b>${serviceId}</b> failed.</p>
+                                <p><b>Reason:</b> ${err.message}</p>
+                                <p>Your wallet has been automatically refunded.</p>
+                                <br>
+                                <p>The Zantara Team</p>
+                            </div>
+                        `,
                         type: 'transaction',
+                        activityType: 'purchase_failed',
                         metadata: { transactionId: transaction._id }
                     });
                 } catch (refundErr) {

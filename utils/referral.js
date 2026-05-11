@@ -186,10 +186,24 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
         }], { session });
         
         // Notify Referrer
-        await notificationService.sendInApp(referrer._id, {
+        await notificationService.notify(referrer, {
             title: 'Referral Commission Earned!',
             message: `You earned ₦${commissionAmount.toLocaleString()} from ${user.name || user.phone}'s purchase.`,
+            smsMessage: `You earned ₦${commissionAmount.toLocaleString()} referral commission from ${user.name || user.phone}. Bal: ₦${referrer.referralBalance.toLocaleString()}`,
+            emailSubject: 'Referral Commission Earned - Zantara',
+            emailHtml: `
+                <div style="font-family: sans-serif; padding: 20px;">
+                    <h2>Commission Earned!</h2>
+                    <p>Hello ${referrer.name || 'Partner'},</p>
+                    <p>You have just earned a referral commission of <b>₦${commissionAmount.toLocaleString()}</b>.</p>
+                    <p><b>From:</b> ${user.name || user.phone}</p>
+                    <p><b>New Referral Balance:</b> ₦${referrer.referralBalance.toLocaleString()}</p>
+                    <br>
+                    <p>Keep sharing and keep earning!</p>
+                </div>
+            `,
             type: 'referral',
+            activityType: 'referral_commission',
             metadata: { transactionId: commId }
         });
 
