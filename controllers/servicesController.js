@@ -77,13 +77,6 @@ const purchaseAirtime = async (req, res) => {
             return sendResponse(res, { status: 400, success: false, message: result.message, error: result.error })
         }
 
-        await notificationService.sendInApp(userId, {
-            title: 'Airtime Purchase Successful',
-            message: `You successfully purchased ₦${amount} Airtime for ${finalPhone}.`,
-            type: 'transaction',
-            metadata: { type: 'airtime', network: finalNetwork, amount }
-        });
-
         return sendResponse(res, { message: 'Airtime sent successfully', data: result.data })
     } catch (err) {
 
@@ -159,13 +152,6 @@ const purchaseData = async (req, res) => {
         if (!result.success) {
             return sendResponse(res, { status: 400, success: false, message: result.message || 'Service provider currently unavailable', error: result.error })
         }
-        await notificationService.sendInApp(userId, {
-            title: 'Data Purchase Successful',
-            message: `Your data purchase for ${finalPhone} was successful.`,
-            type: 'transaction',
-            metadata: { type: 'data', amount, variation_code }
-        });
-
         return sendResponse(res, { message: 'Data purchase successful', data: result.data })
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: err.message || 'Server error', error: err })
@@ -431,13 +417,6 @@ const payElectricityBill = async (req, res) => {
         }
         const token = result.data?.token || result.data?.mainToken || '';
 
-        await notificationService.sendInApp(userId, {
-            title: 'Electricity Bill Paid',
-            message: `Electricity payment of ₦${amount} for ${finalMeterNumber} successful. ${token ? 'Token: ' + token : ''}`,
-            type: 'transaction',
-            metadata: { type: 'electricity', amount, token, meter: finalMeterNumber }
-        });
-
         return sendResponse(res, { message: 'Electricity bill paid successfully', data: result.data })
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: err.message || 'Server error', error: err })
@@ -507,13 +486,6 @@ const rechargeCable = async (req, res) => {
         if (!result.success) {
             return sendResponse(res, { status: 400, success: false, message: result.message || 'Service provider currently unavailable', error: result.error })
         }
-        await notificationService.sendInApp(userId, {
-            title: 'Cable Update',
-            message: `Cable TV subscription of ₦${amount} for ${finalBillersCode} successful.`,
-            type: 'transaction',
-            metadata: { type: 'cable', amount, decoder: finalBillersCode }
-        });
-
         return sendResponse(res, { message: 'Cable subscription successful', data: result.data })
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: err.message || 'Server error', error: err })
@@ -591,13 +563,6 @@ const purchaseExamPin = async (req, res) => {
             refId: result.data.transactionId,
             status: 'delivered'
         })
-
-        await notificationService.sendInApp(userId, {
-            title: 'Exam PIN Purchased',
-            message: `Verification PIN for ${variation_code} purchased successfully. PIN: ${result.data.token}`,
-            type: 'transaction',
-            metadata: { type: 'pin', service: variation_code, token: result.data.token }
-        });
 
         return sendResponse(res, {
             message: 'PIN purchased successfully',
