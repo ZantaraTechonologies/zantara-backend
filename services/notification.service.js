@@ -39,12 +39,22 @@ class NotificationService {
                 let chunks = '';
                 res.on('data', (c) => chunks += c);
                 res.on('end', () => {
-                    console.log(`[Push] Response: ${chunks}`);
-                    resolve(chunks);
+                    try {
+                        const response = JSON.parse(chunks);
+                        if (response.errors) {
+                            console.error(`[Push Error] Expo API returned errors:`, JSON.stringify(response.errors));
+                        } else {
+                            console.log(`[Push Success] Expo Response:`, JSON.stringify(response.data));
+                        }
+                        resolve(response);
+                    } catch (e) {
+                        console.log(`[Push] Raw Response: ${chunks}`);
+                        resolve(chunks);
+                    }
                 });
             });
             req.on('error', (e) => {
-                console.error('[Push] Network Error:', e.message);
+                console.error('[Push] Network Error (Possible Render Timeout):', e.message);
                 resolve(null);
             });
             req.write(payload);
@@ -130,6 +140,35 @@ class NotificationService {
         if (user.phone && smsMessage) {
             await this.sendSMS(user.phone, smsMessage, activityType);
         }
+    }
+
+    /**
+     * Diagnostic tool to verify backend configuration without exposing full secrets
+     */
+    async getDiagnostics() {
+        const mask = (str) => {
+            if (!str || str === 'mock') return 'NOT SET';
+            if (str.length < 8) return 'SET (Short)';
+            return `${str.substring(0, 4)}****${str.substring(str.length - 4)}`;
+        };
+
+        return {
+            push: {
+                provider: 'Expo',
+                host: 'exp.host'
+            },
+            email: {
+                user: process.env.MAIL_USER || 'NOT SET',
+                pass: process.env.MAIL_PASS ? 'PRESENT (Masked)' : 'MISSING',
+                host: 'smtp.gmail.com'
+            },
+            sms: {
+                provider: 'Termii',
+                apiKey: mask(process.env.TERMII_API_KEY),
+                senderId: process.env.TERMII_SENDER_ID || 'Zantara'
+            },
+            env: process.env.NODE_ENV || 'development'
+        };
     }
 }
 

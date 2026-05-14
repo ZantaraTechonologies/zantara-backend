@@ -183,6 +183,63 @@ const toggleBroadcastStatus = async (req, res) => {
     }
 };
 
+const getNotificationDiagnostics = async (req, res) => {
+    try {
+        const notificationService = require('../services/notification.service');
+        const stats = await notificationService.getDiagnostics();
+        
+        // Also check DB connectivity and user token stats
+        const usersWithToken = await User.countDocuments({ pushToken: { $ne: null, $regex: /^ExponentPushToken/ } });
+        const totalUsers = await User.countDocuments();
+        
+        return sendResponse(res, { 
+            data: { 
+                ...stats,
+                database: {
+                    totalUsers,
+                    usersWithPushTokens: usersWithToken
+                }
+            } 
+        });
+    } catch (err) {
+        return sendResponse(res, { status: 500, success: false, message: err.message });
+    }
+};
+
+const sendTestNotification = async (req, res) => {
+    try {
+        const { channel } = req.body; // 'all', 'push', 'sms', 'email'
+        const user = await User.findById(req.user.id);
+        const notificationService = require('../services/notification.service');
+
+        const testData = {
+            title: 'Zantara Test Alert',
+            message: `This is a test notification from Zantara sent at ${new Date().toLocaleTimeString()}.`,
+            type: 'system',
+            smsMessage: `Zantara Test: Your notification system is working! ${new Date().toLocaleTimeString()}`,
+            emailSubject: 'Zantara Notification Test',
+            emailHtml: `<h2>System Test</h2><p>This is a test email to verify your SMTP configuration is working correctly.</p><p>Sent at: ${new Date().toLocaleString()}</p>`,
+            activityType: 'critical_system' // Use a high-priority toggle
+        };
+
+        if (channel === 'push' || channel === 'all' || !channel) {
+            await notificationService.sendInApp(user._id, testData);
+        }
+
+        if ((channel === 'email' || channel === 'all') && user.email) {
+            await notificationService.sendEmail(user.email, testData.emailSubject, testData.emailHtml, testData.activityType);
+        }
+
+        if ((channel === 'sms' || channel === 'all') && user.phone) {
+            await notificationService.sendSMS(user.phone, testData.smsMessage, testData.activityType);
+        }
+
+        return sendResponse(res, { message: `Test initiated for channel: ${channel || 'all'}. Check your logs and device.` });
+    } catch (err) {
+        return sendResponse(res, { status: 500, success: false, message: err.message });
+    }
+};
+
 module.exports = { 
     getMyNotifications, 
     markAsRead, 
@@ -190,5 +247,7 @@ module.exports = {
     sendBroadcast,
     getAdminBroadcasts,
     deleteBroadcast,
-    toggleBroadcastStatus
+    toggleBroadcastStatus,
+    getNotificationDiagnostics,
+    sendTestNotification
 };
