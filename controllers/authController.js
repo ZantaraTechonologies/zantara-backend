@@ -608,12 +608,21 @@ const getReferralStats = async (req, res) => {
 const savePushToken = async (req, res) => {
     try {
         const { pushToken } = req.body;
+        console.log(`[Push Token Registration] User: ${req.user.id}, Token: ${pushToken}`);
+        
         if (!pushToken) {
             return res.status(400).json({ success: false, message: 'Push token is required' });
         }
+        
+        // Ensure it looks like a valid Expo token
+        if (!pushToken.startsWith('ExponentPushToken')) {
+            return res.status(400).json({ success: false, message: 'Invalid token format' });
+        }
+
         await User.findByIdAndUpdate(req.user.id, { pushToken });
         res.json({ success: true, message: 'Push token saved' });
     } catch (error) {
+        console.error('[Push Token Registration Error]:', error.message);
         res.status(500).json({ message: 'Error saving push token', error: error.message });
     }
 };
