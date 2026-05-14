@@ -1,5 +1,11 @@
 const nodemailer = require('nodemailer')
 const settingsService = require('../services/settings.service');
+const dns = require('dns');
+
+// Force IPv4 preference for all network calls in this process to fix ENETUNREACH on Render
+if (dns.setDefaultResultOrder) {
+    dns.setDefaultResultOrder('ipv4first');
+}
 
 const sendEmail = async (to, subject, html, activityType = null) => {
     if (activityType) {
@@ -12,16 +18,16 @@ const sendEmail = async (to, subject, html, activityType = null) => {
 
     const transporter = nodemailer.createTransport({
         host: 'smtp.gmail.com',
-        port: 465,
-        secure: true, // true for 465, false for other ports
+        port: 587,
+        secure: false, // Use TLS (false for 587, true for 465)
         auth: {
             user: process.env.MAIL_USER,
             pass: process.env.MAIL_PASS
         },
-        family: 4, // Force IPv4 to avoid ENETUNREACH on IPv6-enabled environments like Render
-        connectionTimeout: 10000, // 10 seconds
-        greetingTimeout: 5000,    // 5 seconds
-        socketTimeout: 10000,     // 10 seconds
+        family: 4, // Force IPv4
+        connectionTimeout: 10000,
+        greetingTimeout: 5000,
+        socketTimeout: 10000,
     })
 
     try {
