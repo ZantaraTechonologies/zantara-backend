@@ -179,6 +179,17 @@ const getAllWithdrawals = async (req, res) => {
     res.json({ success: true, data: requests })
 }
 
+// Admin views a specific withdrawal request
+const getWithdrawalById = async (req, res) => {
+    try {
+        const request = await Withdrawal.findById(req.params.id).populate('userId', 'name email phone status role')
+        if (!request) return res.status(404).json({ success: false, message: 'Withdrawal not found' })
+        res.json({ success: true, data: request })
+    } catch (err) {
+        res.status(500).json({ error: err.message })
+    }
+}
+
 // User views their own withdrawal history
 const getMyWithdrawals = async (req, res) => {
     const requests = await Withdrawal.find({ userId: req.user.id }).sort({ createdAt: -1 })
@@ -190,5 +201,6 @@ module.exports = {
     requestWithdrawal,
     processWithdrawal,
     getAllWithdrawals,
+    getWithdrawalById,
     getMyWithdrawals
 }
