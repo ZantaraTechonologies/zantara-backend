@@ -4,6 +4,7 @@ const User = require('../models/User')
 const notificationService = require('../services/notification.service')
 const walletService = require('../services/wallet.service')
 const { createTransferRecipient, initiateTransfer } = require('../utils/paystack')
+const { sendEmail } = require('../utils/mailer')
 
 // User requests withdrawal
 const requestWithdrawal = async (req, res) => {
