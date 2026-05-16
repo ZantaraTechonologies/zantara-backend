@@ -104,16 +104,16 @@ const processWithdrawal = async (req, res) => {
         // Ensure we use the totalDebit (Amount + 10% Fee)
         const totalDebit = request.totalDebit || (request.amount + (request.fee || 0));
 
-        if (status === 'approved') {
+        if (status === 'approve' || status === 'approved') {
             // Unfreeze and debit permanently via WalletService
             await walletService.unfreeze(request.userId, totalDebit, request.reference || request._id, 'withdrawal_approval')
             await walletService.debit(request.userId, totalDebit, request.reference || request._id, 'withdrawal_payout')
-        } else if (status === 'rejected') {
+        } else if (status === 'reject' || status === 'rejected') {
             // Return funds (unfreeze)
             await walletService.unfreeze(request.userId, totalDebit, request.reference || request._id, 'withdrawal_rejection')
         }
 
-        request.status = status === 'approved' ? 'completed' : 'rejected'
+        request.status = (status === 'approve' || status === 'approved') ? 'completed' : 'rejected'
         request.adminNote = adminNote
         request.processedAt = Date.now()
         await request.save()
@@ -132,7 +132,7 @@ const processWithdrawal = async (req, res) => {
             req
         );
 
-        if (status === 'approved' && request.amount >= 50000) {
+        if ((status === 'approve' || status === 'approved') && request.amount >= 50000) {
             await notifySuperAdmins(
                 `💰 Large Withdrawal Approved: ₦${request.amount.toLocaleString()}`,
                 `<p>Admin <b>${req.user.name}</b> approved a large withdrawal of <b>₦${request.amount.toLocaleString()}</b> for User ${request.userId}.</p>`
@@ -140,11 +140,11 @@ const processWithdrawal = async (req, res) => {
         }
 
         const user = await User.findById(request.userId)
-        const statusMsg = status === 'approved'
+        const statusMsg = (status === 'approve' || status === 'approved')
             ? `Your withdrawal of ₦${request.amount.toLocaleString()} has been approved.`
             : `Your withdrawal of ₦${request.amount.toLocaleString()} was rejected. Reason: ${adminNote}`
 
-        const activityType = status === 'approved' ? 'withdrawal_approved' : 'withdrawal_rejected';
+        const activityType = (status === 'approve' || status === 'approved') ? 'withdrawal_approved' : 'withdrawal_rejected';
 
         await notificationService.notify(user, {
             title: `Withdrawal ${status.charAt(0).toUpperCase() + status.slice(1)}`,
@@ -175,8 +175,17 @@ const processWithdrawal = async (req, res) => {
 
 // Admin views all withdrawal requests
 const getAllWithdrawals = async (req, res) => {
-    const requests = await Withdrawal.find().populate('userId', 'name email').sort({ createdAt: -1 })
-    res.json({ success: true, data: requests })
+    try {
+        const { status } = req.query;
+        let query = {};
+        if (status && status !== 'all') {
+            query.status = status;
+        }
+        const requests = await Withdrawal.find(query).populate('userId', 'name email').sort({ createdAt: -1 });
+        res.json({ success: true, data: requests });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 }
 
 // Admin views a specific withdrawal request
