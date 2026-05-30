@@ -15,13 +15,18 @@ router.get('/public', async (req, res) => {
             increment: 500,
             feePerIncrement: 20
         });
+        const withdrawalFeeConfig = await settingsService.getSetting('WITHDRAWAL_FEE_CONFIG', {
+            type: 'percentage',
+            value: 10
+        });
         
         res.json({
             success: true,
             data: {
                 SITE_NAME: siteName,
                 APP_LOCK_TIMEOUT_MINUTES: Number(appLockTimeout),
-                TRANSFER_FEE_CONFIG: transferFeeConfig
+                TRANSFER_FEE_CONFIG: transferFeeConfig,
+                WITHDRAWAL_FEE_CONFIG: withdrawalFeeConfig
             }
         });
     } catch (error) {

@@ -3,8 +3,24 @@ const Wallet = require('../models/Wallet')
 const User = require('../models/User')
 const notificationService = require('../services/notification.service')
 const walletService = require('../services/wallet.service')
+const settingsService = require('../services/settings.service')
 const { createTransferRecipient, initiateTransfer } = require('../utils/paystack')
 const { sendEmail } = require('../utils/mailer')
+
+/**
+ * Calculate withdrawal fee based on WITHDRAWAL_FEE_CONFIG setting.
+ * Mirrors the same logic used for TRANSFER_FEE_CONFIG in walletController.
+ */
+const calculateWithdrawalFee = (amount, feeConfig) => {
+    if (feeConfig.type === 'tiered') {
+        return Math.ceil(amount / (feeConfig.increment || 500)) * (feeConfig.feePerIncrement || 20);
+    } else if (feeConfig.type === 'flat') {
+        return feeConfig.value || 0;
+    } else if (feeConfig.type === 'percentage') {
+        return Math.round(amount * ((feeConfig.value || 10) / 100));
+    }
+    return 0;
+};
 
 // User requests withdrawal
 const requestWithdrawal = async (req, res) => {
@@ -34,8 +50,12 @@ const requestWithdrawal = async (req, res) => {
         
         const { bankName, accountNumber, accountName } = account;
 
-        // 3. Fee Calculation (10%)
-        const fee = Math.round(amount * 0.10);
+        // 3. Dynamic Fee Calculation from settings
+        const feeConfig = await settingsService.getSetting('WITHDRAWAL_FEE_CONFIG', {
+            type: 'percentage',
+            value: 10
+        });
+        const fee = calculateWithdrawalFee(amount, feeConfig);
         const totalDebit = amount + fee;
 
         // 4. Freeze the totalDebit via WalletService
@@ -61,7 +81,7 @@ const requestWithdrawal = async (req, res) => {
             `<p><b>New Withdrawal Request</b></p>
              <p>User: ${user.name} (${user.phone})</p>
              <p>Requested Amount: ₦${amount.toLocaleString()}</p>
-             <p>Service Fee (10%): ₦${fee.toLocaleString()}</p>
+             <p>Service Fee: ₦${fee.toLocaleString()} (${feeConfig.type === 'percentage' ? feeConfig.value + '%' : feeConfig.type === 'flat' ? 'flat' : `₦${feeConfig.feePerIncrement} per ₦${feeConfig.increment}`})</p>
              <p><b>Total Balance to Debit: ₦${totalDebit.toLocaleString()}</b></p>
              <hr>
              <p><b>Bank Details:</b></p>
@@ -102,7 +122,7 @@ const processWithdrawal = async (req, res) => {
             return res.status(400).json({ error: 'Invalid request or already processed' })
         }
 
-        // Ensure we use the totalDebit (Amount + 10% Fee)
+        // Use the stored totalDebit (amount + fee at time of request)
         const totalDebit = request.totalDebit || (request.amount + (request.fee || 0));
 
         if (status === 'approve' || status === 'approved') {

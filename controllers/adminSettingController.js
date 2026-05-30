@@ -10,6 +10,10 @@ exports.getBusinessSettings = async (req, res) => {
             increment: 500,
             feePerIncrement: 20
         });
+        const withdrawalFeeConfig = await settingsService.getSetting('WITHDRAWAL_FEE_CONFIG', {
+            type: 'percentage',
+            value: 10
+        });
         
         res.json({
             success: true,
@@ -17,7 +21,8 @@ exports.getBusinessSettings = async (req, res) => {
                 SITE_NAME: siteName,
                 REFERRAL_RATE: referralRate,
                 APP_LOCK_TIMEOUT_MINUTES: Number(appLockTimeout),
-                TRANSFER_FEE_CONFIG: transferFeeConfig
+                TRANSFER_FEE_CONFIG: transferFeeConfig,
+                WITHDRAWAL_FEE_CONFIG: withdrawalFeeConfig
             }
         });
     } catch (error) {
@@ -27,13 +32,14 @@ exports.getBusinessSettings = async (req, res) => {
 
 exports.updateBusinessSettings = async (req, res) => {
     try {
-        const { SITE_NAME, REFERRAL_RATE, APP_LOCK_TIMEOUT_MINUTES, TRANSFER_FEE_CONFIG } = req.body;
+        const { SITE_NAME, REFERRAL_RATE, APP_LOCK_TIMEOUT_MINUTES, TRANSFER_FEE_CONFIG, WITHDRAWAL_FEE_CONFIG } = req.body;
         
         const updates = {};
         if (SITE_NAME !== undefined) updates.SITE_NAME = SITE_NAME;
         if (REFERRAL_RATE !== undefined) updates.REFERRAL_COMMISSION_PERCENTAGE = Number(REFERRAL_RATE);
         if (APP_LOCK_TIMEOUT_MINUTES !== undefined) updates.APP_LOCK_TIMEOUT_MINUTES = Number(APP_LOCK_TIMEOUT_MINUTES);
         if (TRANSFER_FEE_CONFIG !== undefined) updates.TRANSFER_FEE_CONFIG = TRANSFER_FEE_CONFIG;
+        if (WITHDRAWAL_FEE_CONFIG !== undefined) updates.WITHDRAWAL_FEE_CONFIG = WITHDRAWAL_FEE_CONFIG;
 
         await settingsService.bulkUpdate(updates);
 
