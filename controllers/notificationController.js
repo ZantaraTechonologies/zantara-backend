@@ -16,10 +16,14 @@ const getMyNotifications = async (req, res) => {
             .lean();
             
         // Fetch active global broadcasts targeting this user's role (or 'all')
+        // NOTE: We must use $and to combine both $or conditions — having two $or keys
+        // in the same JS object causes the second to silently overwrite the first.
         const broadcasts = await Broadcast.find({
             active: true,
-            $or: [{ target: 'all' }, { target: userRole }],
-            $or: [{ expiresAt: { $exists: false } }, { expiresAt: null }, { expiresAt: { $gt: new Date() } }]
+            $and: [
+                { $or: [{ target: 'all' }, { target: userRole }] },
+                { $or: [{ expiresAt: { $exists: false } }, { expiresAt: null }, { expiresAt: { $gt: new Date() } }] }
+            ]
         })
         .sort({ createdAt: -1 })
         .limit(10)
