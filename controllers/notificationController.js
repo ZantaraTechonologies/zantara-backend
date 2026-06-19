@@ -88,7 +88,43 @@ const sendBroadcast = async (req, res) => {
         
         await broadcast.save();
 
-        // 🟢 Background task: Send emails if broadcast is critical
+        // 🔔 Background task: Send push notifications to all matching users (ALL broadcast types)
+        (async () => {
+            try {
+                const notificationService = require('../services/notification.service');
+
+                // Build role filter based on target
+                let roleFilter = {};
+                if (target === 'user') roleFilter = { role: 'user' };
+                else if (target === 'agent') roleFilter = { role: 'agent' };
+                // 'all' => no role filter
+
+                // Fetch all users who have a valid Expo push token
+                const usersWithToken = await User.find({
+                    ...roleFilter,
+                    pushToken: { $exists: true, $ne: null, $regex: /^ExponentPushToken/ }
+                }, 'pushToken name').lean();
+
+                const tokenCount = usersWithToken.length;
+                console.log(`[Broadcast Push] Sending push to ${tokenCount} users (target: ${target || 'all'}, type: ${type || 'info'})...`);
+
+                const pushPromises = usersWithToken.map(user =>
+                    notificationService.sendPush(user.pushToken, {
+                        title,
+                        body: message,
+                        data: { type: 'broadcast', broadcastType: type || 'info' },
+                        priority: (type === 'critical' || type === 'warning') ? 'high' : 'default',
+                    }).catch(err => console.error(`[Broadcast Push] Failed for user ${user._id}:`, err.message))
+                );
+
+                await Promise.allSettled(pushPromises);
+                console.log(`[Broadcast Push] Completed push dispatch to ${tokenCount} users.`);
+            } catch (err) {
+                console.error('[Broadcast Push] Global push dispatch error:', err);
+            }
+        })();
+
+        // 🟢 Background task: Send emails + SMS if broadcast is critical
         if (type === 'critical') {
             (async () => {
                 try {
@@ -100,7 +136,7 @@ const sendBroadcast = async (req, res) => {
                     }, 'email phone name').lean();
                     const count = users.length;
                     
-                    console.log(`[Critical Broadcast] Starting dispatch to ${count} users...`);
+                    console.log(`[Critical Broadcast] Starting email/SMS dispatch to ${count} users...`);
                     
                     for (const user of users) {
                         try {
@@ -122,14 +158,14 @@ const sendBroadcast = async (req, res) => {
                             console.error(`Failed to send broadcast to ${user.email || user.phone}:`, e.message);
                         }
                     }
-                    console.log(`[Critical Broadcast] Finished dispatch.`);
+                    console.log(`[Critical Broadcast] Finished email/SMS dispatch.`);
                 } catch (err) {
                     console.error('[Critical Broadcast] Global dispatch error:', err);
                 }
             })();
         }
 
-        return sendResponse(res, { data: broadcast, message: 'Broadcast initiated successfully' + (type === 'critical' ? ' and email dispatch started' : '') });
+        return sendResponse(res, { data: broadcast, message: 'Broadcast initiated successfully' + (type === 'critical' ? ' and email/SMS dispatch started' : ' and push notifications sent') });
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: err.message });
     }
