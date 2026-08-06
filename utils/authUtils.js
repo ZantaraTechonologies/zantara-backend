@@ -30,8 +30,8 @@ const cookieOpts = () => {
     };
 };
 
-const sendToken = (user, res, status = 200) => {
-    const token = generateToken(user);
+const sendToken = (user, res, status = 200, expiresIn = '7d') => {
+    const token = generateToken(user, expiresIn);
     res.cookie('token', token, cookieOpts());
 
     // return roles array to the client

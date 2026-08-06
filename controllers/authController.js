@@ -147,7 +147,7 @@ const verifyEmail = async (req, res) => {
 }
 
 const login = async (req, res) => {
-    let { identifier, email, phone, password } = req.body // Support 'identifier' or specific fields
+    let { identifier, email, phone, password, rememberMe } = req.body // Support 'identifier' or specific fields
 
     let loginId = (identifier || email || phone || "").trim().toLowerCase();
 
@@ -178,7 +178,7 @@ const login = async (req, res) => {
             type: 'security'
         });
 
-        sendToken(user, res)
+        sendToken(user, res, 200, rememberMe === true ? '30d' : '7d')
     } catch (error) {
         res.status(500).json({ message: 'Internal server error' })
     }
