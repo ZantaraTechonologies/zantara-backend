@@ -167,7 +167,8 @@ const processWithdrawal = async (req, res) => {
 
         const activityType = (status === 'approve' || status === 'approved') ? 'withdrawal_approved' : 'withdrawal_rejected';
 
-        await notificationService.notify(user, {
+        // Notify user — fire-and-forget so the admin response is not delayed by SMTP/SMS
+        notificationService.notify(user, {
             title: `Withdrawal ${status.charAt(0).toUpperCase() + status.slice(1)}`,
             message: statusMsg,
             smsMessage: `${statusMsg} Ref: ${request.reference || request._id}`,
@@ -186,6 +187,8 @@ const processWithdrawal = async (req, res) => {
             type: 'transaction',
             activityType,
             metadata: { withdrawalId: request._id }
+        }).catch(err => {
+            console.error('[Withdrawal Notification Background Error]', err.message);
         });
 
         res.json({ message: `Withdrawal ${status}`, request })

@@ -125,21 +125,33 @@ class NotificationService {
     }
 
     /**
-     * Send both in-app, email and SMS
+     * Notify a user via in-app, push, email and SMS.
+     *
+     * PERFORMANCE CONTRACT:
+     *   - In-app notification is persisted to DB before this method returns.
+     *   - Email and SMS are dispatched asynchronously (fire-and-forget).
+     *   - One failing channel never blocks or fails another channel.
+     *   - Callers receive control back as soon as the DB write finishes
+     *     (~10 ms), regardless of SMTP/SMS/push delivery time.
      */
     async notify(user, { title, message, type, metadata, emailHtml, emailSubject, smsMessage, activityType }) {
-        // 1. In-App & Push
+        // 1. In-App + Push — awaited because it is a fast local DB write.
+        //    Push is already fire-and-forget inside sendInApp().
         await this.sendInApp(user._id, { title, message, type, metadata });
 
-        // 2. Email
+        // 2. Email — fire-and-forget. DNS + SMTP can take 2-10 s.
         if (user.email && emailHtml) {
-            await this.sendEmail(user.email, emailSubject || title, emailHtml, activityType);
+            this.sendEmail(user.email, emailSubject || title, emailHtml, activityType)
+                .catch(err => console.error('[Notification] Email delivery error:', err.message));
         }
 
-        // 3. SMS
+        // 3. SMS — fire-and-forget. Termii HTTP call can take 1-5 s.
         if (user.phone && smsMessage) {
-            await this.sendSMS(user.phone, smsMessage, activityType);
+            this.sendSMS(user.phone, smsMessage, activityType)
+                .catch(err => console.error('[Notification] SMS delivery error:', err.message));
         }
+        // notify() returns here — immediately after in-app write, without
+        // waiting for email or SMS to complete.
     }
 
     /**

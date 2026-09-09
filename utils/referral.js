@@ -185,8 +185,9 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
             }
         }], { session });
         
-        // Notify Referrer
-        await notificationService.notify(referrer, {
+        // Notify Referrer — fire-and-forget so referral commission never blocks
+        // the parent purchase response. All accounting writes above are already done.
+        notificationService.notify(referrer, {
             title: 'Referral Commission Earned!',
             message: `You earned ₦${commissionAmount.toLocaleString()} from ${user.name || user.phone}'s purchase.`,
             smsMessage: `You earned ₦${commissionAmount.toLocaleString()} referral commission from ${user.name || user.phone}. Bal: ₦${referrer.referralBalance.toLocaleString()}`,
@@ -205,6 +206,8 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
             type: 'referral',
             activityType: 'referral_commission',
             metadata: { transactionId: commId }
+        }).catch(err => {
+            console.error('[Referral Notification Background Error]', err.message);
         });
 
         console.log(`[Referral] Lifetime commission of ${commissionAmount} credited to ${referrer.phone || referrer.email} (${wasCapped ? 'CAPPED' : 'FULL'})`);

@@ -161,7 +161,8 @@ const webhook = async (req, res) => {
                     
                     const user = await User.findById(userId);
                     if (user) {
-                        await notificationService.notify(user, {
+                        // Fire-and-forget — wallet is already credited above
+                        notificationService.notify(user, {
                             title: 'Wallet Funded Successfully',
                             message: `Your wallet has been credited with ₦${amountPaid.toLocaleString()} via Bank Transfer.`,
                             smsMessage: `Your Zantara wallet has been credited with ₦${amountPaid.toLocaleString()} via Bank Transfer. Ref: ${refId}`,
@@ -180,7 +181,7 @@ const webhook = async (req, res) => {
                             type: 'transaction',
                             activityType: 'wallet_funding',
                             metadata: { transactionId: refId }
-                        });
+                        }).catch(err => console.error('[Monnify Notification Background Error]', err.message));
                     }
 
                     await logTransaction({
@@ -204,7 +205,8 @@ const webhook = async (req, res) => {
                     
                     const user = await User.findById(userId);
                     if (user) {
-                        await notificationService.notify(user, {
+                        // Fire-and-forget — wallet is already credited above
+                        notificationService.notify(user, {
                             title: 'Wallet Funded Successfully',
                             message: `Your wallet has been credited with ₦${amountPaid.toLocaleString()} via Monnify.`,
                             smsMessage: `Your Zantara wallet has been credited with ₦${amountPaid.toLocaleString()} via Monnify. Ref: ${refId}`,
@@ -223,7 +225,7 @@ const webhook = async (req, res) => {
                             type: 'transaction',
                             activityType: 'wallet_funding',
                             metadata: { transactionId: refId }
-                        });
+                        }).catch(err => console.error('[Monnify Notification Background Error]', err.message));
                     }
 
                     await logTransaction({
