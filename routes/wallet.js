@@ -2,6 +2,7 @@ const express = require('express')
 const walletController = require('../controllers/walletController')
 const { verifyJWT } = require('../middlewares/auth')
 const { fundWallet, verifyFunding } = require('../controllers/walletFundingController')
+const { getFundingMethods } = require('../controllers/adminPaymentGatewayController')
 const { webhook } = require('../controllers/paystackController')
 
 const router = express.Router()
@@ -18,6 +19,7 @@ router.post('/transfer', verifyJWT, walletController.transferMoney)
 // Important: Paystack webhook must see raw body for signature
 router.post('/paystack/webhook', require('express').raw({ type: '*/*' }), webhook)
 
+router.get('/funding-methods', verifyJWT, getFundingMethods)
 router.post('/fund', verifyJWT, fundWallet)
 router.get('/verify', verifyJWT, verifyFunding)
 
