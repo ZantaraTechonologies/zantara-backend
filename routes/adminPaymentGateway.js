@@ -6,6 +6,7 @@ const { verifyJWT, checkRoles } = require('../middlewares/auth');
 const {
     getAllGateways,
     getGatewayById,
+    getAdapterCapabilities,
     createGateway,
     updateGateway,
     updateGatewayStatus,
@@ -19,6 +20,11 @@ const {
 // Read endpoints accessible to 'admin' and 'superAdmin'
 router.get('/', verifyJWT, checkRoles('admin', 'superAdmin'), getAllGateways);
 router.get('/reconciliation', verifyJWT, checkRoles('admin', 'superAdmin'), getReconciliationTransactions);
+
+// Capabilities endpoint: safe metadata only, no credentials
+// MUST be mounted before /:id to avoid param collision
+router.get('/capabilities', verifyJWT, checkRoles('admin', 'superAdmin'), getAdapterCapabilities);
+
 router.get('/:id', verifyJWT, checkRoles('admin', 'superAdmin'), getGatewayById);
 
 // Mutation endpoints strictly SUPERADMIN ONLY
@@ -30,3 +36,4 @@ router.post('/:id/test-connection', verifyJWT, checkRoles('superAdmin'), testGat
 router.delete('/:id', verifyJWT, checkRoles('superAdmin'), deleteGateway);
 
 module.exports = router;
+

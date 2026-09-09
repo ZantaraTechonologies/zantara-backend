@@ -7,6 +7,11 @@ const paymentGatewayService = require('../services/paymentGateway.service');
 const { sanitizePaymentGateway, sanitizePaymentGatewayForClient } = require('../utils/paymentGatewaySerializer');
 const { encryptSecret, isEncrypted } = require('../utils/crypto');
 const { logAction } = require('./auditController');
+const {
+    SUPPORTED_ADAPTER_CODES,
+    getAdapterSpec,
+    getPublicCapabilities
+} = require('../adapters/payment/paymentAdapterRegistry');
 
 /**
  * Ensures initial default payment gateways exist if the collection is empty.
@@ -168,11 +173,10 @@ const createGateway = async (req, res) => {
             });
         }
 
-        const validAdapters = ['paystack', 'monnify', 'flutterwave'];
-        if (!validAdapters.includes(adapterType.toLowerCase())) {
+        if (!SUPPORTED_ADAPTER_CODES.includes(adapterType.toLowerCase())) {
             return res.status(400).json({
                 success: false,
-                message: `Invalid adapterType '${adapterType}'. Must be one of: ${validAdapters.join(', ')}`
+                message: `Invalid adapterType '${adapterType}'. Must be one of: ${SUPPORTED_ADAPTER_CODES.join(', ')}`
             });
         }
 
@@ -187,13 +191,17 @@ const createGateway = async (req, res) => {
             });
         }
 
-        const validChannels = ['card', 'bank_transfer', 'ussd', 'virtual_account'];
-        const invalidChannels = supportedChannels.filter(c => !validChannels.includes(c));
-        if (invalidChannels.length > 0) {
-            return res.status(400).json({
-                success: false,
-                message: `Invalid channels: ${invalidChannels.join(', ')}. Allowed: ${validChannels.join(', ')}`
-            });
+        // Validate channels against adapter's declared supported channels
+        const adapterSpec = getAdapterSpec(adapterType.toLowerCase());
+        const adapterChannels = adapterSpec ? adapterSpec.supportedChannels : [];
+        if (supportedChannels.length > 0) {
+            const invalidChannels = supportedChannels.filter(c => !adapterChannels.includes(c));
+            if (invalidChannels.length > 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Channels [${invalidChannels.join(', ')}] are not supported by the '${adapterType}' adapter. Allowed: ${adapterChannels.join(', ')}`
+                });
+            }
         }
 
         if (isDefault && status !== 'active') {
@@ -290,11 +298,10 @@ const updateGateway = async (req, res) => {
 
         if (name && name.trim() !== '') gateway.name = name.trim();
         if (adapterType) {
-            const validAdapters = ['paystack', 'monnify', 'flutterwave'];
-            if (!validAdapters.includes(adapterType.toLowerCase())) {
+            if (!SUPPORTED_ADAPTER_CODES.includes(adapterType.toLowerCase())) {
                 return res.status(400).json({
                     success: false,
-                    message: `Invalid adapterType. Must be one of: ${validAdapters.join(', ')}`
+                    message: `Invalid adapterType. Must be one of: ${SUPPORTED_ADAPTER_CODES.join(', ')}`
                 });
             }
             gateway.adapterType = adapterType.toLowerCase();
@@ -305,13 +312,18 @@ const updateGateway = async (req, res) => {
         if (priority !== undefined) gateway.priority = Number(priority) || 1;
 
         if (supportedChannels !== undefined && Array.isArray(supportedChannels)) {
-            const validChannels = ['card', 'bank_transfer', 'ussd', 'virtual_account'];
-            const invalidChannels = supportedChannels.filter(c => !validChannels.includes(c));
-            if (invalidChannels.length > 0) {
-                return res.status(400).json({
-                    success: false,
-                    message: `Invalid channels: ${invalidChannels.join(', ')}`
-                });
+            // Validate channels against adapter's declared supported channels
+            const effectiveAdapter = (adapterType || gateway.adapterType || '').toLowerCase();
+            const adapterSpec = getAdapterSpec(effectiveAdapter);
+            const adapterChannels = adapterSpec ? adapterSpec.supportedChannels : [];
+            if (supportedChannels.length > 0 && adapterChannels.length > 0) {
+                const invalidChannels = supportedChannels.filter(c => !adapterChannels.includes(c));
+                if (invalidChannels.length > 0) {
+                    return res.status(400).json({
+                        success: false,
+                        message: `Channels [${invalidChannels.join(', ')}] are not supported by the '${effectiveAdapter}' adapter. Allowed: ${adapterChannels.join(', ')}`
+                    });
+                }
             }
             gateway.supportedChannels = supportedChannels;
         }
@@ -649,6 +661,24 @@ const getReconciliationTransactions = async (req, res) => {
 };
 
 /**
+ * GET /api/admin/payment-gateways/capabilities
+ * Returns the safe adapter capability registry — adapter codes, labels, supported channels,
+ * credential field descriptors, and metadata field descriptors.
+ * Does NOT expose any credentials, secrets, or configured values.
+ * Accessible to admin and superAdmin.
+ */
+const getAdapterCapabilities = async (req, res) => {
+    try {
+        res.json({
+            success: true,
+            data: getPublicCapabilities()
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+/**
  * GET /api/wallet/funding-methods
  * Client-facing endpoint returning all active payment gateways and enabled channels.
  */
@@ -666,6 +696,7 @@ module.exports = {
     ensureDefaultGateways,
     getAllGateways,
     getGatewayById,
+    getAdapterCapabilities,
     createGateway,
     updateGateway,
     updateGatewayStatus,
