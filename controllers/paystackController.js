@@ -99,164 +99,26 @@ const payment = async (req, res) => {
     }
 };
 
+const paymentGatewayService = require('../services/paymentGateway.service');
+
 const verifyTransaction = async (req, res) => {
     try {
         const { reference } = req.params;
-        const status = await TransactionStatus.findOne({ refId: reference, userId: req.user.id });
-        
-        if (!status) return res.status(404).json({ message: 'Transaction not found' });
-        
-        // Manual verification fallback
-        if (status.status === 'pending') {
-            const secret = process.env.PAYSTACK_SECRET_KEY;
-            try {
-                const verify = await axios.get(`${process.env.PAYSTACK_BASE_URL}/transaction/verify/${reference}`, {
-                    headers: { Authorization: `Bearer ${secret}` }
-                });
-
-                if (verify?.data?.data?.status === 'success') {
-                    const upd = await TransactionStatus.updateOne(
-                        { refId: reference, status: 'pending' },
-                        { $set: { status: 'success' } }
-                    );
-
-                    if (upd.modifiedCount === 1) {
-                        const meta = parseMetadata(verify.data.data.metadata);
-                        const amountNaira = verify.data.data.amount / 100;
-                        if (status.type === 'investment_buy') {
-                             const qty = Number(meta.qty);
-                             await investmentService.fulfillSharePurchase(req.user.id, qty, reference, false);
-                        } else {
-                             await walletService.credit(req.user.id, amountNaira, reference, 'funding');
-                        }
-                        
-                              await logTransaction({
-                                userId: req.user.id,
-                                refId: reference,
-                                type: status.type,
-                                service: 'Paystack',
-                                amount: amountNaira,
-                                status: 'success',
-                                response: verify.data.data
-                            });
-                        }
-                        status.status = 'success';
-                } else if (verify?.data?.data?.status === 'failed') {
-                    await TransactionStatus.updateOne({ refId: reference }, { $set: { status: 'failed' } });
-                    status.status = 'failed';
-                }
-            } catch (vErr) {
-                console.error('Manual fallback verification failed:', vErr.message);
-            }
-        }
-
+        const result = await paymentGatewayService.verifyFunding(reference);
         res.json({
-            success: true,
-            status: status.status, // 'pending', 'success', 'failed'
-            type: status.type
+            success: result.status === 'success',
+            status: result.status,
+            type: result.type
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 };
 
-const WebhookEvent = require('../models/WebhookEvent');
-const walletService = require('../services/wallet.service');
-const notificationService = require('../services/notification.service');
-
 const webhook = async (req, res) => {
     try {
-        const secret = process.env.PAYSTACK_SECRET_KEY;
-        const signature = req.headers['x-paystack-signature'];
-
-        const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '', 'utf8');
-        const expected = crypto.createHmac('sha512', secret).update(buf).digest('hex');
-        
-        if (expected !== signature) {
-            console.error('Paystack webhook signature mismatch');
-            return res.status(401).send('Invalid signature');
-        }
-
-        const eventData = JSON.parse(buf.toString('utf8'));
-        const eventId = eventData.data?.id || `PS_${eventData.data?.reference}_${Date.now()}`;
-
-        // 1. Idempotency Check (WebhookEvent layer)
-        const existingEvent = await WebhookEvent.findOne({ eventId });
-        if (existingEvent) {
-            console.log(`Paystack event ${eventId} already processed.`);
-            return res.sendStatus(200);
-        }
-
-        // 2. Store Event Intent
-        const webhookEvent = await WebhookEvent.create({
-            provider: 'paystack',
-            eventType: eventData.event,
-            eventId: eventId,
-            payload: eventData,
-            status: 'pending'
-        });
-
-        // 3. Process Logic
-        if (eventData.event === 'charge.success') {
-            const refId = eventData.data.reference;
-            const meta = parseMetadata(eventData.data.metadata);
-            const userId = meta.userId;
-            const amountNaira = eventData.data.amount / 100;
-
-            // Secondary verify with Paystack (Fintech Safety best practice)
-            const verify = await axios.get(`${process.env.PAYSTACK_BASE_URL}/transaction/verify/${refId}`, {
-                headers: { Authorization: `Bearer ${secret}` }
-            });
-
-            if (verify?.data?.data?.status === 'success') {
-                // Idempotency: only move PENDING -> SUCCESS once
-                const upd = await TransactionStatus.updateOne(
-                    { refId, status: 'pending' },
-                    { $set: { status: 'success' } }
-                );
-
-                if (upd.modifiedCount === 1) {
-                    if (userId) {
-                        // 4. Ledger-backed Credit or Fulfillment
-                        if (meta.type === 'investment_buy') {
-                             const qty = Number(meta.qty);
-                             await investmentService.fulfillSharePurchase(userId, qty, refId, false);
-                        } else {
-                             await walletService.credit(userId, amountNaira, refId, 'funding');
-                        }
-
-                        // Notify user of funding success
-                        await notificationService.sendInApp(userId, {
-                             title: 'Wallet Funded Successfully',
-                             message: `Your wallet has been credited with ₦${amountNaira.toLocaleString()} via Paystack.`,
-                             type: 'transaction',
-                             metadata: { transactionId: refId }
-                        });
-                    }
-                    
-                    await logTransaction({
-                        userId,
-                        refId,
-                        type: meta.type || 'funding',
-                        service: 'Paystack',
-                        amount: amountNaira,
-                        status: 'success',
-                        response: verify.data.data
-                    });
-                }
-            } else {
-                webhookEvent.status = 'failed';
-                webhookEvent.errorMessage = 'Paystack manual verify failed';
-                await webhookEvent.save();
-                return res.sendStatus(200); 
-            }
-        }
-
-        // 4. Mark Event as Processed
-        webhookEvent.status = 'processed';
-        await webhookEvent.save();
-
-        return res.sendStatus(200);
+        const result = await paymentGatewayService.routeWebhook('paystack', req);
+        return res.status(result.status || 200).send(result.message || 'OK');
     } catch (e) {
         console.error('Paystack webhook error:', e);
         return res.sendStatus(500);
@@ -268,3 +130,4 @@ module.exports = {
     verifyTransaction,
     webhook
 };
+

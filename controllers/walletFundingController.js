@@ -1,178 +1,94 @@
-const { initializePayment: initializePaystack } = require('../utils/paystack');
-const { initializePayment: initializeMonnify } = require('../utils/monnify');
+const paymentGatewayService = require('../services/paymentGateway.service');
 const TransactionStatus = require('../models/TransactionStatus');
-const { generateReference } = require('../utils/generateID');
-const axios = require('axios');
-const Wallet = require('../models/Wallet');
-const { logTransaction } = require('../utils/transaction');
-const investmentService = require('../services/investment.service');
 
-
-const ALLOWED_CHANNELS = ['card', 'ussd', 'bank_transfer'];
+const ALLOWED_CHANNELS = ['card', 'ussd', 'bank_transfer', 'virtual_account'];
 const MIN_AMOUNT = 50; // ₦
 
-function normalizeChannels(input) {
-    if (!input) return ALLOWED_CHANNELS;
-    const arr = Array.isArray(input) ? input : [input];
-    const cleaned = arr.filter((c) => ALLOWED_CHANNELS.includes(String(c)));
-    return cleaned.length ? cleaned : ALLOWED_CHANNELS;
+function normalizeChannel(input) {
+    if (!input) return null;
+    if (Array.isArray(input)) {
+        const found = input.find(c => ALLOWED_CHANNELS.includes(String(c)));
+        return found || null;
+    }
+    return ALLOWED_CHANNELS.includes(String(input)) ? String(input) : null;
 }
 
 const fundWallet = async (req, res) => {
     try {
         const rawAmount = Number(req.body?.amount);
-        const provider = req.body?.provider || 'paystack'; // default to paystack
-        
-        console.log(`Funding Requested: Amount=${rawAmount}, Provider=${provider}`);
+        const gatewayCode = req.body?.gatewayCode || req.body?.provider || null;
         
         if (!rawAmount || rawAmount < MIN_AMOUNT) {
             return res.status(400).json({ message: `Minimum amount is ₦${MIN_AMOUNT}` });
         }
 
-        const channels = normalizeChannels(req.body?.channels);
-        const userId = req.user.id;
-        const callback_url = req.body.callback_url;
+        const channel = normalizeChannel(req.body?.channel || req.body?.channels);
+        const user = req.user;
+        const callbackUrl = req.body?.callback_url;
 
-        // Unique reference
-        const reference = provider === 'paystack' ? generateReference() : `MNFY_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
-
-        // Persist pending row
-        await TransactionStatus.create({
-            refId: reference,
-            type: 'funding',
-            status: 'pending',
-            userId,
+        const result = await paymentGatewayService.initializeFunding({
+            gatewayCode,
+            channel,
+            user,
             amount: rawAmount,
-            channels,
-            service: provider.charAt(0).toUpperCase() + provider.slice(1)
+            callbackUrl,
+            metadata: {
+                type: 'funding'
+            }
         });
-
-        let init;
-        if (provider === 'monnify') {
-            init = await initializeMonnify(
-                req.user.email,
-                rawAmount,
-                { userId, refId: reference },
-                reference
-            );
-        } else {
-            // Default to Paystack
-            init = await initializePaystack(
-                req.user.email,
-                rawAmount,
-                { userId, refId: reference, callback_url },
-                reference,
-                channels
-            );
-        }
 
         return res.json({
-            authorization_url: init?.data?.authorization_url || init?.authorization_url,
-            reference,
-            provider
+            authorization_url: result.authorizationUrl,
+            reference: result.reference,
+            provider: result.provider,
+            gateway: result.gateway,
+            accountNumber: result.accountNumber,
+            bankName: result.bankName,
+            accountName: result.accountName
         });
     } catch (err) {
-        console.error('Funding init error:', err);
-        return res
-            .status(500)
-            .json({ message: 'Funding initialization failed', detail: err?.message || String(err) });
+        console.error('Funding init error:', err.message);
+        const status = err.code === 'PAYMENT_GATEWAY_NOT_FOUND' ? 404
+            : (['PAYMENT_GATEWAY_INACTIVE', 'PAYMENT_GATEWAY_MAINTENANCE', 'PAYMENT_CHANNEL_UNSUPPORTED'].includes(err.code) ? 400 : 500);
+        return res.status(status).json({
+            message: err.message || 'Funding initialization failed',
+            code: err.code || 'PAYMENT_INIT_ERROR'
+        });
     }
 };
-
-const walletService = require('../services/wallet.service');
 
 const verifyFunding = async (req, res) => {
     try {
         const { reference } = req.query;
-        if (!reference) return res.status(400).json({ status: 'not_found' });
+        if (!reference) return res.status(400).json({ status: 'not_found', message: 'Reference is required' });
 
-        let row = await TransactionStatus.findOne({ refId: reference });
-
-        if (row?.userId && String(row.userId) !== String(req.user.id))
-            return res.status(403).json({ status: 'forbidden' });
-
+        const row = await TransactionStatus.findOne({ refId: reference });
         if (!row) return res.status(404).json({ status: 'not_found' });
 
-        // If explicitly success or failed, return immediately
+        if (row.userId && String(row.userId) !== String(req.user.id)) {
+            return res.status(403).json({ status: 'forbidden' });
+        }
+
+        // If already explicitly completed or failed, return immediately
         if (row.status === 'success' || row.status === 'failed') {
-            return res.json({ status: row.status });
+            return res.json({ status: row.status, type: row.type, reference });
         }
 
-        // --- Active Verification Logic (Fallback for Webhook) ---
-        if (row.status === 'pending') {
-            try {
-                const secret = process.env.PAYSTACK_SECRET_KEY;
-                const verify = await axios.get(`https://api.paystack.co/transaction/verify/${reference}`, {
-                    headers: { Authorization: `Bearer ${secret}` }
-                });
-
-                const data = verify?.data?.data;
-                const paystackStatus = data?.status; // 'success', 'failed', 'abandoned'
-
-                if (paystackStatus === 'success') {
-                    const amountNaira = (data.amount || 0) / 100;
-
-                    // Atomic Update: Only credit if we change from pending to success (Idempotency)
-                    const upd = await TransactionStatus.updateOne(
-                        { refId: reference, status: 'pending' },
-                        { $set: { status: 'success' } }
-                    );
-
-                    if (upd.modifiedCount === 1) {
-                        // 4. Ledger-backed Credit or Investment Fulfillment
-                        if (row.type === 'investment_buy') {
-                            const meta = typeof data.metadata === 'string' ? JSON.parse(data.metadata) : (data.metadata || {});
-                            const qty = Number(meta.qty);
-                            await investmentService.fulfillSharePurchase(row.userId, qty, reference, false);
-                        } else {
-                            await walletService.credit(row.userId, amountNaira, reference, 'funding');
-                        }
-
-                        // Log Transaction
-                        await logTransaction({
-                            userId: row.userId,
-                            refId: reference,
-                            type: row.type || 'funding',
-                            service: 'Paystack',
-                            amount: amountNaira,
-                            status: 'success',
-                            response: data
-                        });
-
-                        const notificationService = require('../services/notification.service');
-                        await notificationService.sendInApp(row.userId, {
-                            title: row.type === 'investment_buy' ? 'Shares Purchased Successfully' : 'Wallet Funded Successfully',
-                            message: row.type === 'investment_buy' 
-                                ? `Your purchase of platform shares has been confirmed. Welcome aboard!`
-                                : `Your wallet has been credited with ₦${amountNaira.toLocaleString()} via ${row.service}.`,
-                            type: 'transaction',
-                            metadata: { reference }
-                        });
-                        return res.json({ status: 'success', type: row.type });
-                    } else {
-                        // Already processed by webhook
-                        return res.json({ status: 'success', type: row.type });
-                    }
-                } else if (['failed', 'abandoned'].includes(paystackStatus)) {
-                    await TransactionStatus.updateOne(
-                        { refId: reference },
-                        { $set: { status: 'failed', errorMessage: data?.gateway_response || 'Payment failed' } }
-                    );
-                    return res.json({ status: 'failed' });
-                }
-            } catch (verifyErr) {
-                console.error('Verify API error:', verifyErr.message);
-            }
-        }
-
-        return res.json({ status: row.status });
+        // Delegate to unified PaymentGatewayService
+        const result = await paymentGatewayService.verifyFunding(reference);
+        return res.json({
+            status: result.status,
+            type: row.type,
+            reference,
+            amount: result.amount
+        });
     } catch (e) {
-        console.error('Verify logic error:', e);
-        return res.status(500).json({ status: 'error' });
+        console.error('Verify logic error:', e.message);
+        return res.status(500).json({ status: 'error', message: e.message });
     }
 };
 
 module.exports = {
     fundWallet,
-    verifyFunding,
+    verifyFunding
 };

@@ -89,163 +89,12 @@ const generateVirtualAccounts = async (req, res) => {
     }
 };
 
-const WebhookEvent = require('../models/WebhookEvent');
-const walletService = require('../services/wallet.service');
-const notificationService = require('../services/notification.service');
+const paymentGatewayService = require('../services/paymentGateway.service');
 
 const webhook = async (req, res) => {
     try {
-        const secret = process.env.MONNIFY_SECRET_KEY;
-        const signature = req.headers['monnify-signature'];
-
-        const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '', 'utf8');
-        const expected = crypto.createHmac('sha512', secret).update(buf).digest('hex');
-
-        if (expected !== signature) {
-            console.error('Monnify webhook signature mismatch');
-            return res.status(401).send('Invalid signature');
-        }
-
-        const eventData = JSON.parse(buf.toString('utf8'));
-        const eventId = eventData.eventData?.transactionReference || `MNFY_${Date.now()}`;
-
-        // 1. Idempotency Check
-        const existingEvent = await WebhookEvent.findOne({ eventId });
-        if (existingEvent) {
-            console.log(`Monnify event ${eventId} already processed.`);
-            return res.sendStatus(200);
-        }
-
-        // 2. Store Event Intent
-        const webhookEvent = await WebhookEvent.create({
-            provider: 'monnify',
-            eventType: eventData.eventType,
-            eventId: eventId,
-            payload: eventData,
-            status: 'pending'
-        });
-
-        // 3. Process Logic
-        if (eventData.eventType === 'SUCCESSFUL_TRANSACTION') {
-            const data = eventData.eventData;
-            const refId = data.paymentReference;
-            const amountPaid = data.amountPaid;
-            let userId = data.metaData?.userId;
-            const accountRef = data.accountReference || data.destinationAccountReference;
-
-            // If userId is missing (Reserved Account payment), try to extract from accountReference or find by email
-            if (!userId) {
-                if (accountRef && accountRef.startsWith('VIRTUAL_')) {
-                    userId = accountRef.replace('VIRTUAL_', '');
-                } else if (data.customer?.email) {
-                    const user = await User.findOne({ email: data.customer.email.toLowerCase() });
-                    if (user) userId = user._id;
-                }
-            }
-
-            // Idempotency (TransactionStatus layer)
-            let transaction = await TransactionStatus.findOne({ refId });
-            
-            if (!transaction) {
-                // Create the record if it doesn't exist (typical for virtual account transfers)
-                transaction = await TransactionStatus.create({
-                    refId,
-                    status: 'success',
-                    service: 'Monnify',
-                    amount: amountPaid,
-                    userId
-                });
-                
-                if (userId) {
-                    await walletService.credit(userId, amountPaid, refId, 'funding');
-                    
-                    const user = await User.findById(userId);
-                    if (user) {
-                        // Fire-and-forget — wallet is already credited above
-                        notificationService.notify(user, {
-                            title: 'Wallet Funded Successfully',
-                            message: `Your wallet has been credited with ₦${amountPaid.toLocaleString()} via Bank Transfer.`,
-                            smsMessage: `Your Zantara wallet has been credited with ₦${amountPaid.toLocaleString()} via Bank Transfer. Ref: ${refId}`,
-                            emailSubject: 'Wallet Funded Successfully - Zantara',
-                            emailHtml: `
-                                <div style="font-family: sans-serif; padding: 20px;">
-                                    <h2>Wallet Funded</h2>
-                                    <p>Hello ${user.name || 'User'},</p>
-                                    <p>Your wallet has been credited with <b>₦${amountPaid.toLocaleString()}</b>.</p>
-                                    <p><b>Method:</b> Bank Transfer</p>
-                                    <p><b>Reference:</b> ${refId}</p>
-                                    <br>
-                                    <p>Thank you for choosing Zantara!</p>
-                                </div>
-                            `,
-                            type: 'transaction',
-                            activityType: 'wallet_funding',
-                            metadata: { transactionId: refId }
-                        }).catch(err => console.error('[Monnify Notification Background Error]', err.message));
-                    }
-
-                    await logTransaction({
-                        userId,
-                        refId,
-                        type: 'funding',
-                        service: 'Monnify',
-                        amount: amountPaid,
-                        status: 'success',
-                        response: data
-                    });
-                }
-            } else if (transaction.status === 'pending') {
-                // Update existing pending transaction
-                transaction.status = 'success';
-                transaction.amount = amountPaid;
-                await transaction.save();
-
-                if (userId) {
-                    await walletService.credit(userId, amountPaid, refId, 'funding');
-                    
-                    const user = await User.findById(userId);
-                    if (user) {
-                        // Fire-and-forget — wallet is already credited above
-                        notificationService.notify(user, {
-                            title: 'Wallet Funded Successfully',
-                            message: `Your wallet has been credited with ₦${amountPaid.toLocaleString()} via Monnify.`,
-                            smsMessage: `Your Zantara wallet has been credited with ₦${amountPaid.toLocaleString()} via Monnify. Ref: ${refId}`,
-                            emailSubject: 'Wallet Funded Successfully - Zantara',
-                            emailHtml: `
-                                <div style="font-family: sans-serif; padding: 20px;">
-                                    <h2>Wallet Funded</h2>
-                                    <p>Hello ${user.name || 'User'},</p>
-                                    <p>Your wallet has been credited with <b>₦${amountPaid.toLocaleString()}</b>.</p>
-                                    <p><b>Method:</b> Monnify Online</p>
-                                    <p><b>Reference:</b> ${refId}</p>
-                                    <br>
-                                    <p>Thank you for choosing Zantara!</p>
-                                </div>
-                            `,
-                            type: 'transaction',
-                            activityType: 'wallet_funding',
-                            metadata: { transactionId: refId }
-                        }).catch(err => console.error('[Monnify Notification Background Error]', err.message));
-                    }
-
-                    await logTransaction({
-                        userId,
-                        refId,
-                        type: 'funding',
-                        service: 'Monnify',
-                        amount: amountPaid,
-                        status: 'success',
-                        response: data
-                    });
-                }
-            }
-        }
-
-        // 5. Mark Event as Processed
-        webhookEvent.status = 'processed';
-        await webhookEvent.save();
-
-        return res.sendStatus(200);
+        const result = await paymentGatewayService.routeWebhook('monnify', req);
+        return res.status(result.status || 200).send(result.message || 'OK');
     } catch (e) {
         console.error('Monnify webhook error:', e);
         return res.sendStatus(500);
@@ -257,3 +106,4 @@ module.exports = {
     generateVirtualAccounts,
     webhook
 };
+
