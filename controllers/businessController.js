@@ -3,7 +3,8 @@ const Expense = require('../models/Expense');
 const Settlement = require('../models/Settlement');
 const Wallet = require('../models/Wallet');
 const User = require('../models/User');
-const vtpassAdapter = require('../adapters/vtpass.adapter');
+const Provider = require('../models/Provider');
+const providerService = require('../services/provider.service');
 const paystack = require('../utils/paystack');
 
 /**
@@ -140,11 +141,41 @@ exports.getBusinessWallet = async (req, res) => {
 
         const stats = walletStats[0] || { totalBalance: 0, totalFrozen: 0 };
 
-        // 3. API Vendor Balance
-        const apiBalance = await vtpassAdapter.getBalance();
+        // 3. API Vendor Balance (Safely check active provider without crashing)
+        let apiBalance = { success: false, balance: 0 };
+        try {
+            const activeProvider = await Provider.findOne({ status: 'active' });
+            if (activeProvider) {
+                try {
+                    const adapter = await providerService.getAdapterInstance(activeProvider.name);
+                    const balRes = await adapter.checkBalance();
+                    if (balRes && balRes.success) {
+                        apiBalance = { success: true, balance: Number(balRes.balance) || 0 };
+                        // Persist latest balance in background
+                        activeProvider.balance = apiBalance.balance;
+                        activeProvider.lastBalanceCheck = new Date();
+                        await activeProvider.save().catch(() => {});
+                    } else if (typeof activeProvider.balance === 'number') {
+                        apiBalance = { success: true, balance: activeProvider.balance };
+                    }
+                } catch (adapterErr) {
+                    console.warn(`[getBusinessWallet] Live balance check failed for ${activeProvider.name}:`, adapterErr.message);
+                    if (typeof activeProvider.balance === 'number') {
+                        apiBalance = { success: true, balance: activeProvider.balance };
+                    }
+                }
+            }
+        } catch (provErr) {
+            console.warn('[getBusinessWallet] Provider lookup error:', provErr.message);
+        }
 
         // 4. Paystack Gateway Balance
-        const paystackBalance = await paystack.getPaystackBalance();
+        let paystackBalance = { success: false, balance: 0 };
+        try {
+            paystackBalance = await paystack.getPaystackBalance();
+        } catch (psErr) {
+            console.warn('[getBusinessWallet] Paystack balance error:', psErr.message);
+        }
 
         res.json({
             success: true,

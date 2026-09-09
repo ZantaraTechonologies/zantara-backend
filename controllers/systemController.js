@@ -1,6 +1,5 @@
 const mongoose = require('mongoose');
 const axios = require('axios');
-const vtpassAdapter = require('../adapters/vtpass.adapter');
 
 /**
  * GET /api/admin/system/status
@@ -11,9 +10,22 @@ exports.getSystemStatus = async (req, res) => {
         // 1. Database Check
         const dbStatus = mongoose.connection.readyState === 1 ? 'online' : 'offline';
 
-        // 2. VTPass Check
-        const vtpassCheck = await vtpassAdapter.ping();
-        const vtpassStatus = vtpassCheck.success ? 'online' : 'offline';
+        // 2. Vendor Gateway Check
+        let vtpassStatus = 'offline';
+        let vtpassMessage = 'Unreachable';
+        try {
+            const vtUrl = process.env.VTU_API_URI || 'https://sandbox.vtpass.com/api';
+            const vtRes = await axios.get(vtUrl, { timeout: 5000, validateStatus: () => true });
+            if (vtRes.status < 500) {
+                vtpassStatus = 'online';
+                vtpassMessage = 'Operational';
+            } else {
+                vtpassMessage = `HTTP ${vtRes.status}`;
+            }
+        } catch (err) {
+            vtpassStatus = 'offline';
+            vtpassMessage = err.message || 'Connection failed';
+        }
 
         // 3. Paystack Check
         let paystackStatus = 'offline';
@@ -41,7 +53,7 @@ exports.getSystemStatus = async (req, res) => {
                 timestamp: new Date()
             },
             details: {
-                vtpassMessage: vtpassCheck.message || 'Operational'
+                vtpassMessage: vtpassMessage || 'Operational'
             }
         });
     } catch (error) {
