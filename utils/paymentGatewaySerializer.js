@@ -1,25 +1,29 @@
-const { decryptSecret, isEncrypted } = require('./crypto');
+'use strict';
 
 /**
- * Masks a secret string (e.g. sk_test_1234567890 -> sk_t...7890)
+ * Payment Gateway Serializer
+ *
+ * Sanitizes PaymentGateway documents before any API or UI exposure.
+ * SECURITY POLICY:
+ *   - secretKey and webhookSecret MUST NEVER appear in any API response,
+ *     log message, or error output — not even as masked prefix/suffix fragments.
+ *   - publicKey may be returned only where genuinely required by a payment form.
+ *   - Credential presence is communicated via boolean indicators only:
+ *       secretKeyConfigured: true | false
+ *       webhookSecretConfigured: true | false
  */
-function maskSecret(val) {
-    if (!val || typeof val !== 'string') return '';
-    const plaintext = isEncrypted(val) ? decryptSecret(val) : val;
-    if (plaintext.length <= 8) return '********';
-    return `${plaintext.slice(0, 4)}...${plaintext.slice(-4)}`;
-}
 
 /**
- * Sanitizes a PaymentGateway document for Admin presentation or API responses.
- * Never leaks raw or decrypted secretKey or webhookSecret.
+ * Sanitizes a PaymentGateway document for Admin API responses.
+ * Exposes configuration metadata, health, and boolean credential indicators.
+ * NEVER exposes raw, decrypted, or masked values of secretKey / webhookSecret.
+ *
+ * @param {object} gateway - Mongoose document or plain object
+ * @returns {object} Safe admin representation
  */
 function sanitizePaymentGateway(gateway) {
     if (!gateway) return null;
     const doc = gateway.toObject ? gateway.toObject() : { ...gateway };
-
-    const hasSecretKey = !!doc.secretKey;
-    const hasWebhookSecret = !!doc.webhookSecret;
 
     return {
         _id: doc._id,
@@ -30,6 +34,7 @@ function sanitizePaymentGateway(gateway) {
         environment: doc.environment,
         isDefault: !!doc.isDefault,
         priority: doc.priority || 1,
+        // Public key is safe to return — it is non-secret by design (payment form embed)
         publicKey: doc.publicKey || '',
         baseUrl: doc.baseUrl || '',
         supportedChannels: doc.supportedChannels || [],
@@ -37,17 +42,19 @@ function sanitizePaymentGateway(gateway) {
         lastHealthCheck: doc.lastHealthCheck || { status: 'unknown' },
         createdAt: doc.createdAt,
         updatedAt: doc.updatedAt,
-        // Credential indicators (never raw secrets)
-        hasSecretKey,
-        maskedSecretKey: hasSecretKey ? maskSecret(doc.secretKey) : '',
-        hasWebhookSecret,
-        maskedWebhookSecret: hasWebhookSecret ? maskSecret(doc.webhookSecret) : ''
+        // Boolean credential indicators — no prefix, suffix, or fragment of the actual secret
+        secretKeyConfigured: !!(doc.secretKey && doc.secretKey.length > 0),
+        webhookSecretConfigured: !!(doc.webhookSecret && doc.webhookSecret.length > 0)
     };
 }
 
 /**
  * Sanitizes a PaymentGateway for public client consumption (Web / Mobile).
- * Completely strips any credential indicators, internal health details, or sensitive metadata.
+ * Only returns the minimum fields needed to render a payment option selector.
+ * Strips ALL credential indicators, health details, and internal metadata.
+ *
+ * @param {object} gateway - Mongoose document or plain object
+ * @returns {object} Safe client representation
  */
 function sanitizePaymentGatewayForClient(gateway) {
     if (!gateway) return null;
@@ -63,7 +70,6 @@ function sanitizePaymentGatewayForClient(gateway) {
 }
 
 module.exports = {
-    maskSecret,
     sanitizePaymentGateway,
     sanitizePaymentGatewayForClient
 };

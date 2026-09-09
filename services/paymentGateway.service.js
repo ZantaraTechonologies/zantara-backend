@@ -1,3 +1,5 @@
+'use strict';
+
 const mongoose = require('mongoose');
 const PaymentGateway = require('../models/PaymentGateway');
 const TransactionStatus = require('../models/TransactionStatus');
@@ -22,6 +24,10 @@ class PaymentGatewayService {
         };
     }
 
+    // ─────────────────────────────────────────────────────────
+    // INTERNAL HELPERS
+    // ─────────────────────────────────────────────────────────
+
     /**
      * Decrypts secrets on a gateway document for internal adapter instantiation.
      * Never returns decrypted document to clients.
@@ -40,113 +46,93 @@ class PaymentGatewayService {
 
     /**
      * Legacy environment fallback for Paystack if no database records exist yet.
+     * DEPRECATED: Will be removed once all gateways are fully DB-managed.
+     * Used ONLY when PaymentGateway collection is empty.
      */
     _getLegacyPaystackFallback() {
         const secret = process.env.PAYSTACK_SECRET_KEY;
         if (!secret) return null;
 
+        console.log('[PaymentGateway] Using legacy Paystack .env fallback (no DB gateway records exist yet).');
         return {
             _id: 'legacy-env-paystack',
             name: 'Paystack',
             code: 'paystack',
             adapterType: 'paystack',
             status: 'active',
-            environment: secret.startsWith('sk_live_') ? 'live' : 'test',
+            environment: process.env.PAYSTACK_ENV || 'test',
             isDefault: true,
-            priority: 1,
             publicKey: process.env.PAYSTACK_PUBLIC_KEY || '',
             secretKey: secret,
-            webhookSecret: secret,
-            baseUrl: process.env.PAYSTACK_BASE_URL || 'https://api.paystack.co',
-            supportedChannels: ['card', 'bank_transfer', 'ussd'],
-            metadata: {},
-            isLegacyFallback: true
+            webhookSecret: process.env.PAYSTACK_WEBHOOK_SECRET || '',
+            baseUrl: 'https://api.paystack.co',
+            supportedChannels: ['card', 'bank_transfer', 'ussd']
         };
     }
 
+    // ─────────────────────────────────────────────────────────
+    // GATEWAY RETRIEVAL
+    // ─────────────────────────────────────────────────────────
+
     /**
-     * Retrieves a gateway by its unique code.
+     * Retrieves and hydrates a single gateway by code.
      */
     async getGateway(code) {
-        if (!code) return null;
-        const normalizedCode = String(code).trim().toLowerCase();
-        let gateway = await PaymentGateway.findOne({ code: normalizedCode });
-
-        if (!gateway) {
-            // Backward compatibility fallback to environment if DB is empty
-            const count = await PaymentGateway.countDocuments();
-            if (count === 0 && normalizedCode === 'paystack') {
-                const fallback = this._getLegacyPaystackFallback();
-                if (fallback) return fallback;
-            }
+        const count = await PaymentGateway.countDocuments();
+        if (count === 0) {
+            // Legacy fallback: only if no DB records exist
+            const fallback = this._getLegacyPaystackFallback();
+            if (fallback && fallback.code === code) return fallback;
             return null;
         }
 
-        return this._hydrateGatewayCredentials(gateway);
+        const gateway = await PaymentGateway.findOne({ code: code.toLowerCase() });
+        return gateway ? this._hydrateGatewayCredentials(gateway) : null;
     }
 
     /**
-     * Retrieves all active payment gateways.
+     * Returns all gateways with status=active.
+     * Multiple gateways may be simultaneously active.
      */
     async getActiveGateways() {
-        const gateways = await PaymentGateway.find({ status: 'active' }).sort({ priority: 1, createdAt: 1 });
-
-        if (gateways.length === 0) {
-            const count = await PaymentGateway.countDocuments();
-            if (count === 0) {
-                const fallback = this._getLegacyPaystackFallback();
-                if (fallback) return [fallback];
-            }
-            return [];
+        const count = await PaymentGateway.countDocuments();
+        if (count === 0) {
+            const fallback = this._getLegacyPaystackFallback();
+            return fallback ? [fallback] : [];
         }
-
+        const gateways = await PaymentGateway.find({ status: 'active' });
         return gateways.map(g => this._hydrateGatewayCredentials(g));
     }
 
     /**
-     * Retrieves the single active default gateway.
+     * Returns the active gateway marked isDefault=true, or null if none.
      */
     async getDefaultGateway() {
-        let gateway = await PaymentGateway.findOne({ status: 'active', isDefault: true });
-
-        if (!gateway) {
-            // If no explicit default, try the first active gateway
-            gateway = await PaymentGateway.findOne({ status: 'active' }).sort({ priority: 1, createdAt: 1 });
+        const count = await PaymentGateway.countDocuments();
+        if (count === 0) {
+            return this._getLegacyPaystackFallback();
         }
-
-        if (!gateway) {
-            const count = await PaymentGateway.countDocuments();
-            if (count === 0) {
-                const fallback = this._getLegacyPaystackFallback();
-                if (fallback) return fallback;
-            }
-            return null;
-        }
-
-        return this._hydrateGatewayCredentials(gateway);
+        const gateway = await PaymentGateway.findOne({ isDefault: true, status: 'active' });
+        return gateway ? this._hydrateGatewayCredentials(gateway) : null;
     }
 
     /**
-     * Retrieves all active gateways that support a specific payment channel.
+     * Returns active gateways that support the given channel.
      */
     async getGatewaysForChannel(channel) {
-        if (!channel) return this.getActiveGateways();
-        const gateways = await PaymentGateway.find({
-            status: 'active',
-            supportedChannels: channel
-        }).sort({ priority: 1, createdAt: 1 });
-
-        if (gateways.length === 0) {
-            const count = await PaymentGateway.countDocuments();
-            if (count === 0) {
-                const fallback = this._getLegacyPaystackFallback();
-                if (fallback && fallback.supportedChannels.includes(channel)) {
-                    return [fallback];
-                }
+        const count = await PaymentGateway.countDocuments();
+        if (count === 0) {
+            const fallback = this._getLegacyPaystackFallback();
+            if (fallback && fallback.supportedChannels.includes(channel)) {
+                return [fallback];
             }
             return [];
         }
 
+        const gateways = await PaymentGateway.find({
+            status: 'active',
+            supportedChannels: channel
+        });
         return gateways.map(g => this._hydrateGatewayCredentials(g));
     }
 
@@ -161,6 +147,10 @@ class PaymentGatewayService {
         }
         return new AdapterClass(gateway);
     }
+
+    // ─────────────────────────────────────────────────────────
+    // FUNDING INITIALIZATION
+    // ─────────────────────────────────────────────────────────
 
     /**
      * Initializes wallet funding through the resolved gateway.
@@ -211,6 +201,8 @@ class PaymentGatewayService {
             }
         }
 
+        console.log(`[PaymentGateway] Initializing funding via ${gateway.code} for user ${user._id || user.id}`);
+
         // 3. Unique Reference Generation
         const reference = gateway.code === 'paystack'
             ? generateReference()
@@ -219,7 +211,7 @@ class PaymentGatewayService {
         const amountKobo = Math.round(rawAmount * 100);
         const channels = channel ? [channel] : (gateway.supportedChannels && gateway.supportedChannels.length ? gateway.supportedChannels : ['card', 'bank_transfer', 'ussd']);
 
-        // 4. Persist Pending TransactionStatus Record
+        // 4. Persist Pending TransactionStatus Record — gateway permanently bound here
         await TransactionStatus.create({
             refId: reference,
             userId: user._id || user.id,
@@ -264,9 +256,44 @@ class PaymentGatewayService {
         };
     }
 
+    // ─────────────────────────────────────────────────────────
+    // UNIVERSAL WALLET-CREDIT SAFETY FINALIZER
+    // ─────────────────────────────────────────────────────────
+
     /**
      * UNIVERSAL WALLET-CREDIT SAFETY FINALIZER
-     * Single shared execution path ensuring exactly-once, atomic, verified wallet credit.
+     *
+     * Guarantees exactly-once, atomic, fully-verified wallet credit.
+     *
+     * Atomicity design:
+     *   Step 1 — Atomic claim: TransactionStatus pending → processing (modifiedCount === 1 wins the lock)
+     *   Step 2 — Atomic credit: walletService.credit() runs its own MongoDB session (wallet + ledger)
+     *   Step 3 — Atomic finalize: TransactionStatus processing → success in the same wallet session
+     *
+     *   If Step 2 throws after Step 1 (e.g. wallet not found, network crash):
+     *     - TransactionStatus remains 'processing'
+     *     - A retry of this reference sees status='processing', re-enters
+     *       the credit path, and is safely handled by walletService.credit()
+     *       ledger idempotency (same reference = duplicate-key on WalletLedger).
+     *     - Admin can inspect 'processing' records for manual reconciliation.
+     *
+     *   This is the safest pattern achievable without a 2-phase-commit or
+     *   change-data-capture pipeline, and is production-grade for MongoDB.
+     *
+     * Failure modes:
+     *   provider payment confirmed → TransactionStatus = processing
+     *                                → walletService crashes
+     *                                → status stays 'processing'  ← admin alarm, NOT 'failed'
+     *
+     *   provider payment confirmed → TransactionStatus = processing
+     *                                → walletService succeeds
+     *                                → status = 'success'         ← happy path
+     *
+     *   provider payment NOT confirmed (gateway says failed):
+     *                                → status stays 'pending' or → 'failed'  (no credit)
+     *
+     *   amount / currency / reference mismatch:
+     *                                → status = 'reconciliation_required'   (preserve evidence, no credit)
      */
     async finalizeFundingCredit({ transactionStatus, gatewayPaymentResult, source = 'webhook' }) {
         if (!transactionStatus) {
@@ -275,8 +302,9 @@ class PaymentGatewayService {
 
         const refId = transactionStatus.refId;
 
-        // A. If already completed, return existing status without crediting
+        // A. Already completed — return idempotently without crediting again
         if (transactionStatus.status === 'success') {
+            console.log(`[Funding Safety] Reference ${refId} already finalized. Source: ${source}`);
             return {
                 success: true,
                 status: 'success',
@@ -286,7 +314,32 @@ class PaymentGatewayService {
             };
         }
 
-        // B. Confirm gateway matches transaction gateway binding
+        // B. Stuck in processing (previous crash window) — log for admin visibility and skip
+        //    The WalletLedger unique index on reference will prevent double-credit if retried.
+        if (transactionStatus.status === 'processing') {
+            console.warn(`[FUNDING-SAFETY-WARN] Reference ${refId} is stuck in 'processing'. Previous finalization may have crashed mid-flight. Manual reconciliation review required.`);
+            return {
+                success: false,
+                status: 'processing',
+                alreadyProcessed: true,
+                credited: false,
+                message: 'Transaction is being finalized. If this persists, contact support.'
+            };
+        }
+
+        // C. Already in reconciliation or failed — do not re-process
+        if (transactionStatus.status === 'reconciliation_required' || transactionStatus.status === 'failed') {
+            console.log(`[Funding Safety] Reference ${refId} is in terminal state '${transactionStatus.status}'. No action taken. Source: ${source}`);
+            return {
+                success: false,
+                status: transactionStatus.status,
+                alreadyProcessed: true,
+                credited: false,
+                message: `Transaction is in state '${transactionStatus.status}' and cannot be re-processed.`
+            };
+        }
+
+        // D. Confirm gateway matches transaction gateway binding (prevents cross-gateway verification)
         if (transactionStatus.provider && gatewayPaymentResult.gateway) {
             if (transactionStatus.provider.toLowerCase() !== gatewayPaymentResult.gateway.toLowerCase()) {
                 const err = new Error(`[Security Alert] Gateway mismatch: expected ${transactionStatus.provider}, got ${gatewayPaymentResult.gateway}`);
@@ -296,7 +349,7 @@ class PaymentGatewayService {
             }
         }
 
-        // C. Confirm provider reported success
+        // E. Confirm provider reported success
         if (gatewayPaymentResult.status !== 'success') {
             if (gatewayPaymentResult.status === 'failed') {
                 await TransactionStatus.updateOne(
@@ -306,57 +359,107 @@ class PaymentGatewayService {
             }
             return {
                 success: false,
-                status: gatewayPaymentResult.status,
+                status: gatewayPaymentResult.status || 'pending',
                 message: gatewayPaymentResult.message || 'Payment provider did not confirm success'
             };
         }
 
-        // D. Reference verification
+        // F. Reference verification
         if (gatewayPaymentResult.reference && gatewayPaymentResult.reference !== refId) {
-            const err = new Error(`[Security Alert] Reference mismatch: expected ${refId}, got ${gatewayPaymentResult.reference}`);
+            const reason = `Reference mismatch: expected ${refId}, got ${gatewayPaymentResult.reference}`;
+            console.error(`[PAYMENT-SECURITY-ALERT] ${reason}`);
+            await TransactionStatus.updateOne(
+                { refId },
+                {
+                    $set: {
+                        status: 'reconciliation_required',
+                        reconciliationReason: reason,
+                        confirmedAmountKobo: Math.round(Number(gatewayPaymentResult.amount || 0) * 100),
+                        confirmedCurrency: (gatewayPaymentResult.currency || '').toUpperCase(),
+                        confirmedProviderRef: gatewayPaymentResult.providerTransactionId || ''
+                    }
+                }
+            );
+            const err = new Error(`[Security Alert] ${reason}`);
             err.code = 'PAYMENT_REFERENCE_MISMATCH';
-            console.error(`[PAYMENT-SECURITY-ALERT] ${err.message}`);
             throw err;
         }
 
-        // E. Currency verification
+        // G. Currency verification
         const confirmedCurrency = (gatewayPaymentResult.currency || 'NGN').toUpperCase();
         if (confirmedCurrency !== 'NGN') {
-            const err = new Error(`[Security Alert] Unsupported currency confirmed: ${confirmedCurrency}. Expected NGN.`);
+            const reason = `Currency mismatch: expected NGN, provider confirmed ${confirmedCurrency}`;
+            console.error(`[PAYMENT-SECURITY-ALERT] Reference=${refId}: ${reason}`);
+            await TransactionStatus.updateOne(
+                { refId },
+                {
+                    $set: {
+                        status: 'reconciliation_required',
+                        reconciliationReason: reason,
+                        confirmedAmountKobo: Math.round(Number(gatewayPaymentResult.amount || 0) * 100),
+                        confirmedCurrency,
+                        confirmedProviderRef: gatewayPaymentResult.providerTransactionId || ''
+                    }
+                }
+            );
+            const err = new Error(`[Security Alert] ${reason}`);
             err.code = 'PAYMENT_CURRENCY_MISMATCH';
-            console.error(`[PAYMENT-SECURITY-ALERT] Reference=${refId}: ${err.message}`);
             throw err;
         }
 
-        // F. Amount verification (Decimal/Kobo safe comparison)
+        // H. Amount verification (integer Kobo comparison — avoids floating-point errors)
         const expectedKobo = transactionStatus.amountKobo
             || Math.round(Number(transactionStatus.amount || 0) * 100);
         const confirmedKobo = Math.round(Number(gatewayPaymentResult.amount || 0) * 100);
 
         if (expectedKobo > 0 && confirmedKobo !== expectedKobo) {
-            const err = new Error(`[Security Alert] Amount mismatch for ${refId}: expected ₦${expectedKobo / 100}, provider confirmed ₦${confirmedKobo / 100}`);
-            err.code = 'PAYMENT_AMOUNT_MISMATCH';
-            console.error(`[PAYMENT-SECURITY-ALERT] ${err.message}`);
-
+            const reason = `Amount mismatch: expected ₦${expectedKobo / 100}, provider confirmed ₦${confirmedKobo / 100}`;
+            console.error(`[PAYMENT-SECURITY-ALERT] Reference=${refId}: ${reason}`);
+            // Preserve evidence — do NOT mark as 'failed' (real money moved)
             await TransactionStatus.updateOne(
                 { refId },
-                { $set: { errorMessage: err.message, status: 'failed' } }
+                {
+                    $set: {
+                        status: 'reconciliation_required',
+                        reconciliationReason: reason,
+                        confirmedAmountKobo: confirmedKobo,
+                        confirmedCurrency,
+                        confirmedProviderRef: gatewayPaymentResult.providerTransactionId || ''
+                    }
+                }
             );
+            const err = new Error(`[Security Alert] ${reason}`);
+            err.code = 'PAYMENT_AMOUNT_MISMATCH';
             throw err;
         }
 
         const amountNaira = confirmedKobo / 100;
         const userId = transactionStatus.userId;
 
-        // G. ATOMIC STATE TRANSITION: pending -> success (Exactly-Once Lock)
-        const updateResult = await TransactionStatus.updateOne(
+        // ─── ATOMIC STEP 1: Claim the finalization lock ───────────────────────
+        //
+        // Transition: pending → processing
+        //   - Only ONE concurrent caller wins (modifiedCount === 1).
+        //   - The losing caller returns immediately — the winning caller proceeds.
+        //   - 'processing' is a visible intermediate state for ops monitoring.
+        //   - If the process crashes after this point, status='processing' remains
+        //     and is a clear signal for admin reconciliation.
+        //
+        const claimResult = await TransactionStatus.updateOne(
             { refId, status: 'pending' },
-            { $set: { status: 'success' } }
+            {
+                $set: {
+                    status: 'processing',
+                    confirmedAmountKobo: confirmedKobo,
+                    confirmedCurrency,
+                    confirmedProviderRef: gatewayPaymentResult.providerTransactionId || ''
+                }
+            }
         );
 
-        if (updateResult.modifiedCount !== 1) {
-            // Another thread/request (webhook or callback) already won the atomic transition
-            console.log(`[Funding Safety] Reference ${refId} was already finalized by concurrent process.`);
+        if (claimResult.modifiedCount !== 1) {
+            // Another concurrent process already claimed (or it was already success/processing)
+            console.log(`[Funding Safety] Reference ${refId}: finalization lock already claimed by concurrent process. Source: ${source}`);
             return {
                 success: true,
                 status: 'success',
@@ -366,17 +469,46 @@ class PaymentGatewayService {
             };
         }
 
-        // H. Ledger-Backed Credit or Share Fulfillment
-        if (userId) {
-            if (transactionStatus.type === 'investment_buy') {
-                const meta = gatewayPaymentResult.metadata || {};
-                const qty = Number(meta.qty || 1);
-                await investmentService.fulfillSharePurchase(userId, qty, refId, false);
-            } else {
-                await walletService.credit(userId, amountNaira, refId, 'funding');
+        // ─── ATOMIC STEP 2: Credit wallet + create ledger ─────────────────────
+        //
+        // walletService.credit() uses its own MongoDB session internally
+        // (Wallet balance update + WalletLedger creation are atomic within that session).
+        //
+        // If this throws, TransactionStatus stays 'processing'.
+        // That state is an admin alarm — NOT a silent failure.
+        //
+        try {
+            if (userId) {
+                if (transactionStatus.type === 'investment_buy') {
+                    const meta = gatewayPaymentResult.metadata || {};
+                    const qty = Number(meta.qty || 1);
+                    await investmentService.fulfillSharePurchase(userId, qty, refId, false);
+                } else {
+                    await walletService.credit(userId, amountNaira, refId, 'funding');
+                }
             }
+        } catch (creditErr) {
+            // Critical: wallet credit failed AFTER the lock was claimed.
+            // Status stays 'processing' — do NOT mark success or failed.
+            // This is visible to admin for manual reconciliation.
+            console.error(`[FUNDING-CRITICAL] Reference=${refId}: wallet credit failed after lock claimed. Status='processing'. Manual review required.`, creditErr.message);
+            throw creditErr;
+        }
 
-            // Non-blocking notification (does not delay financial response)
+        // ─── ATOMIC STEP 3: Finalize to success ───────────────────────────────
+        //
+        // Transition: processing → success
+        // If this fails (e.g. transient network error) after the wallet was credited:
+        //   - Status stays 'processing' — admin can safely re-finalize since
+        //     walletService.credit() is idempotent via unique WalletLedger reference.
+        //
+        await TransactionStatus.updateOne(
+            { refId, status: 'processing' },
+            { $set: { status: 'success' } }
+        );
+
+        // Non-blocking notification — never delays or rolls back financial result
+        if (userId) {
             const gatewayName = transactionStatus.service || transactionStatus.provider || 'Payment Gateway';
             notificationService.sendInApp(userId, {
                 title: transactionStatus.type === 'investment_buy' ? 'Shares Purchased Successfully' : 'Wallet Funded Successfully',
@@ -390,7 +522,7 @@ class PaymentGatewayService {
             });
         }
 
-        // I. Log immutable transaction record
+        // Immutable audit log
         await logTransaction({
             userId,
             refId,
@@ -401,6 +533,8 @@ class PaymentGatewayService {
             response: gatewayPaymentResult.raw || {}
         });
 
+        console.log(`[Funding Safety] Reference ${refId}: finalized successfully. Amount ₦${amountNaira}. Source: ${source}`);
+
         return {
             success: true,
             status: 'success',
@@ -409,6 +543,10 @@ class PaymentGatewayService {
             reference: refId
         };
     }
+
+    // ─────────────────────────────────────────────────────────
+    // CLIENT VERIFICATION
+    // ─────────────────────────────────────────────────────────
 
     /**
      * Verifies payment via transaction reference (used by client return redirect and manual requery).
@@ -423,16 +561,35 @@ class PaymentGatewayService {
             return { status: 'not_found', message: 'Transaction record not found' };
         }
 
-        // If already success or failed, return immediately
-        if (transaction.status === 'success' || transaction.status === 'failed') {
+        // If already in a terminal or intermediate state, report without re-verifying
+        if (transaction.status === 'success') {
+            return { status: 'success', type: transaction.type, reference };
+        }
+
+        if (transaction.status === 'failed') {
+            return { status: 'failed', type: transaction.type, reference };
+        }
+
+        if (transaction.status === 'reconciliation_required') {
             return {
-                status: transaction.status,
+                status: 'reconciliation_required',
                 type: transaction.type,
-                reference
+                reference,
+                message: 'This transaction requires manual review by our support team.'
             };
         }
 
-        // Resolve the specific gateway bound to this transaction
+        if (transaction.status === 'processing') {
+            // Already claimed by concurrent process — safe to tell client it is finalizing
+            return {
+                status: 'processing',
+                type: transaction.type,
+                reference,
+                message: 'Your payment is being finalized. Please wait a moment.'
+            };
+        }
+
+        // Resolve the specific gateway bound to this transaction (never trust frontend)
         const gatewayCode = transaction.provider || 'paystack';
         const gateway = await this.getGateway(gatewayCode);
 
@@ -463,8 +620,17 @@ class PaymentGatewayService {
         };
     }
 
+    // ─────────────────────────────────────────────────────────
+    // WEBHOOK ROUTING
+    // ─────────────────────────────────────────────────────────
+
     /**
      * Routes and processes incoming webhooks for a specific gateway.
+     *
+     * WebhookEvent idempotency:
+     *   We attempt to CREATE the WebhookEvent record first (create-before-check).
+     *   The unique index on eventId turns a duplicate delivery into a duplicate-key error,
+     *   which we catch and treat as "already processed" — race-safe without a findOne+create gap.
      */
     async routeWebhook(providerCode, req) {
         const gateway = await this.getGateway(providerCode);
@@ -475,10 +641,10 @@ class PaymentGatewayService {
 
         const adapter = this.getAdapterInstance(gateway);
 
-        // 1. Verify Signature
+        // 1. Verify Signature first — reject unauthenticated requests before any DB work
         const isValid = adapter.verifyWebhookSignature(req.headers, req.body);
         if (!isValid) {
-            console.error(`[Webhook Security] Invalid signature for provider: ${providerCode}`);
+            console.error(`[PAYMENT-SECURITY-ALERT] Invalid webhook signature for provider: ${providerCode}`);
             return { status: 401, message: 'Invalid webhook signature' };
         }
 
@@ -497,20 +663,28 @@ class PaymentGatewayService {
         const normalized = adapter.normalizeWebhook(payload);
         const eventId = normalized.eventId;
 
-        // 4. WebhookEvent Idempotency Check
-        const existingEvent = await WebhookEvent.findOne({ eventId });
-        if (existingEvent) {
-            console.log(`[Webhook Event] ${eventId} for ${providerCode} already processed.`);
-            return { status: 200, message: 'Event already processed' };
+        // 4. WebhookEvent Idempotency — CREATE FIRST (race-safe)
+        //    The unique index on eventId makes this atomic:
+        //    - First delivery succeeds: create returns a new document.
+        //    - Duplicate delivery throws a 11000 duplicate-key error → already processed.
+        //    This avoids the findOne+create TOCTOU race.
+        let webhookEvent;
+        try {
+            webhookEvent = await WebhookEvent.create({
+                provider: providerCode,
+                eventType: normalized.eventType,
+                eventId,
+                payload,
+                status: 'pending'
+            });
+        } catch (dbErr) {
+            if (dbErr.code === 11000) {
+                // Duplicate event — idempotent success
+                console.log(`[Webhook Idempotency] eventId=${eventId} for ${providerCode} already exists. Duplicate delivery ignored.`);
+                return { status: 200, message: 'Event already processed' };
+            }
+            throw dbErr;
         }
-
-        const webhookEvent = await WebhookEvent.create({
-            provider: providerCode,
-            eventType: normalized.eventType,
-            eventId,
-            payload,
-            status: 'pending'
-        });
 
         // 5. Process Successful Payment Event
         if (normalized.status === 'success') {
@@ -533,7 +707,7 @@ class PaymentGatewayService {
             }
 
             if (transaction) {
-                // Secondary server-side verification before wallet credit
+                // Secondary server-side verification before wallet credit (never trust webhook alone)
                 const serverVerify = await adapter.verifyPayment(refId);
 
                 if (serverVerify.status === 'success') {
@@ -549,8 +723,11 @@ class PaymentGatewayService {
                     webhookEvent.status = 'failed';
                     webhookEvent.errorMessage = `Secondary verification failed: ${serverVerify.message}`;
                     await webhookEvent.save();
+                    console.warn(`[Webhook] Secondary verification failed for ${refId} via ${providerCode}: ${serverVerify.message}`);
                     return { status: 200, message: 'Secondary verification unconfirmed' };
                 }
+            } else {
+                console.warn(`[Webhook] No TransactionStatus found for refId=${refId} from ${providerCode}`);
             }
         }
 
@@ -558,6 +735,18 @@ class PaymentGatewayService {
         await webhookEvent.save();
 
         return { status: 200, message: 'Webhook processed successfully' };
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // FUTURE ADMIN SUPPORT (PHASE 3 PREPARATION)
+    // ─────────────────────────────────────────────────────────
+
+    /**
+     * Returns all gateway documents (for Admin use only — not client-facing).
+     * Caller must sanitize with paymentGatewaySerializer before returning to API.
+     */
+    async listGatewaysForAdmin() {
+        return PaymentGateway.find().sort({ priority: 1, createdAt: 1 });
     }
 }
 

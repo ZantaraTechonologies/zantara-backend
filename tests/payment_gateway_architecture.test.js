@@ -785,7 +785,11 @@ async function runPaymentGatewayTests() {
 
             assert.strictEqual(threw, true, 'Must reject amount mismatch');
             assert.strictEqual(walletCredits.length, 0, 'No wallet credit must be issued');
-            assert.strictEqual(tx.status, 'failed', 'Transaction must be marked failed on security mismatch');
+            // Amount mismatch → reconciliation_required (NOT failed) because real money was received
+            // and we must preserve the provider evidence for manual review
+            assert.strictEqual(tx.status, 'reconciliation_required', 'Transaction must be reconciliation_required (evidence preserved, real money received)');
+            assert.ok(tx.confirmedAmountKobo !== undefined, 'Confirmed amount must be preserved for audit');
+            assert.ok(tx.reconciliationReason, 'Reconciliation reason must be recorded');
         });
 
         await test('28. Currency mismatch cannot credit wallet', async () => {
@@ -979,13 +983,20 @@ async function runPaymentGatewayTests() {
             const serializedAdmin = sanitizePaymentGateway(gatewayDoc);
             assert.strictEqual(serializedAdmin.secretKey, undefined, 'Admin serializer must NEVER contain secretKey');
             assert.strictEqual(serializedAdmin.webhookSecret, undefined, 'Admin serializer must NEVER contain webhookSecret');
-            assert.strictEqual(serializedAdmin.hasSecretKey, true);
-            assert.ok(!serializedAdmin.maskedSecretKey.includes('very_secret'), 'Masked secret must not leak raw string');
+            // New: boolean indicators only — no prefix/suffix fragments exposed
+            assert.strictEqual(serializedAdmin.secretKeyConfigured, true, 'Must expose boolean secretKeyConfigured indicator');
+            assert.strictEqual(serializedAdmin.webhookSecretConfigured, true, 'Must expose boolean webhookSecretConfigured indicator');
+            assert.strictEqual(serializedAdmin.hasSecretKey, undefined, 'hasSecretKey (with masked prefix) must not exist');
+            assert.strictEqual(serializedAdmin.maskedSecretKey, undefined, 'maskedSecretKey must not exist — leaks key prefix/suffix');
+
+            const json = JSON.stringify(serializedAdmin);
+            assert.ok(!json.includes('very_secret'), 'No secret fragment in serialized output');
 
             const serializedClient = sanitizePaymentGatewayForClient(gatewayDoc);
             assert.strictEqual(serializedClient.secretKey, undefined);
             assert.strictEqual(serializedClient.webhookSecret, undefined);
             assert.strictEqual(serializedClient.publicKey, undefined);
+            assert.strictEqual(serializedClient.secretKeyConfigured, undefined, 'Client view must not expose any credential indicators');
         });
 
         await test('35. Secret credentials are not logged in output or errors', () => {
