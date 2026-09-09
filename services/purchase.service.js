@@ -232,10 +232,8 @@ class PurchaseService {
                 session.endSession();
             }
 
-            // Notify user of success (outside of session for performance)
-
-            // Notify user of success (outside of session for performance)
-            await notificationService.notify(user, {
+            // Notify user of success (asynchronous fire-and-forget so it doesn't block HTTP response)
+            notificationService.notify(user, {
                 title: `${type.toUpperCase()} Purchase Successful`,
                 message: `Your purchase of ${serviceId} for ₦${finalAmount} was successful.`,
                 smsMessage: `Your ${type} purchase of ${serviceId} for ₦${finalAmount} was successful. Transaction ID: ${transaction.transactionId}`,
@@ -255,9 +253,28 @@ class PurchaseService {
                 type: 'transaction',
                 activityType: 'purchase_success',
                 metadata: { transactionId: transaction._id }
+            }).catch(err => {
+                console.error('[Notification Background Error] Success notification failed:', err.message);
             });
 
-            return { success: true, data: response, transactionId: transaction._id };
+            // Build normalized Zantara response (preserves provider response while guaranteeing reference & transactionId)
+            const normalizedData = {
+                ...response,
+                success: true,
+                status: 'success',
+                message: response.message || 'Transaction processed successfully',
+                reference: reference,
+                transactionId: transaction.transactionId || response.transactionId || reference,
+                providerTransactionId: response.transactionId || null,
+                token: response.token || null,
+            };
+
+            return { 
+                success: true, 
+                data: normalizedData, 
+                transactionId: transaction._id,
+                reference: reference 
+            };
 
         } catch (err) {
 
@@ -266,9 +283,8 @@ class PurchaseService {
 
                     await refundService.processRefund(transaction._id, err.message);
 
-                    // Notify user of failure
-                    // Notify user of failure
-                    await notificationService.notify(user, {
+                    // Notify user of failure (asynchronous fire-and-forget)
+                    notificationService.notify(user, {
                         title: `${type.toUpperCase()} Purchase Failed`,
                         message: `Your purchase of ${serviceId} failed: ${err.message}. Your wallet has been refunded.`,
                         smsMessage: `Your ${type} purchase of ${serviceId} failed. Your wallet has been refunded. Reason: ${err.message}`,
@@ -287,6 +303,8 @@ class PurchaseService {
                         type: 'transaction',
                         activityType: 'purchase_failed',
                         metadata: { transactionId: transaction._id }
+                    }).catch(notifErr => {
+                        console.error('[Notification Background Error] Failure notification failed:', notifErr.message);
                     });
                 } catch (refundErr) {
 
