@@ -1,4 +1,5 @@
 const axios = require('axios')
+const Transaction = require('../models/Transaction')
 const TransactionStatus = require('../models/TransactionStatus')
 const { sendAirtimeRequest, sendDataPurchase, sendCableRecharge } = require('./vtuService')
 const Wallet = require('../models/Wallet')
@@ -16,15 +17,21 @@ const retryTransaction = async refId => {
 
     const { type, refId, retries } = transactionStatus
 
+    // Retrieve original Transaction to obtain the fulfilling provider
+    const originalTx = await Transaction.findOne({
+        $or: [{ refId }, { transactionId: refId }]
+    });
+    const provider = originalTx?.provider || (transactionStatus.provider !== 'paystack' ? transactionStatus.provider : undefined);
+
     let response
 
-    // Retry logic based on transaction type
+    // Retry logic based on transaction type with fulfilling provider
     if (type === 'airtime') {
-        response = await sendAirtimeRequest({ refId })
+        response = await sendAirtimeRequest({ refId }, provider)
     } else if (type === 'data') {
-        response = await sendDataPurchase({ refId })
+        response = await sendDataPurchase({ refId }, provider)
     } else if (type === 'cable') {
-        response = await sendCableRecharge({ refId })
+        response = await sendCableRecharge({ refId }, provider)
     }
 
     if (response.status === 'success') {

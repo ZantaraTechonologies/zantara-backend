@@ -4,6 +4,8 @@ const VTPassAdapter = require('../adapters/vtpass.adapter');
 const Vas2NetsAdapter = require('../adapters/vas2nets.adapter');
 const UniversalAdapter = require('../adapters/universal.adapter');
 
+const { decryptSecret } = require('../utils/crypto');
+
 class ProviderService {
     constructor() {
         this.adapterClasses = {
@@ -15,7 +17,7 @@ class ProviderService {
 
     /**
      * Resolves and instantiates an adapter from the database configuration.
-     * This ensures that API keys updated in the Admin UI are picked up immediately.
+     * Decrypts credentials in memory immediately before adapter instantiation.
      * @param {string} providerName 
      */
     async getAdapterInstance(providerName) {
@@ -33,11 +35,15 @@ class ProviderService {
         // 2. Resolve Class
         const AdapterClass = this.adapterClasses[providerConfig.adapterType] || VTPassAdapter;
         
-        // 3. Instantiate with DB data
+        // 3. Decrypt credentials in memory for adapter instantiation
+        const decryptedApiKey = decryptSecret(providerConfig.apiKey);
+        const decryptedSecretKey = decryptSecret(providerConfig.secretKey);
+
+        // 4. Instantiate with decrypted credentials
         return new AdapterClass({
             baseUrl: providerConfig.baseUrl,
-            apiKey: providerConfig.apiKey,
-            secretKey: providerConfig.secretKey,
+            apiKey: decryptedApiKey,
+            secretKey: decryptedSecretKey,
             publicKey: providerConfig.publicKey,
             metadata: providerConfig.metadata
         });
@@ -69,7 +75,10 @@ class ProviderService {
     }
 
     async queryTransaction(refId, providerName) {
-        const adapter = await this.getAdapterInstance(providerName);
+        if (!providerName || typeof providerName !== 'string' || !providerName.trim()) {
+            throw new Error('Provider is required for transaction requery');
+        }
+        const adapter = await this.getAdapterInstance(providerName.trim());
         return adapter.queryTransaction(refId);
     }
 

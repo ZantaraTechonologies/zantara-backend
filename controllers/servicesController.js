@@ -598,7 +598,22 @@ const checkTransaction = async (req, res) => {
             return sendResponse(res, { status: 404, success: false, message: 'Transaction record not found in local database' })
         }
 
-        const result = await providerService.queryTransaction(localTx.refId || refId)
+        let provider = localTx.provider;
+
+        // Narrowly-scoped legacy fallback: Only for transactions with VTPass response signatures or legacy VTPass refId formats
+        if (!provider && (localTx.response?.content?.transactions || (localTx.refId && /^\d{14,}/.test(localTx.refId)))) {
+            provider = 'VTPass';
+        }
+
+        if (!provider) {
+            return sendResponse(res, { 
+                status: 400, 
+                success: false, 
+                message: 'Transaction has no associated provider and cannot be requeried' 
+            });
+        }
+
+        const result = await providerService.queryTransaction(localTx.refId || refId, provider)
         return sendResponse(res, { success: true, data: result })
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: 'Error checking transaction status', error: err.message })

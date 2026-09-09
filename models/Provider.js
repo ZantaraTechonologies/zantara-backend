@@ -39,8 +39,8 @@ const providerSchema = new mongoose.Schema({
         type: Date 
     },
     metadata: {
-        type: Map,
-        of: String
+        type: mongoose.Schema.Types.Mixed,
+        default: {}
     }
 }, { timestamps: true });
 

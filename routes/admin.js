@@ -67,12 +67,13 @@ router.delete('/services/:id', serviceController.deleteService)
 router.post('/services/sync-costs', serviceController.bulkSyncCosts)
 router.post('/services/import', serviceController.bulkImportServices)
 
-// Provider Management
+// Provider Management (SuperAdmin only for mutation operations)
 router.get('/providers', providerController.getAllProviders)
-router.post('/providers', providerController.createProvider)
-router.put('/providers/:id', providerController.updateProvider)
-router.delete('/providers/:id', providerController.deleteProvider)
+router.post('/providers', checkRoles('superAdmin'), providerController.createProvider)
+router.put('/providers/:id', checkRoles('superAdmin'), providerController.updateProvider)
+router.delete('/providers/:id', checkRoles('superAdmin'), providerController.deleteProvider)
 router.get('/providers/:id/balance', providerController.getProviderBalance)
+router.post('/providers/:id/test-connection', checkRoles('superAdmin'), providerController.testProviderConnection)
 
 // Business Settings
 router.get('/settings/business', adminSettingController.getBusinessSettings)
