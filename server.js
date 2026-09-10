@@ -21,6 +21,12 @@ app.use(cors({
     allowedHeaders: ["Content-Type", "Authorization"]
 }));
 
+// ---- WEBHOOK ROUTES (RAW BODY) — MUST BE BEFORE express.json() ----
+// Unified payment gateway webhook endpoint. express.raw() conserves the exact
+// raw HTTP body for signature verification; JSON parsing is deferred to
+// paymentGatewayService.routeWebhook() after signature validation.
+app.use('/api/webhooks', require('./routes/webhooks'));
+
 // ---- PAYSTACK WEBHOOK (RAW BODY) — MUST BE BEFORE express.json() ----
 const { webhook } = require('./controllers/paystackController');
 // Use express.raw so req.body is a Buffer for HMAC verification

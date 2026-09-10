@@ -14,6 +14,7 @@ const { decryptSecret, isEncrypted } = require('../utils/crypto');
 const PaystackAdapter = require('../adapters/payment/paystack.adapter');
 const MonnifyAdapter = require('../adapters/payment/monnify.adapter');
 const FlutterwaveAdapter = require('../adapters/payment/flutterwave.adapter');
+const { SUPPORTED_ADAPTER_CODES } = require('../adapters/payment/paymentAdapterRegistry');
 
 class PaymentGatewayService {
     constructor() {
@@ -22,6 +23,14 @@ class PaymentGatewayService {
             monnify: MonnifyAdapter,
             flutterwave: FlutterwaveAdapter
         };
+    }
+
+    /**
+     * Returns true if adapterType is registered in the authoritative adapter registry.
+     */
+    isSupportedAdapterType(adapterType) {
+        if (!adapterType) return false;
+        return SUPPORTED_ADAPTER_CODES.includes(String(adapterType).toLowerCase());
     }
 
     // ─────────────────────────────────────────────────────────
@@ -138,12 +147,26 @@ class PaymentGatewayService {
 
     /**
      * Instantiates the correct adapter for a given gateway configuration.
+     *
+     * Rejects unknown adapter types with a controlled error — it never silently
+     * falls back to Paystack or any other gateway.
      */
     getAdapterInstance(gateway) {
-        if (!gateway) throw new Error('[PaymentGatewayService] Gateway configuration is required');
-        const AdapterClass = this.adapters[gateway.adapterType || gateway.code];
+        if (!gateway) throw new Error('Payment gateway configuration is required');
+
+        const adapterType = String(gateway.adapterType || gateway.code || '').toLowerCase();
+
+        if (!this.isSupportedAdapterType(adapterType)) {
+            const err = new Error(`Unsupported payment gateway adapter: ${adapterType}`);
+            err.code = 'PAYMENT_GATEWAY_ADAPTER_UNSUPPORTED';
+            throw err;
+        }
+
+        const AdapterClass = this.adapters[adapterType];
         if (!AdapterClass) {
-            throw new Error(`[PaymentGatewayService] Unsupported gateway adapter type: ${gateway.adapterType || gateway.code}`);
+            const err = new Error(`Unsupported payment gateway adapter: ${adapterType}`);
+            err.code = 'PAYMENT_GATEWAY_ADAPTER_UNSUPPORTED';
+            throw err;
         }
         return new AdapterClass(gateway);
     }

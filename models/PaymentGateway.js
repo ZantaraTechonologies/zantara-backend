@@ -17,8 +17,9 @@ const paymentGatewaySchema = new mongoose.Schema({
     },
     adapterType: {
         type: String,
-        enum: ['paystack', 'monnify', 'flutterwave'],
-        required: true
+        required: true,
+        lowercase: true,
+        trim: true
     },
     status: {
         type: String,
