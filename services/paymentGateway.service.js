@@ -141,7 +141,7 @@ class PaymentGatewayService {
         const gateways = await PaymentGateway.find({
             status: 'active',
             supportedChannels: channel
-        });
+        }).sort({ priority: 1, createdAt: 1 });
         return gateways.map(g => this._hydrateGatewayCredentials(g));
     }
 
@@ -214,8 +214,20 @@ class PaymentGatewayService {
                     throw err;
                 }
             }
+        } else if (channel) {
+            // 2. Channel-based Gateway Selection — the highest-priority active gateway
+            //    supporting the requested channel (priority asc, createdAt asc).
+            //    No automatic failover: if the top choice errors at initialization,
+            //    the user simply retries — the transaction stays bound to one gateway.
+            const candidates = await this.getGatewaysForChannel(channel);
+            if (candidates.length === 0) {
+                const err = new Error(`No active payment gateway supports channel '${channel}'`);
+                err.code = 'PAYMENT_CHANNEL_UNSUPPORTED';
+                throw err;
+            }
+            gateway = candidates[0];
         } else {
-            // 2. Default Gateway Fallback
+            // 3. Default Gateway Fallback
             gateway = await this.getDefaultGateway();
             if (!gateway) {
                 const err = new Error('No active payment gateway is configured on the platform');

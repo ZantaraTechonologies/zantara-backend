@@ -39,7 +39,8 @@ const paymentGatewaySchema = new mongoose.Schema({
     },
     priority: {
         type: Number,
-        default: 1
+        default: 1,
+        min: 1
     },
     publicKey: {
         type: String,

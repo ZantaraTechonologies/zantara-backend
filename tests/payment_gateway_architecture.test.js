@@ -1173,6 +1173,91 @@ async function runPaymentGatewayTests() {
             assert.strictEqual(walletCredits.length, 1, 'Wallet must be credited');
         });
 
+        // ─────────────────────────────────────────────────────────────────────
+        // 9. CHANNEL-BASED GATEWAY ROUTING TESTS
+        // ─────────────────────────────────────────────────────────────────────
+
+        await test('46. Channel-based selection routes to an active gateway supporting the channel', async () => {
+            // mockGateways: paystack [card,bank_transfer] (default), monnify [bank_transfer,virtual_account],
+            //               flutterwave [card,ussd] — all active, insertion order as mock find source
+            const flutterwaveAdapter = paymentGatewayService.adapters.flutterwave.prototype;
+            const origInit = flutterwaveAdapter.initializePayment;
+            flutterwaveAdapter.initializePayment = async ({ reference }) => ({
+                success: true,
+                authorizationUrl: 'https://checkout.flutterwave.com/flw-ussd',
+                reference
+            });
+
+            const res = await paymentGatewayService.initializeFunding({
+                user: { _id: 'u-chan', email: 'chan@test.com' },
+                amount: 2000,
+                channel: 'ussd'
+            });
+
+            flutterwaveAdapter.initializePayment = origInit;
+
+            assert.strictEqual(res.success, true);
+            assert.strictEqual(res.gateway, 'flutterwave', 'Channel ussd must route to Flutterwave (the only active gateway supporting ussd)');
+            assert.ok(res.authorizationUrl.includes('flutterwave'));
+        });
+
+        await test('47. TransactionStatus records the channel that routed the payment', async () => {
+            // bank_transfer is supported by paystack (first in mock order) and monnify → paystack wins
+            const paystackAdapter = paymentGatewayService.adapters.paystack.prototype;
+            const origInit = paystackAdapter.initializePayment;
+            paystackAdapter.initializePayment = async ({ reference }) => ({
+                success: true, authorizationUrl: 'http://ps', reference
+            });
+
+            const res = await paymentGatewayService.initializeFunding({
+                user: { _id: 'u-chan2', email: 'chan2@test.com' },
+                amount: 2500,
+                channel: 'bank_transfer'
+            });
+
+            paystackAdapter.initializePayment = origInit;
+
+            assert.strictEqual(res.gateway, 'paystack', 'Highest-priority supporting gateway must win for bank_transfer');
+            const tx = mockTransactions.find(t => t.refId === res.reference);
+            assert.ok(tx, 'TransactionStatus record must exist');
+            assert.deepStrictEqual(tx.channels, ['bank_transfer'], 'Requested channel must be persisted');
+        });
+
+        await test('48. No active gateway supporting the channel is rejected', async () => {
+            let errCaught = null;
+            try {
+                await paymentGatewayService.initializeFunding({
+                    user: { _id: 'u-chan3', email: 'chan3@test.com' },
+                    amount: 3000,
+                    channel: 'qr'
+                });
+            } catch (e) {
+                errCaught = e;
+            }
+            assert.ok(errCaught, 'Must throw when no active gateway supports the channel');
+            assert.strictEqual(errCaught.code, 'PAYMENT_CHANNEL_UNSUPPORTED');
+        });
+
+        await test('49. Explicit gatewayCode still overrides channel-based routing', async () => {
+            // Paystack supports bank_transfer, but explicit monnify must win regardless
+            const monnifyAdapter = paymentGatewayService.adapters.monnify.prototype;
+            const origInit = monnifyAdapter.initializePayment;
+            monnifyAdapter.initializePayment = async ({ reference }) => ({
+                success: true, authorizationUrl: 'http://mnfy-explicit', reference
+            });
+
+            const res = await paymentGatewayService.initializeFunding({
+                gatewayCode: 'monnify',
+                user: { _id: 'u-chan4', email: 'chan4@test.com' },
+                amount: 3500,
+                channel: 'bank_transfer'
+            });
+
+            monnifyAdapter.initializePayment = origInit;
+
+            assert.strictEqual(res.gateway, 'monnify', 'Explicit gateway selection must take precedence over channel routing');
+        });
+
     } finally {
         // Restore all mocks
         PaymentGateway.find = origFind;

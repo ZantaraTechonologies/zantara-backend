@@ -17,7 +17,7 @@ const transactionStatusSchema = new mongoose.Schema({
     confirmedCurrency: { type: String },                // external provider confirmed currency
     confirmedProviderRef: { type: String },             // external provider transaction identifier
     reconciliationReason: { type: String },             // security / anomaly justification
-    channels: [{ type: String, enum: ['card', 'ussd', 'bank_transfer'] }],
+    channels: [{ type: String, enum: ['card', 'ussd', 'bank_transfer', 'virtual_account'] }],
     provider: { type: String, default: 'paystack' },    // gateway code e.g. 'paystack', 'monnify'
     service: { type: String, default: '' },             // human-readable gateway name e.g. 'Paystack'
     providerRef: { type: String },                      // if you ever need to store Paystack’s own ref

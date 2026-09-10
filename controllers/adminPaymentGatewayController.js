@@ -17,6 +17,19 @@ const {
  * Ensures initial default payment gateways exist if the collection is empty.
  * Migrates env credentials for Paystack, Monnify, Flutterwave safely.
  */
+
+/**
+ * Normalizes and validates the gateway routing priority.
+ * Returns 1 for undefined/blank (schema default), the floored positive integer
+ * for valid inputs, or null for invalid (negative, zero, non-numeric).
+ */
+function normalizePriority(value) {
+    if (value === undefined || value === null || value === '') return 1;
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 1) return null;
+    return Math.floor(n);
+}
+
 async function ensureDefaultGateways() {
     const count = await PaymentGateway.countDocuments();
     if (count > 0) return;
@@ -180,6 +193,14 @@ const createGateway = async (req, res) => {
             });
         }
 
+        const requestPriority = normalizePriority(priority);
+        if (requestPriority === null) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid priority. Must be a positive integer (1 or greater).'
+            });
+        }
+
         const normalizedCode = code.toLowerCase().trim();
         const existing = await PaymentGateway.findOne({
             $or: [{ code: normalizedCode }, { name: name.trim() }]
@@ -226,7 +247,7 @@ const createGateway = async (req, res) => {
             status,
             environment: environment === 'live' ? 'live' : 'test',
             isDefault: false, // will assign via setDefault if requested
-            priority: Number(priority) || 1,
+            priority: requestPriority,
             publicKey: publicKey.trim(),
             secretKey: encryptedSecretKey,
             webhookSecret: encryptedWebhookSecret,
@@ -309,7 +330,16 @@ const updateGateway = async (req, res) => {
 
         if (baseUrl !== undefined) gateway.baseUrl = baseUrl.trim();
         if (publicKey !== undefined) gateway.publicKey = publicKey.trim();
-        if (priority !== undefined) gateway.priority = Number(priority) || 1;
+        if (priority !== undefined && priority !== null && String(priority).trim() !== '') {
+            const requestPriority = normalizePriority(priority);
+            if (requestPriority === null) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Invalid priority. Must be a positive integer (1 or greater).'
+                });
+            }
+            gateway.priority = requestPriority;
+        }
 
         if (supportedChannels !== undefined && Array.isArray(supportedChannels)) {
             // Validate channels against adapter's declared supported channels
