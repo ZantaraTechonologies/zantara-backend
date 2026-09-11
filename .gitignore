@@ -76,6 +76,22 @@ out/
 project_docs/
 server.zip
 
+# One-off dev / diagnostic scripts
+scratch/
+check_broadcasts_scratch.js
+check_users.js
+debug_jamb_pricing.js
+debug_jamb_pricing_atlas.js
+debug_jamb_pricing_v2.js
+debug_no_mock.js
+migrate-brands.js
+purge-noise.js
+restore-brands.js
+testStats.js
+verify-fix.js
+scripts/test_batch2_fallback.js
+scripts/test_batch2_pricing.js
+
 # Custom logs
 logs/
 *.log
