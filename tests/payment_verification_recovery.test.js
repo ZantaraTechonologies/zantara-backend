@@ -244,11 +244,42 @@ async function runVerificationRecoveryTests() {
             assert.strictEqual(res.amount, 5000);
         });
 
-        await test('2. Paystack explicit "abandoned" → terminal "failed"', async () => {
+        await test('2. Paystack explicit "abandoned" → "pending" (recoverable, NEVER terminal failed)', async () => {
             const adapter = new PaystackAdapter({ code: 'paystack', secretKey: 'sk_test_abc' });
             axios.get = async () => ({ data: paystackVerdict('REF-S2', 'abandoned') });
             const res = await adapter.verifyPayment('REF-S2');
-            assert.strictEqual(res.status, 'failed');
+            assert.strictEqual(res.status, 'pending');
+            assert.strictEqual(res.success, false);
+        });
+
+        await test('2b. Paystack "abandoned" + not-completed + paidAt null → "pending" (hardened mapping)', async () => {
+            const adapter = new PaystackAdapter({ code: 'paystack', secretKey: 'sk_test_abc' });
+            axios.get = async () => ({
+                data: {
+                    status: true,
+                    message: 'Verification successful',
+                    data: {
+                        status: 'abandoned',
+                        amount: 500000,
+                        currency: 'NGN',
+                        reference: 'REF-S2B',
+                        id: 987654323,
+                        gateway_response: 'The transaction was not completed',
+                        paid_at: null,
+                        metadata: { refId: 'REF-S2B', userId: 'u-test' }
+                    }
+                }
+            });
+            const res = await adapter.verifyPayment('REF-S2B');
+            assert.strictEqual(res.status, 'pending', 'abandoned + not completed + paidAt null must be pending');
+            assert.strictEqual(res.success, false);
+        });
+
+        await test('2c. Paystack "ongoing" → "pending" (recoverable, NOT failed)', async () => {
+            const adapter = new PaystackAdapter({ code: 'paystack', secretKey: 'sk_test_abc' });
+            axios.get = async () => ({ data: paystackVerdict('REF-S2C', 'ongoing') });
+            const res = await adapter.verifyPayment('REF-S2C');
+            assert.strictEqual(res.status, 'pending');
             assert.strictEqual(res.success, false);
         });
 
@@ -457,6 +488,64 @@ async function runVerificationRecoveryTests() {
             assert.strictEqual(dupResult.status, 200);
             assert.ok(dupResult.message.includes('already processed'));
             assert.strictEqual(walletCredits.length, 1, 'Duplicate webhook must not re-credit');
+        });
+
+        await test('19. "abandoned" early mobile verify → pending, NEVER terminalizes; later webhook credits exactly once (ZNT-634-D27)', async () => {
+            resetState();
+            storeGatewayMock();
+            seedFunding('REF-F9');
+
+            // Stage 1: mobile WebView fires an EARLY verify (~2s after init).
+            // Paystack still shows abandoned / not-completed / paid_at null.
+            axios.get = async () => ({
+                data: {
+                    status: true,
+                    message: 'Verification successful',
+                    data: {
+                        status: 'abandoned',
+                        amount: 500000,
+                        currency: 'NGN',
+                        reference: 'REF-F9',
+                        id: 987654324,
+                        gateway_response: 'The transaction was not completed',
+                        paid_at: null,
+                        metadata: { refId: 'REF-F9', userId: 'u-test' }
+                    }
+                }
+            });
+            const early = await paymentGatewayService.verifyFunding('REF-F9');
+            assert.strictEqual(early.status, 'pending', 'Client verify must return pending, not failed');
+            assert.strictEqual(walletCredits.length, 0, 'Early verify must NOT credit');
+            assert.strictEqual(mockTransactions[0].status, 'pending', 'Record must remain pending/recoverable, never failed');
+            assert.ok(!mockTransactions[0].errorMessage, 'No errorMessage/failed mark written');
+
+            // Stage 2: authenticated webhook + server-side verify now sees success → credit once.
+            axios.get = async () => ({ data: paystackVerified('REF-F9') });
+            const wh = await paymentGatewayService.routeWebhook('paystack', makeWebhookRequest('REF-F9', 777000112));
+            assert.strictEqual(wh.status, 200);
+            assert.strictEqual(walletCredits.length, 1, 'Webhook recovery must credit exactly once');
+            assert.strictEqual(mockTransactions[0].status, 'success');
+
+            // Stage 3: no second funding/verification path re-credits.
+            const again = await paymentGatewayService.verifyFunding('REF-F9');
+            assert.strictEqual(again.status, 'success');
+            assert.strictEqual(walletCredits.length, 1);
+        });
+
+        await test('19b. Early mobile verify on "abandoned" does not write TransactionStatus.status=failed (client /wallet/verify)', async () => {
+            resetState();
+            storeGatewayMock();
+            seedFunding('REF-F10');
+            axios.get = async () => ({
+                data: {
+                    status: false,
+                    message: 'The transaction was not completed'
+                }
+            });
+            const res = await paymentGatewayService.verifyFunding('REF-F10');
+            assert.strictEqual(res.status, 'pending');
+            assert.strictEqual(mockTransactions[0].status, 'pending', 'Client verify must NOT write failed');
+            assert.strictEqual(walletCredits.length, 0);
         });
     } finally {
         // Restore all mocks

@@ -136,15 +136,22 @@ class PaystackAdapter extends BasePaymentAdapter {
             }
 
             const data = resData.data;
-            // Conservative status mapping:
+            // Conservative status mapping (Paystack hardening):
             //   - 'success' ONLY on Paystack's explicit success status.
-            //   - terminal 'failed' ONLY on explicit abandoned/failed/declined/cancelled.
-            //   - anything else (processing, pending, on-hold, true, unknown…) is
-            //     ambiguous/not-yet-complete → 'pending' so the transaction stays
-            //     recoverable until a definitive answer (or webhook) arrives.
+            //   - terminal 'failed' ONLY on explicit FAILED / DECLINED / CANCELLED.
+            //   - 'abandoned' is NOT terminal during active checkout: Paystack returns
+            //     data.status='abandoned' with gateway_response 'The transaction was not
+            //     completed' and paid_at=null while a charge is STILL being finalized
+            //     (mobile WebView verifies ~2s after init; the same txn becomes 'success'
+            //     seconds later). Treating it as failed permanently blocks recovery.
+            //     'abandoned' → 'pending' so a later verify or webhook can credit.
+            //   - anything else (pending, processing, ongoing, status:false, missing/
+            //     non-final data, timeouts, 5xx) is ambiguous/not-yet-complete → 'pending'
+            //     so the transaction stays recoverable until a definitive answer (or
+            //     webhook) arrives.
             let normalizedStatus = 'pending';
             if (data.status === 'success') normalizedStatus = 'success';
-            else if (['failed', 'abandoned', 'declined', 'cancelled'].includes(data.status)) normalizedStatus = 'failed';
+            else if (['failed', 'declined', 'cancelled'].includes(data.status)) normalizedStatus = 'failed';
 
             const amountNaira = (data.amount || 0) / 100;
             const currency = (data.currency || 'NGN').toUpperCase();

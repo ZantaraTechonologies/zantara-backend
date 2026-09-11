@@ -42,6 +42,10 @@ const fundWallet = async (req, res) => {
             reference: result.reference,
             provider: result.provider,
             gateway: result.gateway,
+            callbackUrl: result.callbackUrl,
+            returnHost: result.callbackUrl && typeof result.callbackUrl === 'string' ? (() => {
+                try { return new URL(result.callbackUrl).hostname; } catch (e) { return undefined; }
+            })() : undefined,
             accountNumber: result.accountNumber,
             bankName: result.bankName,
             accountName: result.accountName

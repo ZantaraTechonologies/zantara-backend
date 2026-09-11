@@ -262,6 +262,12 @@ class PaymentGatewayService {
 
         // 5. Delegate to Adapter
         const adapter = this.getAdapterInstance(gateway);
+        // Resolve the effective callback URL exactly as the adapter will (the
+        // adapter defaults to CLIENT_BASE_URL/<gateway>/return). The mobile
+        // WebView needs this host to distinguish the definitive final RETURN
+        // navigation from intermediate 3DS/issuer/card-auth navigation.
+        const effectiveCallbackUrl = callbackUrl
+            || `${process.env.CLIENT_BASE_URL || 'http://localhost:5173'}/${gateway.code}/return`;
         const initResult = await adapter.initializePayment({
             user,
             amount: rawAmount,
@@ -283,6 +289,7 @@ class PaymentGatewayService {
             reference,
             provider: gateway.code,
             gateway: gateway.code,
+            callbackUrl: effectiveCallbackUrl,
             raw: initResult.raw,
             // For direct transfer details
             accountNumber: initResult.accountNumber,
