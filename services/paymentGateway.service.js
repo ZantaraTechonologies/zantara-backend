@@ -350,7 +350,11 @@ class PaymentGatewayService {
         }
 
         // B. Stuck in processing (previous crash window) — log for admin visibility and skip
-        //    The WalletLedger unique index on reference will prevent double-credit if retried.
+        //    Exactly-once credit is enforced by the TransactionStatus state machine
+        //    (atomic pending→processing claim + terminal-success check), NOT by the
+        //    WalletLedger.reference index — that index is intentionally non-unique and
+        //    must not be relied on for dedupe. Records stuck in 'processing' need
+        //    manual reconciliation review.
         if (transactionStatus.status === 'processing') {
             console.warn(`[FUNDING-SAFETY-WARN] Reference ${refId} is stuck in 'processing'. Previous finalization may have crashed mid-flight. Manual reconciliation review required.`);
             return {
@@ -385,6 +389,10 @@ class PaymentGatewayService {
         }
 
         // E. Confirm provider reported success
+        //    Only an EXPLICIT terminal 'failed' verdict marks the record failed.
+        //    pending / processing / ambiguous / not_found / transport errors must
+        //    never permanently mark the record failed — they are left 'pending'
+        //    (or 'processing') so a later verify or webhook can still recover.
         if (gatewayPaymentResult.status !== 'success') {
             if (gatewayPaymentResult.status === 'failed') {
                 await TransactionStatus.updateOne(

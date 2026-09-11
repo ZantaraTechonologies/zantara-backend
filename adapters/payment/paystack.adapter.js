@@ -99,20 +99,30 @@ class PaystackAdapter extends BasePaymentAdapter {
 
             const resData = response.data;
             if (!resData || !resData.status || !resData.data) {
+                // Ambiguous / not-yet-complete response (e.g. Paystack returns
+                // status:false with "The transaction was not completed" when the
+                // checkout is still pending). Treat as 'pending' — NEVER 'failed' —
+                // so a later webhook/verify can still recover and credit the wallet.
                 return {
                     success: false,
-                    status: 'failed',
+                    status: 'pending',
                     reference,
                     amount: 0,
                     currency: 'NGN',
-                    message: resData?.message || 'Paystack verification returned empty data'
+                    message: resData?.message || 'Paystack verification returned an incomplete response'
                 };
             }
 
             const data = resData.data;
+            // Conservative status mapping:
+            //   - 'success' ONLY on Paystack's explicit success status.
+            //   - terminal 'failed' ONLY on explicit abandoned/failed/declined/cancelled.
+            //   - anything else (processing, pending, on-hold, true, unknown…) is
+            //     ambiguous/not-yet-complete → 'pending' so the transaction stays
+            //     recoverable until a definitive answer (or webhook) arrives.
             let normalizedStatus = 'pending';
             if (data.status === 'success') normalizedStatus = 'success';
-            else if (['failed', 'abandoned'].includes(data.status)) normalizedStatus = 'failed';
+            else if (['failed', 'abandoned', 'declined', 'cancelled'].includes(data.status)) normalizedStatus = 'failed';
 
             const amountNaira = (data.amount || 0) / 100;
             const currency = (data.currency || 'NGN').toUpperCase();
@@ -130,9 +140,12 @@ class PaystackAdapter extends BasePaymentAdapter {
             };
         } catch (err) {
             const msg = err.response?.data?.message || err.message;
+            // Transport / provider error (timeout, 5xx, network). Never classify as
+            // terminal 'failed' — the transaction may still complete server-side, and
+            // treating it as failed permanently would block a later recovery/credit.
             return {
                 success: false,
-                status: 'failed',
+                status: 'pending',
                 reference,
                 amount: 0,
                 currency: 'NGN',
