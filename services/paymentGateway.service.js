@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const PaymentGateway = require('../models/PaymentGateway');
 const TransactionStatus = require('../models/TransactionStatus');
 const WebhookEvent = require('../models/WebhookEvent');
+const WalletLedger = require('../models/WalletLedger');
 const walletService = require('./wallet.service');
 const notificationService = require('./notification.service');
 const investmentService = require('./investment.service');
@@ -307,10 +308,12 @@ class PaymentGatewayService {
      *
      *   If Step 2 throws after Step 1 (e.g. wallet not found, network crash):
      *     - TransactionStatus remains 'processing'
-     *     - A retry of this reference sees status='processing', re-enters
-     *       the credit path, and is safely handled by walletService.credit()
-     *       ledger idempotency (same reference = duplicate-key on WalletLedger).
      *     - Admin can inspect 'processing' records for manual reconciliation.
+     *
+     *   NOTE: Exactly-once credit is enforced by the TransactionStatus state
+     *   machine (atomic claim + terminal-success check), NOT by the
+     *   WalletLedger.reference index — that index is intentionally non-unique
+     *   and must never be relied on for dedupe.
      *
      *   This is the safest pattern achievable without a 2-phase-commit or
      *   change-data-capture pipeline, and is production-grade for MongoDB.
@@ -329,6 +332,15 @@ class PaymentGatewayService {
      *
      *   amount / currency / reference mismatch:
      *                                → status = 'reconciliation_required'   (preserve evidence, no credit)
+     *
+     * Failed-state recovery (narrow, webhook-only):
+     *   A FUNDING record currently in 'failed' may ONLY be recovered by an
+     *   authenticated provider webhook whose independent server-to-server
+     *   verification re-confirms explicit provider success. Recovery requires
+     *   strict eligibility (see _isWebhookRecoveryEligible) and an atomic
+     *   failed → processing claim before re-using the exact same credit path.
+     *   No client/callback/admin source, and no 'reconciliation_required'
+     *   record, may ever auto-recover.
      */
     async finalizeFundingCredit({ transactionStatus, gatewayPaymentResult, source = 'webhook' }) {
         if (!transactionStatus) {
@@ -366,16 +378,25 @@ class PaymentGatewayService {
             };
         }
 
-        // C. Already in reconciliation or failed — do not re-process
-        if (transactionStatus.status === 'reconciliation_required' || transactionStatus.status === 'failed') {
-            console.log(`[Funding Safety] Reference ${refId} is in terminal state '${transactionStatus.status}'. No action taken. Source: ${source}`);
+        // C. Already in reconciliation — terminal, never re-process automatically.
+        //    reconciliation_required preserves evidence of a real-money anomaly for
+        //    manual admin review. Do NOT auto-recover it.
+        if (transactionStatus.status === 'reconciliation_required') {
+            console.log(`[Funding Safety] Reference ${refId} is in terminal state 'reconciliation_required'. No action taken. Source: ${source}`);
             return {
                 success: false,
-                status: transactionStatus.status,
+                status: 'reconciliation_required',
                 alreadyProcessed: true,
                 credited: false,
-                message: `Transaction is in state '${transactionStatus.status}' and cannot be re-processed.`
+                message: `Transaction is in state 'reconciliation_required' and cannot be re-processed.`
             };
+        }
+
+        // C2. Failed state — by default terminal, EXCEPT the single narrow,
+        //     authenticated-webhook FUNDING recovery (see _handleFailedState).
+        //     No client / callback / admin source may ever resurrect a failed record.
+        if (transactionStatus.status === 'failed') {
+            return this._handleFailedState({ transactionStatus, gatewayPaymentResult, refId, source });
         }
 
         // D. Confirm gateway matches transaction gateway binding (prevents cross-gateway verification)
@@ -476,9 +497,6 @@ class PaymentGatewayService {
             throw err;
         }
 
-        const amountNaira = confirmedKobo / 100;
-        const userId = transactionStatus.userId;
-
         // ─── ATOMIC STEP 1: Claim the finalization lock ───────────────────────
         //
         // Transition: pending → processing
@@ -512,6 +530,33 @@ class PaymentGatewayService {
             };
         }
 
+        // ─── ATOMIC STEP 2 + 3: Credit wallet/fulfill, finalize to success ─────
+        // Extracted into _finalizeAfterClaim so the webhook failed-state recovery
+        // can atomically claim failed → processing and then reuse this EXACT
+        // identical credit + finalize path (guaranteeing true exactly-once credit).
+        return this._finalizeAfterClaim({
+            transactionStatus,
+            gatewayPaymentResult,
+            refId,
+            confirmedKobo,
+            confirmedCurrency,
+            source,
+            recovery: false
+        });
+    }
+
+    /**
+     * Atomically finalizes an already-claimed (processing) transaction:
+     * wallet credit / investment fulfillment → processing → success → notification → immutable audit log.
+     *
+     * Caller MUST have already claimed the state machine lock, otherwise the
+     * processing → success transition below will be a no-op and the caller
+     * returns success:false. Exactly-once is preserved by the state machine.
+     */
+    async _finalizeAfterClaim({ transactionStatus, gatewayPaymentResult, refId, confirmedKobo, confirmedCurrency, source, recovery = false }) {
+        const amountNaira = confirmedKobo / 100;
+        const userId = transactionStatus.userId;
+
         // ─── ATOMIC STEP 2: Credit wallet + create ledger ─────────────────────
         //
         // walletService.credit() uses its own MongoDB session internally
@@ -541,9 +586,8 @@ class PaymentGatewayService {
         // ─── ATOMIC STEP 3: Finalize to success ───────────────────────────────
         //
         // Transition: processing → success
-        // If this fails (e.g. transient network error) after the wallet was credited:
-        //   - Status stays 'processing' — admin can safely re-finalize since
-        //     walletService.credit() is idempotent via unique WalletLedger reference.
+        // If this fails (e.g. transient network error) after the wallet was credited,
+        // the record stays 'processing' and is a clear admin signal for manual review.
         //
         await TransactionStatus.updateOne(
             { refId, status: 'processing' },
@@ -576,6 +620,9 @@ class PaymentGatewayService {
             response: gatewayPaymentResult.raw || {}
         });
 
+        if (recovery) {
+            console.log(`[FUNDING-RECOVERY] Reference ${refId}: recovered 'failed' → 'success' via authenticated webhook. Amount ₦${amountNaira}.`);
+        }
         console.log(`[Funding Safety] Reference ${refId}: finalized successfully. Amount ₦${amountNaira}. Source: ${source}`);
 
         return {
@@ -583,8 +630,127 @@ class PaymentGatewayService {
             status: 'success',
             credited: true,
             amount: amountNaira,
-            reference: refId
+            reference: refId,
+            ...(recovery ? { recovered: true } : {})
         };
+    }
+
+    /**
+     * Handles a TransactionStatus record currently in 'failed'.
+     *
+     * By default 'failed' is terminal. The single exception is an authenticated
+     * provider WEBHOOK that re-confirms provider success for a FUNDING transaction
+     * (source === 'webhook' AND strict _isWebhookRecoveryEligible passes). Once
+     * eligible, the recovery atomically claims failed → processing (modifiedCount === 1)
+     * and reuses _finalizeAfterClaim, so the credit is exactly-once.
+     */
+    async _handleFailedState({ transactionStatus, gatewayPaymentResult, refId, source }) {
+        const eligible = await this._isWebhookRecoveryEligible({ transactionStatus, gatewayPaymentResult, refId, source });
+
+        if (!eligible) {
+            console.log(`[Funding Safety] Reference ${refId} is in terminal state 'failed'. No action taken. Source: ${source}`);
+            return {
+                success: false,
+                status: 'failed',
+                alreadyProcessed: true,
+                credited: false,
+                message: `Transaction is in state 'failed' and cannot be re-processed.`
+            };
+        }
+
+        const confirmedCurrency = (gatewayPaymentResult.currency || 'NGN').toUpperCase();
+        const confirmedKobo = Math.round(Number(gatewayPaymentResult.amount || 0) * 100);
+
+        // ─── ATOMIC RECOVERY CLAIM: failed → processing ────────────────────────
+        // Exactly one concurrent webhook wins (modifiedCount === 1). The losing
+        // caller re-reads and reports the winner's state; NO second credit.
+        const recoveryClaim = await TransactionStatus.updateOne(
+            { refId, status: 'failed' },
+            {
+                $set: {
+                    status: 'processing',
+                    confirmedAmountKobo: confirmedKobo,
+                    confirmedCurrency,
+                    confirmedProviderRef: gatewayPaymentResult.providerTransactionId || '',
+                    reconciliationReason: `Authenticated webhook recovery (providerTransactionId=${gatewayPaymentResult.providerTransactionId || 'n/a'}; gateway=${gatewayPaymentResult.gateway || 'n/a'}; source=${source})`
+                }
+            }
+        );
+
+        if (recoveryClaim.modifiedCount !== 1) {
+            // Another process recovered/claimed it first (or state changed under us).
+            const latest = await TransactionStatus.findOne({ refId });
+            console.log(`[Funding Safety] Reference ${refId}: webhook recovery claim not acquired (status now '${latest && latest.status}'). No second credit.`);
+            return {
+                success: latest && latest.status === 'success',
+                status: (latest && latest.status) || 'processing',
+                alreadyProcessed: true,
+                credited: false,
+                message: 'Transaction recovery already claimed by a concurrent process'
+            };
+        }
+
+        console.log(`[FUNDING-RECOVERY] Reference ${refId}: failed → processing recovery claim acquired via authenticated webhook.`);
+        return this._finalizeAfterClaim({
+            transactionStatus,
+            gatewayPaymentResult,
+            refId,
+            confirmedKobo,
+            confirmedCurrency,
+            source,
+            recovery: true
+        });
+    }
+
+    /**
+     * Strict eligibility for webhook failed→success recovery. ALL must hold:
+     *   1. source === 'webhook'            (authenticated provider event already persisted by routeWebhook)
+     *   2. transactionStatus.type === 'funding'
+     *   3. gateway verify explicitly reports status === 'success' (independent server-to-server confirmation)
+     *   4. provider binding matches the confirmed gateway
+     *   5. provider reference matches refId
+     *   6. confirmed currency is NGN
+     *   7. confirmed amount (Kobo) matches the expected amount
+     *   8. NO pre-existing funding credit ledger row for this reference
+     *
+     * Returns a boolean; NEVER throws (an eligibility error must leave the record
+     * exactly as-is in 'failed').
+     */
+    async _isWebhookRecoveryEligible({ transactionStatus, gatewayPaymentResult, refId, source }) {
+        try {
+            if (source !== 'webhook') return false;
+            if (!transactionStatus || transactionStatus.type !== 'funding') return false;
+            if (!gatewayPaymentResult || gatewayPaymentResult.status !== 'success') return false;
+
+            // Provider binding match — never recover across gateways.
+            if (transactionStatus.provider && gatewayPaymentResult.gateway) {
+                if (transactionStatus.provider.toLowerCase() !== String(gatewayPaymentResult.gateway).toLowerCase()) return false;
+            }
+
+            // Provider reference must match the local reference exactly.
+            if (gatewayPaymentResult.reference && gatewayPaymentResult.reference !== refId) return false;
+
+            // Currency must be NGN.
+            if ((gatewayPaymentResult.currency || 'NGN').toUpperCase() !== 'NGN') return false;
+
+            // Amount must match exactly (Kobo), and be a sane positive value.
+            const expectedKobo = transactionStatus.amountKobo
+                || Math.round(Number(transactionStatus.amount || 0) * 100);
+            const confirmedKobo = Math.round(Number(gatewayPaymentResult.amount || 0) * 100);
+            if (confirmedKobo <= 0) return false;
+            if (expectedKobo > 0 && confirmedKobo !== expectedKobo) return false;
+
+            // Must NOT have been previously credited. The WalletLedger reference
+            // index is non-unique, so the state machine is the real guard — but
+            // this explicit check blocks double-credit even on past/admin runs.
+            const existingCredit = await WalletLedger.findOne({ reference: refId, entryType: 'credit' });
+            if (existingCredit) return false;
+
+            return true;
+        } catch (eligibilityErr) {
+            console.error(`[FUNDING-RECOVERY-WARN] Reference=${refId}: eligibility check error. Recovery skipped, record left 'failed'.`, eligibilityErr.message);
+            return false;
+        }
     }
 
     // ─────────────────────────────────────────────────────────

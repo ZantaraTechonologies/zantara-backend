@@ -98,6 +98,28 @@ class PaystackAdapter extends BasePaymentAdapter {
             });
 
             const resData = response.data;
+            // Sanitized observability for support/reconciliation: reference, HTTP
+            // status and public verify verdict fields ONLY — never Authorization
+            // headers, card data, customer email/PII, or metadata. This lets
+            // support reconstruct the exact verify snapshot that drove a state
+            // change (including the ambiguous case that historically produced
+            // 'failed').
+            {
+                const safe = { ref: reference, httpStatus: response && response.status };
+                if (resData) {
+                    safe.topStatus = resData.status;
+                    safe.message = resData.message;
+                }
+                const d = resData && resData.data;
+                safe.dataStatus = d && d.status;
+                safe.gatewayResponse = d && d.gateway_response;
+                safe.amountKobo = d && d.amount;
+                safe.currency = d && d.currency;
+                safe.paidAt = d && d.paid_at;
+                safe.channel = d && d.channel;
+                console.log(`[PaystackVerify] ${JSON.stringify(safe)}`);
+            }
+
             if (!resData || !resData.status || !resData.data) {
                 // Ambiguous / not-yet-complete response (e.g. Paystack returns
                 // status:false with "The transaction was not completed" when the
@@ -140,6 +162,7 @@ class PaystackAdapter extends BasePaymentAdapter {
             };
         } catch (err) {
             const msg = err.response?.data?.message || err.message;
+            console.log(`[PaystackVerify] ${JSON.stringify({ ref: reference, httpStatus: err.response ? err.response.status : null, error: msg })}`);
             // Transport / provider error (timeout, 5xx, network). Never classify as
             // terminal 'failed' — the transaction may still complete server-side, and
             // treating it as failed permanently would block a later recovery/credit.
