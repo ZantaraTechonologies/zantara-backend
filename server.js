@@ -95,6 +95,7 @@ const systemRoutes = require('./routes/system');
 const investmentRoutes = require('./routes/investment');
 const catalogV2Routes = require('./routes/v2/catalog');
 const pricingV1Routes = require('./routes/v1/pricing');
+const legalRoutes = require('./routes/legal');
 const errorHandler = require('./middlewares/errorHandler');
 
 app.use('/api', index);
@@ -126,6 +127,7 @@ app.use('/api/admin/system', systemRoutes);
 app.use('/api/investment', investmentRoutes);
 app.use('/api/v2/catalog', catalogV2Routes);
 app.use('/api/v1/pricing', pricingV1Routes);
+app.use('/api/legal', legalRoutes);
 
 // Global error handler (keep last)
 app.use(errorHandler);

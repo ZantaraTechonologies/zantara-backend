@@ -10,13 +10,15 @@ const { sendSMS } = require('../utils/sms')
 const notificationService = require('../services/notification.service')
 const ActivityLog = require('../models/ActivityLog')
 const { createReservedAccount } = require('../utils/monnify')
+const LegalAcceptance = require('../models/LegalAcceptance')
+const legalService = require('../services/legalDocument.service')
 
 const register = async (req, res) => {
-    let { name, email, phone, password, referrerCode, referralCode, role } = req.body
-    
+    let { name, email, phone, password, referrerCode, referralCode } = req.body
+
     // Normalize referral code naming (Web vs Mobile mismatch)
     const activeReferrerCode = (referrerCode || referralCode || "").trim().toLowerCase();
-    
+
     // Normalize email
     if (email) email = email.trim().toLowerCase();
     if (phone) phone = phone.trim();
@@ -25,6 +27,9 @@ const register = async (req, res) => {
     if (!name || !phone || !email || !password) {
         return res.status(400).json({ message: "Name, email, phone and password are required" });
     }
+
+    // Phase 2: legal acceptance payload (array of {documentType, version, contentHash, channel})
+    const legalPayload = req.body.legalAcceptances || req.body.legalAcceptance || [];
 
     try {
         const phoneExists = await checkPhone(phone)
@@ -58,8 +63,8 @@ const register = async (req, res) => {
             referrerCode: activeReferrerCode || undefined,
             referredBy,
             myReferralCode,
-            role: role || 'user',
-            roles: [role || 'user'],
+            role: 'user', // Never accept a role from a self-service registration
+            roles: ['user'],
             isPhoneVerified: true, // Bypass OTP for now as requested
             status: true // Auto-verify account
         };
@@ -68,7 +73,40 @@ const register = async (req, res) => {
             userData.email = email.trim().toLowerCase();
         }
 
-        const user = await User.create(userData);
+        // ── Phase 2: server-side legal acceptance validation ────────────────────
+        // Validates version + contentHash against the then-current published docs;
+        // returns normalized rows with server-derived documentId + acceptanceType.
+        const acceptanceRows = await legalService.validateSignupAcceptances(legalPayload);
+
+        // ── Atomic: user + wallet + required acceptances ────────────────────────
+        // Transaction commits ONLY after all three collections are written.
+        // External calls (Monnify, notifications) run AFTER commit.
+        const session = await mongoose.startSession();
+        let user;
+        try {
+            session.startTransaction();
+            user = (await User.create([userData], { session }))[0];
+
+            await LegalAcceptance.insertMany(acceptanceRows.map(r => ({
+                userId: user._id,
+                documentId: r.documentId,
+                documentType: r.documentType,
+                version: r.version,
+                channel: r.channel,
+                acceptanceType: r.acceptanceType,
+                contentHash: r.contentHash
+            })), { session });
+
+            await Wallet.create([{ userId: user._id }], { session });
+            await session.commitTransaction();
+        } catch (txErr) {
+            try { await session.abortTransaction(); } catch (_) {}
+            throw txErr;
+        } finally {
+            session.endSession();
+        }
+
+        // ── Post-commit side effects (deliberately outside transaction) ─────────
 
         // Notify Referrer
         if (referredBy) {
@@ -79,9 +117,7 @@ const register = async (req, res) => {
             });
         }
 
-        await Wallet.create({ userId: user._id })
-
-        // Auto-generate Virtual Accounts (Monnify)
+        // Auto-generate Virtual Accounts (Monnify) — must NOT run inside transaction
         try {
             const vaResult = await createReservedAccount(user);
             if (vaResult.status && vaResult.accounts) {
@@ -98,11 +134,11 @@ const register = async (req, res) => {
             // We don't block registration if VA generation fails
         }
 
-        await ActivityLog.create({ 
-            userId: user._id, 
-            action: 'REGISTER', 
-            ipAddress: req.ip, 
-            device: req.headers['user-agent'] 
+        await ActivityLog.create({
+            userId: user._id,
+            action: 'REGISTER',
+            ipAddress: req.ip,
+            device: req.headers['user-agent']
         })
 
         console.log(`Registration successful for user: ${phone}`);
@@ -111,26 +147,36 @@ const register = async (req, res) => {
         sendToken(user, res)
     } catch (error) {
         console.error("Registration fatal error:", error);
-        
+
+        // Phase 2: legal-service validation errors (httpError shape)
+        if (error.status && error.code) {
+            return res.status(error.status).json({
+                success: false,
+                code: error.code,
+                message: error.message,
+                ...(error.details ? { data: error.details } : {})
+            });
+        }
+
         // Handle MongoDB Duplicate Key Errors (E11000)
         if (error.code === 11000) {
             const field = Object.keys(error.keyPattern)[0];
-            const message = field === 'phone' 
-                ? "This phone number is already registered." 
-                : field === 'email' 
-                    ? "This email address is already in use." 
+            const message = field === 'phone'
+                ? "This phone number is already registered."
+                : field === 'email'
+                    ? "This email address is already in use."
                     : "A user with these details already exists.";
-            
-            return res.status(409).json({ 
+
+            return res.status(409).json({
                 success: false,
                 message: message
             });
         }
 
-        res.status(500).json({ 
+        res.status(500).json({
             success: false,
             message: "Registration failed. Please try again later.",
-            error: error.message 
+            error: error.message
         })
     }
 }
@@ -218,6 +264,11 @@ const generateUniqueReferralCode = async () => {
     return code
 }
 
+// Only non-privileged, self-editable profile fields may be written by a user
+// updating their own account. Privileged fields (role, roles, accountType,
+// status, permissions, isShareholder, ...) are deliberately excluded.
+const SELF_EDITABLE_FIELDS = ['name', 'email', 'phone'];
+
 const updateUser = async (req, res) => {
     try {
         const { id } = req.params
@@ -227,17 +278,16 @@ const updateUser = async (req, res) => {
             return res.status(403).json({ message: "Unauthorized to update this user." })
         }
 
-        const { name, phone, email, role } = req.body
-        updateFields = {}
+        const body = req.body || {}
 
-        if (name) updateFields.name = name
-        if (phone) updateFields.phone = phone
-        if (email) updateFields.email = email
-        if (role) updateFields.role = role
+        // Explicit allowlist: copy only approved self-editable fields.
+        const updateFields = {}
+        for (const field of SELF_EDITABLE_FIELDS) {
+            if (body[field]) updateFields[field] = body[field]
+        }
 
-        // if (!name || !phone || !email) {
-        //     return res.status(400).json({ message: "All fields are required." })
-        // }
+        // Track any privileged/unknown fields the client attempted to set.
+        const blockedFields = Object.keys(body).filter(key => !SELF_EDITABLE_FIELDS.includes(key))
 
         const updatedUser = await User.findByIdAndUpdate(
             id,
@@ -250,7 +300,11 @@ const updateUser = async (req, res) => {
             action: 'UPDATE_PROFILE',
             ipAddress: req.ip,
             device: req.headers['user-agent'],
-            details: { targetUserId: id, updates: Object.keys(updateFields) }
+            details: {
+                targetUserId: id,
+                updates: Object.keys(updateFields),
+                ...(blockedFields.length ? { blockedFields } : {})
+            }
         })
 
         if (!updatedUser) {
