@@ -102,7 +102,8 @@ function installMocks() {
     LegalDocument.findOne = (filter) => qFindOne(() => docs.filter(d => matches(d, filter)));
     LegalDocument.findById = (id) => q(docs.find(d => String(d._id) === String(id)) || null);
     LegalDocument.create = async (data) => {
-        const doc = attachSave({ _id: String(idCounter++), ...data, createdAt: new Date(), updatedAt: new Date() });
+        // Real 24-hex ObjectIds so production id validation is exercised faithfully.
+        const doc = attachSave({ _id: new mongoose.Types.ObjectId().toString(), ...data, createdAt: new Date(), updatedAt: new Date() });
         docs.push(doc);
         return doc;
     };

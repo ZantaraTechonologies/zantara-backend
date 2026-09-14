@@ -107,7 +107,8 @@ function installMocks() {
     LegalDocument.findOne = (filter) => qFindOne(() => docs.filter(d => matches(d, filter)));
     LegalDocument.findById = (id) => q(docs.find(d => String(d._id) === String(id)) || null);
     LegalDocument.create = async (data) => {
-        const doc = attachSave({ _id: String(idCounter++), ...data, createdAt: new Date(), updatedAt: new Date() });
+        // Real 24-hex ObjectIds so production id validation is exercised faithfully.
+        const doc = attachSave({ _id: new mongoose.Types.ObjectId().toString(), ...data, createdAt: new Date(), updatedAt: new Date() });
         docs.push(doc);
         return doc;
     };
@@ -277,9 +278,14 @@ function test(name, fn) {
             assert.ok(detail.sourceMarkdown && detail.contentHtml);
         });
         const eMissing = await expectReject(() => legalService.getDocumentById('nope'));
-        test('B3. getDocumentById unknown id -> 404 DOC_NOT_FOUND', () => {
-            assert.strictEqual(eMissing.status, 404);
-            assert.strictEqual(eMissing.code, 'DOC_NOT_FOUND');
+        test('B3. getDocumentById malformed id -> 400 INVALID_DOCUMENT_ID (never CastError 500)', () => {
+            assert.strictEqual(eMissing.status, 400);
+            assert.strictEqual(eMissing.code, 'INVALID_DOCUMENT_ID');
+        });
+        const eGhost = await expectReject(() => legalService.getDocumentById(new mongoose.Types.ObjectId().toString()));
+        test('B4. getDocumentById valid-but-nonexistent ObjectId -> 404 DOC_NOT_FOUND', () => {
+            assert.strictEqual(eGhost.status, 404);
+            assert.strictEqual(eGhost.code, 'DOC_NOT_FOUND');
         });
     }
 
@@ -539,12 +545,45 @@ function test(name, fn) {
             assert.ok(resGet.body.data.contentHash);
         });
 
-        // Admin endpoints surface service errors with proper status + code.
+        // Malformed ids are rejected with 400 — a Mongoose CastError must never
+        // surface as HTTP 500 on the admin legal endpoints.
         const resErr = makeRes();
         await legalController.adminGetDocument({ ...adminReq, params: { id: 'missing' } }, resErr);
-        test('F6. admin error path -> 404 code surfaced', () => {
-            assert.strictEqual(resErr.statusCode, 404);
-            assert.strictEqual(resErr.body.code, 'DOC_NOT_FOUND');
+        test('F6. malformed id -> 400 INVALID_DOCUMENT_ID (no CastError 500)', () => {
+            assert.strictEqual(resErr.statusCode, 400);
+            assert.strictEqual(resErr.body.success, false);
+            assert.strictEqual(resErr.body.code, 'INVALID_DOCUMENT_ID');
+        });
+
+        const resUndef = makeRes();
+        await legalController.adminGetDocument({ ...adminReq, params: { id: 'undefined' } }, resUndef);
+        test('F7. literal "undefined" -> 400 INVALID_DOCUMENT_ID (not 500)', () => {
+            assert.strictEqual(resUndef.statusCode, 400);
+            assert.strictEqual(resUndef.body.code, 'INVALID_DOCUMENT_ID');
+        });
+
+        const resNull = makeRes();
+        await legalController.adminGetDocument({ ...adminReq, params: { id: 'null' } }, resNull);
+        test('F8. literal "null" -> 400 INVALID_DOCUMENT_ID (not 500)', () => {
+            assert.strictEqual(resNull.statusCode, 400);
+            assert.strictEqual(resNull.body.code, 'INVALID_DOCUMENT_ID');
+        });
+
+        const resGhost = makeRes();
+        await legalController.adminGetDocument({ ...adminReq, params: { id: new mongoose.Types.ObjectId().toString() } }, resGhost);
+        test('F9. valid-but-nonexistent ObjectId -> 404 DOC_NOT_FOUND (preserved)', () => {
+            assert.strictEqual(resGhost.statusCode, 404);
+            assert.strictEqual(resGhost.body.code, 'DOC_NOT_FOUND');
+        });
+
+        // Informational (acceptanceMode none) published doc may be archived directly.
+        const publishedRefund = docs.find(d => d.documentType === 'refund_complaints' && d.status === 'published');
+        const resArchive = makeRes();
+        await legalController.adminArchiveDocument({ ...adminReq, params: { id: publishedRefund && publishedRefund._id } }, resArchive);
+        test('F10. adminArchiveDocument valid informational doc -> 200 archived + audit', () => {
+            assert.strictEqual(resArchive.statusCode, 200);
+            assert.strictEqual(resArchive.body.data.status, 'archived');
+            assert.ok(auditCalls.find(c => c.action === 'LEGAL_DOCUMENT_ARCHIVED'));
         });
 
         auditController.logAction = originalLogAction;
@@ -648,6 +687,14 @@ function test(name, fn) {
         assert.ok(admin && admin[0] === verifyJWT);
         assert.ok(admin.length === 3, 'expected verifyJWT + checkRoles + handler');
         assert.ok(!has(admin, requireLegalCompliance));
+    });
+    test('G3b. admin :id, :id/publish, :id/archive: verifyJWT + superAdmin role gate intact', () => {
+        for (const path of ['/admin/documents/:id', '/admin/documents/:id/publish', '/admin/documents/:id/archive']) {
+            const h = layersFor(legalRouter, path);
+            assert.ok(h && h.length === 3, `${path} should be verifyJWT + checkRoles + handler`);
+            assert.ok(h[0] === verifyJWT, `${path} first layer must be verifyJWT`);
+            assert.ok(!has(h, requireLegalCompliance), `${path} must not be legally-guarded`);
+        }
     });
     test('G4. guarded: POST /services/airtime,data,electricity,cable,purchase-pin', () => {
         for (const path of ['/airtime', '/data', '/electricity', '/cable', '/purchase-pin']) {

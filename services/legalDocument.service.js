@@ -11,6 +11,16 @@ function httpError(status, code, message) {
     return e;
 }
 
+// Strict 24-hex ObjectId guard shared by every admin id-routed operation.
+// Runs BEFORE any Mongoose lookup so a malformed id (undefined/null/abc/…)
+// is rejected as HTTP 400 instead of surfacing a CastError as HTTP 500.
+const OBJECT_ID_RE = /^[0-9a-fA-F]{24}$/;
+function requireValidDocumentId(id) {
+    if (typeof id !== 'string' || !OBJECT_ID_RE.test(id)) {
+        throw httpError(400, 'INVALID_DOCUMENT_ID', 'A valid legal document ID is required.');
+    }
+}
+
 // Publish-ordered current doc snapshot for public consumption.
 // Exposes ONLY the authoritative render + acceptance metadata:
 // documentType, title, version, sanitized contentHtml, contentHash,
@@ -78,7 +88,7 @@ class LegalDocumentService {
     // Full document (including sourceMarkdown + contentHtml) for preview/edit.
     // Internal-only; consumed by SuperAdmin endpoints.
     async getDocumentById(id) {
-        if (!id) throw httpError(400, 'ID_REQUIRED', 'Document id is required');
+        requireValidDocumentId(id);
         const doc = await LegalDocument.findById(id);
         if (!doc) throw httpError(404, 'DOC_NOT_FOUND', 'Legal document not found');
         return doc;
@@ -292,7 +302,7 @@ class LegalDocumentService {
     }
 
     async updateDraft(id, patch) {
-        if (!id) throw httpError(400, 'ID_REQUIRED', 'Document id is required');
+        requireValidDocumentId(id);
 
         const doc = await LegalDocument.findById(id);
         if (!doc) throw httpError(404, 'DOC_NOT_FOUND', 'Legal document not found');
@@ -321,6 +331,7 @@ class LegalDocumentService {
 
     // Publish draft -> archived prior (atomic transaction).
     async publish(id, { publishedBy } = {}) {
+        requireValidDocumentId(id);
         const session = await mongoose.startSession();
         let doc;
         try {
@@ -369,7 +380,7 @@ class LegalDocumentService {
     // Standalone archive is forbidden for mandatory (requiresAcceptance) documents.
     // They must be replaced via publish().
     async archive(id) {
-        if (!id) throw httpError(400, 'ID_REQUIRED', 'Document id is required');
+        requireValidDocumentId(id);
         const doc = await LegalDocument.findById(id);
         if (!doc) throw httpError(404, 'DOC_NOT_FOUND', 'Legal document not found');
         if (doc.status !== 'published') throw httpError(409, 'NOT_PUBLISHED', 'Only published documents can be archived');
