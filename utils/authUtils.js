@@ -50,7 +50,8 @@ const sendToken = (user, res, status = 200, expiresIn = '7d') => {
             phone: user.phone,
             roles,
             isPhoneVerified: user.isPhoneVerified,
-            isPinSet: user.isPinSet
+            isPinSet: user.isPinSet,
+            myReferralCode: user.myReferralCode || null
         } 
     });
 };
