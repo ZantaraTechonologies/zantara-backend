@@ -9,6 +9,10 @@ const settingsService = require('../services/settings.service');
 router.get('/public', async (req, res) => {
     try {
         const siteName = await settingsService.getSetting('SITE_NAME', 'Zantara');
+        const supportEmail = await settingsService.getSetting('SUPPORT_EMAIL', '');
+        const supportPhone = await settingsService.getSetting('SUPPORT_PHONE', '');
+        const siteUrl = await settingsService.getSetting('SITE_URL', '');
+        const siteLogo = await settingsService.getSetting('SITE_LOGO', '');
         const appLockTimeout = await settingsService.getSetting('APP_LOCK_TIMEOUT_MINUTES', 3);
         const transferFeeConfig = await settingsService.getSetting('TRANSFER_FEE_CONFIG', {
             type: 'tiered',
@@ -24,6 +28,10 @@ router.get('/public', async (req, res) => {
             success: true,
             data: {
                 SITE_NAME: siteName,
+                SUPPORT_EMAIL: supportEmail || undefined,
+                SUPPORT_PHONE: supportPhone || undefined,
+                SITE_URL: siteUrl || undefined,
+                SITE_LOGO: siteLogo || undefined,
                 APP_LOCK_TIMEOUT_MINUTES: Number(appLockTimeout),
                 TRANSFER_FEE_CONFIG: transferFeeConfig,
                 WITHDRAWAL_FEE_CONFIG: withdrawalFeeConfig

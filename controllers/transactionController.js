@@ -1,25 +1,36 @@
 const Transaction = require('../models/Transaction')
 const User = require('../models/User')
 const mongoose = require('mongoose')
+const {
+    serializeCustomerTransaction,
+    serializeCustomerTransactions,
+} = require('../utils/customerTransactionSerializer')
 
 const getUserTransactions = async (req, res) => {
     const limit = parseInt(req.query.limit) || 20;
     const transactions = await Transaction.find({ userId: req.user.id })
         .sort({ createdAt: -1 })
         .limit(limit)
-    res.json(transactions)
+    res.json(serializeCustomerTransactions(transactions))
 }
 
-const getUserTransaction = async (req, res) => {
+const getUserTransaction = async (req, res, options = {}) => {
     try {
         const userId = req.user.id;
         const id = req.params.id;
 
         // 1. Check Transactions first
-        let transaction = await Transaction.findOne({ userId, _id: id });
-        
+        // Raw admin mode ({ sanitize: false }) is only reachable through the
+        // admin router, which is already gated by checkRoles('admin','superAdmin').
+        // In raw mode the lookup is by transaction id only (any owner); customer
+        // mode stays owner-scoped.
+        const raw = options.sanitize === false;
+        let transaction = raw
+            ? await Transaction.findOne({ _id: id })
+            : await Transaction.findOne({ userId, _id: id });
+
         if (transaction) {
-            return res.json(transaction);
+            return res.json(raw ? transaction : serializeCustomerTransaction(transaction));
         }
 
         // 2. Check WalletLedger for Skipped Commissions (ID might be a MongoDB ID or a "SKIP-" ref)
@@ -33,8 +44,8 @@ const getUserTransaction = async (req, res) => {
         }
 
         if (skipLog) {
-            // Map to a Transaction-like structure for the frontend
-            return res.json({
+            // Map to a Transaction-like structure for the frontend (safe customer fields only)
+            const synthetic = {
                 _id: skipLog._id,
                 userId: skipLog.userId,
                 transactionId: skipLog.metadata ? skipLog.metadata.parentTxnId : skipLog.reference,
@@ -44,9 +55,13 @@ const getUserTransaction = async (req, res) => {
                 amount: 0,
                 status: 'skipped',
                 createdAt: skipLog.createdAt,
-                metadata: skipLog.metadata,
-                details: skipLog.metadata // duplicate for frontend safety
-            });
+                metadata: {
+                    wasCapped: skipLog.metadata ? skipLog.metadata.wasCapped : undefined,
+                    buyerRole: skipLog.metadata ? skipLog.metadata.buyerRole : undefined,
+                    parentTxnId: skipLog.metadata ? skipLog.metadata.parentTxnId : undefined,
+                },
+            };
+            return res.json(synthetic);
         }
 
         return res.status(404).json({ message: 'Transaction or log not found' });

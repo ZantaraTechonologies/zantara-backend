@@ -1,6 +1,7 @@
 const mongoose = require('mongoose')
 const Transaction = require('../models/Transaction')
 const User = require('../models/User')
+const { sanitizeMetadata } = require('../utils/customerTransactionSerializer')
 
 const getDailyTransactions = async (req, res) => {
     try {
@@ -237,18 +238,21 @@ const getUserEarningsHistory = async (req, res) => {
                     status: 'success'
                 };
             }),
-            ...skippedLogs.map(l => ({
-                id: l._id,
-                type: 'referral_skipped',
-                amount: 0,
-                refId: l.reference,
-                transactionId: l.metadata ? l.metadata.parentTxnId : l.reference,
-                wasCapped: false,
-                buyerRole: l.metadata ? l.metadata.buyerRole : 'user',
-                createdAt: l.createdAt,
-                status: 'skipped',
-                metadata: l.metadata
-            }))
+            ...skippedLogs.map(l => {
+                const safeMeta = sanitizeMetadata(l.metadata, 'referral_skipped');
+                return {
+                    id: l._id,
+                    type: 'referral_skipped',
+                    amount: 0,
+                    refId: l.reference,
+                    transactionId: l.metadata ? l.metadata.parentTxnId : l.reference,
+                    wasCapped: false,
+                    buyerRole: l.metadata ? l.metadata.buyerRole : 'user',
+                    createdAt: l.createdAt,
+                    status: 'skipped',
+                    metadata: safeMeta || undefined
+                };
+            })
         ];
 
         // 5. Final Sort and Paginate

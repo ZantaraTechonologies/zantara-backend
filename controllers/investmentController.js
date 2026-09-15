@@ -9,6 +9,7 @@ const { runDividendPayout } = require('../utils/dividendCron');
 const investmentService = require('../services/investment.service');
 const Setting = require('../models/Setting');
 const notificationService = require('../services/notification.service');
+const { serializeCustomerTransactions } = require('../utils/customerTransactionSerializer');
 
 // ─────────────────────────────────────────────────────────────
 // HELPERS
@@ -425,7 +426,7 @@ exports.getDividendHistory = async (req, res) => {
 
         res.json({
             success: true,
-            data: transactions,
+            data: serializeCustomerTransactions(transactions),
             pagination: { total, page: Number(page), pages: Math.ceil(total / limit) }
         });
     } catch (err) {

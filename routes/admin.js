@@ -31,7 +31,7 @@ router.get('/transactions', getFilteredTransactions)
 router.get('/users', getAllUsers)
 router.get('/users/:id', getUserById)
 router.get('/transactions/:id', (req, res, next) => {
-    require('../controllers/transactionController').getUserTransaction(req, res, next);
+    require('../controllers/transactionController').getUserTransaction(req, res, { sanitize: false });
 })
 
 // KYC Admin Routes
