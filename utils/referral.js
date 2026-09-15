@@ -6,7 +6,6 @@ const WalletLedger = require('../models/WalletLedger');
 const { logTransaction } = require('./transaction');
 const walletService = require('../services/wallet.service');
 const settingsService = require('../services/settings.service');
-const notificationService = require('../services/notification.service');
 
 /**
  * Note: processReferralBonus (Signup/First Funding Bonus) was removed 
@@ -184,36 +183,29 @@ const processLifetimeCommission = async (userId, amount, parentTransactionObject
                 note: `Lifetime Commission (${buyerRole})`
             }
         }], { session });
-        
-        // Notify Referrer — fire-and-forget so referral commission never blocks
-        // the parent purchase response. All accounting writes above are already done.
-        notificationService.notify(referrer, {
-            title: 'Referral Commission Earned!',
-            message: `You earned ₦${commissionAmount.toLocaleString()} from ${user.name || user.phone}'s purchase.`,
-            smsMessage: `You earned ₦${commissionAmount.toLocaleString()} referral commission from ${user.name || user.phone}. Bal: ₦${referrer.referralBalance.toLocaleString()}`,
-            emailSubject: 'Referral Commission Earned - Zantara',
-            emailHtml: `
-                <div style="font-family: sans-serif; padding: 20px;">
-                    <h2>Commission Earned!</h2>
-                    <p>Hello ${referrer.name || 'Partner'},</p>
-                    <p>You have just earned a referral commission of <b>₦${commissionAmount.toLocaleString()}</b>.</p>
-                    <p><b>From:</b> ${user.name || user.phone}</p>
-                    <p><b>New Referral Balance:</b> ₦${referrer.referralBalance.toLocaleString()}</p>
-                    <br>
-                    <p>Keep sharing and keep earning!</p>
-                </div>
-            `,
-            type: 'referral',
-            activityType: 'referral_commission',
-            metadata: { transactionId: commId }
-        }).catch(err => {
-            console.error('[Referral Notification Background Error]', err.message);
-        });
+
+        // NOTIFICATION DEDUP PIVOT (after-commit):
+        // The customer-facing dispatch no longer happens inside the parent
+        // purchase transaction. Instead we RETURN a zero-dependency
+        // notificationIntent that purchase.service dispatches ONLY AFTER the
+        // enclosing parent transaction has committed. This guarantees the
+        // referrer is never told about a commission before the parent
+        // purchase is durably committed.
+        const notificationIntent = {
+            userId: referrer._id,
+            email: referrer.email,
+            phone: referrer.phone,
+            buyerLabel: user.name || user.phone || 'a friend',
+            service: parentTxn.service || parentTxn.type || 'purchase',
+            commission: commissionAmount,
+            commId,
+            eventKey: `referral_commission:${parentTransactionStringId}`
+        };
 
         console.log(`[Referral] Lifetime commission of ${commissionAmount} credited to ${referrer.phone || referrer.email} (${wasCapped ? 'CAPPED' : 'FULL'})`);
         console.log("!!! COMPLETED processLifetimeCommission !!!");
 
-        return commissionAmount;
+        return { commission: commissionAmount, notificationIntent };
 
     } catch (error) {
         console.error('Error processing lifetime commission:', error);

@@ -1,6 +1,7 @@
 const nodemailer = require('nodemailer')
 const settingsService = require('../services/settings.service');
 const dns = require('dns');
+const { getNotificationBrand } = require('./notificationBrand');
 
 const sendEmail = async (to, subject, html, activityType = null) => {
     if (activityType) {
@@ -31,12 +32,22 @@ const sendEmail = async (to, subject, html, activityType = null) => {
             connectionTimeout: 10000,
         })
 
-        const info = await transporter.sendMail({
-            from: `"Zantara VTU" <${process.env.MAIL_USER}>`,
+        // Brand the From-name via the shared Site Settings helper. Never throws
+        // (falls back to "Zantara"); blank support fields are simply omitted and
+        // reply-to is only used when a valid support email is configured.
+        const brand = await getNotificationBrand();
+        const fromName = (brand && brand.siteName) || 'Zantara';
+        const mail = {
+            from: `"${fromName}" <${process.env.MAIL_USER}>`,
             to,
             subject,
             html
-        })
+        };
+        if (brand && brand.supportEmail && String(brand.supportEmail).includes('@')) {
+            mail.replyTo = String(brand.supportEmail).trim();
+        }
+
+        const info = await transporter.sendMail(mail)
         console.log("Email sent successfully:", info.messageId);
         return info;
     } catch (error) {

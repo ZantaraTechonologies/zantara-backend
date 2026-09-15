@@ -28,6 +28,7 @@ class PurchaseService {
      */
     async processPurchase(userId, { type, serviceId, amount, details, providerCall, referralAmount, pin, provider = 'VTPass', expectedPrice }) {
         let transaction;
+        let referralNotificationIntent = null;
         try {
             // 0. Verify Transaction PIN first
             await pinService.verifyPin(userId, pin);
@@ -168,6 +169,21 @@ class PurchaseService {
                 // 4. Automated Refund if provider fails
                 await refundService.processRefund(transaction._id, response.message || 'Provider failed');
 
+                // 4a. Failure advisory — only after the refund has completed.
+                // Sanitized copy (provider refusal text never reaches the customer
+                // or exposes internal routing). Fire-and-forget; never blocks.
+                notificationService.notifyPurchaseFailure(user, {
+                    type,
+                    serviceId: transaction.service || serviceId,
+                    amount: finalAmount,
+                    reference,
+                    reason: response,
+                    refunded: true,
+                    greetingName: user.name
+                }).catch(notifErr => {
+                    console.error('[Notification Background Error] Failure notification failed:', notifErr && notifErr.message);
+                });
+
                 return { success: false, message: response.message, error: response };
             }
 
@@ -201,10 +217,19 @@ class PurchaseService {
 
                 // 6. Referral Bonus (Lifetime Commission)
                 // Note: processLifetimeCommission also writes netProfitAfterCommission on the parent txn
+                // The function returns EITHER a legacy numeric commission amount (from mocks / the
+                // no-referrer fast path) OR { commission, notificationIntent } (from production code
+                // that defers the customer notification until after the parent commit below).
                 const { processLifetimeCommission } = require('../utils/referral');
-                const commissionPaid = await processLifetimeCommission(userId, finalAmount, transaction._id, transaction.transactionId, session);
-                
-                const finalCommission = commissionPaid || 0;
+                const referralResult = await processLifetimeCommission(userId, finalAmount, transaction._id, transaction.transactionId, session);
+
+                const finalCommission = (referralResult && typeof referralResult === 'object')
+                    ? Number(referralResult.commission) || 0
+                    : (Number(referralResult) || 0);
+                referralNotificationIntent = (referralResult && typeof referralResult === 'object')
+                    ? referralResult.notificationIntent
+                    : null;
+
                 transaction.netProfitAfterCommission = transaction.profit - finalCommission;
                 console.log(`[PurchaseService] Hybrid Accounting: ${transaction.accountingSource}. Cost: ${transaction.costPrice}, Profit: ${transaction.profit}. Commission: ${finalCommission}`);
                 
@@ -232,29 +257,25 @@ class PurchaseService {
                 session.endSession();
             }
 
+            // 7. Referral notification — dispatched ONLY after the parent commit.
+            // The referrer is never told about a commission before the purchase
+            // is durably committed. Fire-and-forget; never blocks the response.
+            if (referralNotificationIntent) {
+                notificationService.notifyReferralEarned(referralNotificationIntent).catch(err => {
+                    console.error('[Referral Notification Background Error]', err && err.message);
+                });
+            }
+
             // Notify user of success (asynchronous fire-and-forget so it doesn't block HTTP response)
-            notificationService.notify(user, {
-                title: `${type.toUpperCase()} Purchase Successful`,
-                message: `Your purchase of ${serviceId} for ₦${finalAmount} was successful.`,
-                smsMessage: `Your ${type} purchase of ${serviceId} for ₦${finalAmount} was successful. Transaction ID: ${transaction.transactionId}`,
-                emailSubject: `${type.toUpperCase()} Purchase Successful - Zantara`,
-                emailHtml: `
-                    <div style="font-family: sans-serif; padding: 20px;">
-                        <h2>Purchase Successful</h2>
-                        <p>Hello ${user.name},</p>
-                        <p>Your purchase of <b>${serviceId}</b> was successful.</p>
-                        <p><b>Amount:</b> ₦${finalAmount}</p>
-                        <p><b>Transaction ID:</b> ${transaction.transactionId}</p>
-                        <p><b>Reference:</b> ${reference}</p>
-                        <br>
-                        <p>Thank you for using Zantara!</p>
-                    </div>
-                `,
-                type: 'transaction',
-                activityType: 'purchase_success',
-                metadata: { transactionId: transaction._id }
+            notificationService.notifyPurchaseSuccess(user, {
+                type,
+                serviceId: transaction.service || serviceId,
+                amount: finalAmount,
+                reference,
+                details: transaction.details || details,
+                greetingName: user.name
             }).catch(err => {
-                console.error('[Notification Background Error] Success notification failed:', err.message);
+                console.error('[Notification Background Error] Success notification failed:', err && err.message);
             });
 
             // Build normalized Zantara response (preserves provider response while guaranteeing reference & transactionId)
@@ -283,28 +304,20 @@ class PurchaseService {
 
                     await refundService.processRefund(transaction._id, err.message);
 
-                    // Notify user of failure (asynchronous fire-and-forget)
-                    notificationService.notify(user, {
-                        title: `${type.toUpperCase()} Purchase Failed`,
-                        message: `Your purchase of ${serviceId} failed: ${err.message}. Your wallet has been refunded.`,
-                        smsMessage: `Your ${type} purchase of ${serviceId} failed. Your wallet has been refunded. Reason: ${err.message}`,
-                        emailSubject: `${type.toUpperCase()} Purchase Failed - Zantara`,
-                        emailHtml: `
-                            <div style="font-family: sans-serif; padding: 20px;">
-                                <h2 style="color: #e74c3c;">Purchase Failed</h2>
-                                <p>Hello ${user.name},</p>
-                                <p>Your purchase of <b>${serviceId}</b> failed.</p>
-                                <p><b>Reason:</b> ${err.message}</p>
-                                <p>Your wallet has been automatically refunded.</p>
-                                <br>
-                                <p>The Zantara Team</p>
-                            </div>
-                        `,
-                        type: 'transaction',
-                        activityType: 'purchase_failed',
-                        metadata: { transactionId: transaction._id }
+                    // Notify user of failure (asynchronous fire-and-forget).
+                    // `refunded: true` is safe here because processRefund was
+                    // awaited successfully BEFORE the notification is fired.
+                    // The raw err.message is sanitized before any customer reaches it.
+                    notificationService.notifyPurchaseFailure(user, {
+                        type,
+                        serviceId: transaction.service || serviceId,
+                        amount: transaction.amount,
+                        reference,
+                        reason: err,
+                        refunded: true,
+                        greetingName: user.name
                     }).catch(notifErr => {
-                        console.error('[Notification Background Error] Failure notification failed:', notifErr.message);
+                        console.error('[Notification Background Error] Failure notification failed:', notifErr && notifErr.message);
                     });
                 } catch (refundErr) {
 

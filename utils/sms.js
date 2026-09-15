@@ -9,6 +9,7 @@
 
 const axios = require('axios');
 const settingsService = require('../services/settings.service');
+const { maskPhone } = require('./notificationFormatter');
 
 const sendSMS = async (phone, message, activityType = null) => {
     try {
@@ -23,8 +24,9 @@ const sendSMS = async (phone, message, activityType = null) => {
         const TERMII_API_KEY = process.env.TERMII_API_KEY;
         const SENDER_ID = process.env.TERMII_SENDER_ID || "Zantara";
 
-        // ALWAYS log to console during development 
-        console.log(`[SMS Trace] ${phone}: ${message}`);
+        // PRIVACY: never log the full recipient number or the message body.
+        // Only a masked phone + content metadata are written to console.
+        console.log(`[SMS Trace] To: ${maskPhone(phone)}, Sender: ${SENDER_ID}, Activity: ${activityType || 'general'}, Length: ${String(message).length}`);
 
         if (!TERMII_API_KEY || TERMII_API_KEY === 'mock') {
             console.log(`[SMS Mock] Termii API Key not set. Message not sent via SMS.`);
@@ -48,7 +50,8 @@ const sendSMS = async (phone, message, activityType = null) => {
 
         const response = await axios.post('https://api.ng.termii.com/api/sms/send', payload);
         
-        console.log(`[SMS Success] Termii Response:`, response.data);
+        // Log only response metadata (never the echoed message content)
+        console.log(`[SMS Success] Termii status: ${response.status}, message_id: ${response.data?.message_id || response.data?.code || 'n/a'}`);
         return { success: true, data: response.data };
 
     } catch (error) {

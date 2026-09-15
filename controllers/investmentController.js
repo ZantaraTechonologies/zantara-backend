@@ -9,6 +9,7 @@ const { runDividendPayout } = require('../utils/dividendCron');
 const investmentService = require('../services/investment.service');
 const Setting = require('../models/Setting');
 const notificationService = require('../services/notification.service');
+const { formatNairaAmount } = require('../utils/notificationFormatter');
 const { serializeCustomerTransactions } = require('../utils/customerTransactionSerializer');
 
 // ─────────────────────────────────────────────────────────────
@@ -551,19 +552,21 @@ exports.processShareExit = async (req, res) => {
             req
         );
 
-        // Notify User
+        // Notify User — dispatch happens AFTER the commit below so the customer
+        // is never told the exit/resolution happened if the transaction rolls back.
         const statusMsg = action === 'approved' 
-            ? `Your share exit request of ${exitRequest.sharesRequested} shares has been approved. ₦${exitRequest.netAmount.toLocaleString()} has been added to your wallet.`
+            ? `Your share exit request of ${exitRequest.sharesRequested} shares has been approved. ${formatNairaAmount(exitRequest.netAmount)} has been added to your wallet.`
             : `Your share exit request of ${exitRequest.sharesRequested} shares was rejected. ${adminNote ? 'Reason: ' + adminNote : ''}`;
+
+        await session.commitTransaction();
 
         await notificationService.sendInApp(exitRequest.userId, {
             title: `Share Exit ${action.charAt(0).toUpperCase() + action.slice(1)}`,
             message: statusMsg,
             type: 'investment',
             metadata: { exitRequestId: exitRequest._id }
-        });
+        }, `share_exit_${action}:${exitRequest._id}`);
 
-        await session.commitTransaction();
         res.json({ success: true, message: `Exit request ${action}`, data: exitRequest });
     } catch (err) {
         await session.abortTransaction();
@@ -639,19 +642,21 @@ exports.processDividendWithdrawal = async (req, res) => {
             );
         }
 
-        // Notify User
+        // Notify User — dispatch happens AFTER the commit below so the customer is
+        // never told the withdrawal was processed if the transaction rolls back.
         const statusMsg = action === 'approved'
-            ? `Your dividend withdrawal of ₦${withdrawal.amount.toLocaleString()} has been approved.`
-            : `Your dividend withdrawal of ₦${withdrawal.amount.toLocaleString()} was rejected. ${adminNote ? 'Reason: ' + adminNote : ''}`;
+            ? `Your dividend withdrawal of ${formatNairaAmount(withdrawal.amount)} has been approved.`
+            : `Your dividend withdrawal of ${formatNairaAmount(withdrawal.amount)} was rejected. ${adminNote ? 'Reason: ' + adminNote : ''}`;
+
+        await session.commitTransaction();
 
         await notificationService.sendInApp(withdrawal.userId, {
             title: `Withdrawal ${action.charAt(0).toUpperCase() + action.slice(1)}`,
             message: statusMsg,
             type: 'investment',
             metadata: { withdrawalId: withdrawal._id }
-        });
+        }, `dividend_withdrawal_${action}:${withdrawal._id}`);
 
-        await session.commitTransaction();
         res.json({ success: true, message: `Withdrawal ${action}` });
     } catch (err) {
         await session.abortTransaction();

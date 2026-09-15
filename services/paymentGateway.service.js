@@ -427,6 +427,20 @@ class PaymentGatewayService {
                     { refId, status: 'pending' },
                     { $set: { status: 'failed', errorMessage: gatewayPaymentResult.message || 'Payment failed at gateway' } }
                 );
+
+                // Terminal funding-failed advisory (In-App + Push only; never SMS/email,
+                // never claims refund/credit). Fired only AFTER the record is durably
+                // marked failed. Non-blocking and deduplicated by reference.
+                if (transactionStatus.userId) {
+                    const failedAmount = ((transactionStatus.amountKobo || 0) / 100) || 0;
+                    notificationService.sendFundingAdvisory(transactionStatus.userId, {
+                        kind: 'failed',
+                        amount: failedAmount,
+                        reference: refId
+                    }).catch(advisoryErr => {
+                        console.error('[Funding Advisory Error]', advisoryErr && advisoryErr.message);
+                    });
+                }
             }
             return {
                 success: false,
@@ -601,18 +615,19 @@ class PaymentGatewayService {
             { $set: { status: 'success' } }
         );
 
-        // Non-blocking notification — never delays or rolls back financial result
+        // Non-blocking notification — never delays or rolls back financial result.
+        // Professionalized copy: customer-facing funding method only (gateway
+        // names are NEVER surfaced), no SMS for funding, and the event is
+        // deduplicated by reference so a concurrent duplicate dispatch is a no-op.
         if (userId) {
-            const gatewayName = transactionStatus.service || transactionStatus.provider || 'Payment Gateway';
-            notificationService.sendInApp(userId, {
-                title: transactionStatus.type === 'investment_buy' ? 'Shares Purchased Successfully' : 'Wallet Funded Successfully',
-                message: transactionStatus.type === 'investment_buy'
-                    ? 'Your purchase of platform shares has been confirmed. Welcome aboard!'
-                    : `Your wallet has been credited with ₦${amountNaira.toLocaleString()} via ${gatewayName}.`,
-                type: 'transaction',
-                metadata: { reference: refId }
+            notificationService.sendFundingSuccess({
+                userId,
+                amount: amountNaira,
+                method: (transactionStatus.channels && transactionStatus.channels[0]) || transactionStatus.channel || 'funding',
+                reference: refId,
+                type: transactionStatus.type || 'funding'
             }).catch(notifErr => {
-                console.error('[Funding Notification Background Error]', notifErr.message);
+                console.error('[Funding Notification Background Error]', notifErr && notifErr.message);
             });
         }
 
