@@ -212,6 +212,11 @@ const login = async (req, res) => {
         const match = await bcrypt.compare(password, user.password)
         if (!match) return res.status(400).json({ message: 'Invalid credentials' })
 
+        // Enforce account status (CRIT 2): disabled accounts cannot log in.
+        if (!user.status) {
+            return res.status(401).json({ message: 'Account is disabled' });
+        }
+
         await ActivityLog.create({ userId: user._id, action: 'LOGIN', ipAddress: req.ip, device: req.headers['user-agent'] })
 
         user.lastLogin = new Date();

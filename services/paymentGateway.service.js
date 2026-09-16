@@ -247,17 +247,41 @@ class PaymentGatewayService {
         const amountKobo = Math.round(rawAmount * 100);
         const channels = channel ? [channel] : (gateway.supportedChannels && gateway.supportedChannels.length ? gateway.supportedChannels : ['card', 'bank_transfer', 'ussd']);
 
+        // Authoritative share price snapshot for investment-buy payments: read the
+        // CURRENT server-side price at INIT time. Fulfillment must bind to this
+        // snapshot (see _finalizeAfterClaim), never a fresh re-read, eliminating
+        // the TOCTOU where a price change mid-payment broke legitimate purchases.
+        //
+        // FAIL-CLOSED: for a NEW investment_buy payment the authoritative share
+        // price MUST be obtained and validated BEFORE the TransactionStatus is
+        // created and BEFORE the gateway is initialized. If the price cannot be
+        // loaded, is missing, non-finite or <= 0, initialization is aborted so
+        // the gateway never gets the chance to take the customer's money.
+        const txType = metadata?.type || 'funding';
+        let sharePriceSnapshot = null;
+        if (txType === 'investment_buy') {
+            const invSettings = await investmentService.getInvestmentSettings();
+            const sp = Number(invSettings && invSettings.sharePrice);
+            if (!Number.isFinite(sp) || sp <= 0) {
+                const err = new Error('Share purchase is temporarily unavailable. Please try again later.');
+                err.code = 'INVALID_INVESTMENT_CONFIGURATION';
+                throw err;
+            }
+            sharePriceSnapshot = sp;
+        }
+
         // 4. Persist Pending TransactionStatus Record — gateway permanently bound here
         await TransactionStatus.create({
             refId: reference,
             userId: user._id || user.id,
-            type: metadata?.type || 'funding',
+            type: txType,
             status: 'pending',
             amountKobo,
             amount: rawAmount,
             channels,
             provider: gateway.code,
-            service: gateway.name
+            service: gateway.name,
+            ...(sharePriceSnapshot != null ? { sharePrice: sharePriceSnapshot } : {})
         });
 
         // 5. Delegate to Adapter
@@ -396,6 +420,21 @@ class PaymentGatewayService {
                 alreadyProcessed: true,
                 credited: false,
                 message: `Transaction is in state 'reconciliation_required' and cannot be re-processed.`
+            };
+        }
+
+        // C1. Mid-settlement (claim acquired, settle-step in flight/crashed) — a
+        //     competing webhook must never re-credit while the recovery sweep or
+        //     an admin is finishing this payment. The settle path completes it
+        //     exactly-once (settlement_pending → success); here we defer.
+        if (transactionStatus.status === 'settlement_pending') {
+            console.log(`[Funding Safety] Reference ${refId} is mid-settlement ('settlement_pending'). Deferring webhook finalization. Source: ${source}`);
+            return {
+                success: false,
+                status: 'settlement_pending',
+                alreadyProcessed: true,
+                credited: false,
+                message: 'Transaction is being finalized by reconciliation. Please wait a moment.'
             };
         }
 
@@ -589,9 +628,47 @@ class PaymentGatewayService {
         try {
             if (userId) {
                 if (transactionStatus.type === 'investment_buy') {
-                    const meta = gatewayPaymentResult.metadata || {};
-                    const qty = Number(meta.qty || 1);
-                    await investmentService.fulfillSharePurchase(userId, qty, refId, false);
+                    // CRIT 3: Share quantity MUST be derived from the bank-verified
+                    // amount (confirmedKobo) at the SERVER-side share price. Client-
+                    // supplied gateway metadata.qty is never trusted — a payer can
+                    // inject an arbitrary quantity into payment metadata and receive
+                    // far more shares than were purchased.
+                    //
+                    // TOCTOU fix: the authoritative price is the SHARE-PRICE SNAPSHOT
+                    // taken when the payment was initialized (transactionStatus.sharePrice).
+                    // The quantity is bound to that snapshot, so a price change between
+                    // init and fulfillment can neither reject a legitimate payment nor
+                    // silently change how many shares the payer bought. Records created
+                    // before the snapshot feature (no sharePrice stored) fall back to a
+                    // current-settings read for backward compatibility.
+                    let sharePrice;
+                    if (Number(transactionStatus.sharePrice) > 0) {
+                        sharePrice = Number(transactionStatus.sharePrice);
+                    } else {
+                        const settings = await investmentService.getInvestmentSettings();
+                        sharePrice = Number(settings.sharePrice);
+                    }
+                    if (!(sharePrice > 0)) {
+                        throw new Error('Invalid share price configured for investment fulfillment');
+                    }
+
+                    const perShareKobo = sharePrice * 100;
+                    if (!Number.isInteger(perShareKobo) || perShareKobo <= 0) {
+                        throw new Error('Share price does not reconcile to whole kobo');
+                    }
+
+                    if (confirmedKobo % perShareKobo !== 0) {
+                        throw new Error(`Confirmed amount ₦${amountNaira.toLocaleString()} is not a whole multiple of share price ₦${sharePrice.toLocaleString()} per share`);
+                    }
+
+                    const qty = confirmedKobo / perShareKobo;
+
+                    const metaQty = Number((gatewayPaymentResult.metadata || {}).qty);
+                    if (metaQty > 0 && metaQty !== qty) {
+                        console.error(`[PAYMENT-SECURITY-ALERT] Reference=${refId}: metadata.qty=${metaQty} diverges from amount-derived qty=${qty}. Deriving from confirmed amount.`);
+                    }
+
+                    await investmentService.fulfillSharePurchase(userId, qty, refId, false, null, sharePrice);
                 } else {
                     await walletService.credit(userId, amountNaira, refId, 'funding');
                 }
@@ -773,6 +850,268 @@ class PaymentGatewayService {
             console.error(`[FUNDING-RECOVERY-WARN] Reference=${refId}: eligibility check error. Recovery skipped, record left 'failed'.`, eligibilityErr.message);
             return false;
         }
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // ADMIN RECONCILIATION SETTLEMENT (write-path for stuck payments)
+    // ─────────────────────────────────────────────────────────
+
+    /**
+     * Admin settlement of a TransactionStatus stuck in 'processing' — the crash
+     * window left by finalizeFundingCredit (lock claimed, credit/finalize crashed),
+     * or a stranded 'settlement_pending' claim needing completion.
+     *
+     * Recovery semantics:
+     *   - Only crash-window records are settled: 'processing' (claim acquired,
+     *     credit/finalize crashed) and 'settlement_pending' (claim acquired,
+     *     finalize crashed). Terminal 'failed' and 'reconciliation_required'
+     *     records keep their evidence-preserving semantics and are reviewed
+     *     independently.
+     *   - Exactly-once: the claim, the wallet credit / share fulfillment, and the
+     *     settlement_pending → success transition are executed inside ONE MongoDB
+     *     session and commit atomically. The finalize transition guards on the
+     *     claimed state (modifiedCount === 1) BEFORE commit, so a concurrent
+     *     settlement that already reached success makes the guard a no-op and
+     *     this run aborts with its credit rolled back — a double-credit is
+     *     impossible even when two settlers both start from 'processing'.
+     *   - Idempotent across crashes: if the credit ALREADY committed (crash
+     *     between an earlier credit commit and the finalize), the existing-ledger
+     *     check skips the credit and only the status transition is made.
+     *
+     * @param {string} refId - TransactionStatus refId to settle
+     * @param {string} [adminId] - performing admin id (for audit/notes)
+     * @param {string} [note] - optional admin note recorded in reconciliationReason
+     */
+    async adminSettleProcessing({ refId, adminId = null, note = '' }) {
+        if (!refId) {
+            throw new Error('Reference is required for settlement');
+        }
+
+        const session = await mongoose.startSession();
+        session.startTransaction();
+
+        try {
+            const transactionStatus = await TransactionStatus.findOne({ refId }).session(session);
+            if (!transactionStatus) {
+                await session.abortTransaction();
+                throw new Error(`TransactionStatus record '${refId}' not found`);
+            }
+
+            if (transactionStatus.status !== 'processing' && transactionStatus.status !== 'settlement_pending') {
+                await session.abortTransaction();
+                throw new Error(
+                    `Cannot settle reference '${refId}': status is '${transactionStatus.status}', expected 'processing'. Only crash-window (processing) records are eligible.`
+                );
+            }
+
+            const confirmedKobo = transactionStatus.confirmedAmountKobo || transactionStatus.amountKobo;
+            if (!confirmedKobo || confirmedKobo <= 0) {
+                await session.abortTransaction();
+                throw new Error(`Reference '${refId}' has no confirmed amount to settle against`);
+            }
+
+            const userId = transactionStatus.userId;
+            const amountNaira = confirmedKobo / 100;
+            let credited = false;
+
+            // ATOMIC CLAIM + CREDIT + FINALIZE in ONE session. Crashes anywhere
+            // roll the whole batch back to 'processing' (admin alarm, not silent
+            // failure); success commits the claim→success transition and the
+            // credit together, so no intermediate 'settlement_pending' is ever
+            // left durable by this path.
+            const claimNote = [
+                note ? `${note}` : '',
+                `Admin settlement claim by ${adminId || 'superAdmin'}`,
+                `at ${new Date().toISOString()}`
+            ].filter(Boolean).join('; ');
+
+            await TransactionStatus.updateOne(
+                { refId, status: 'processing' },
+                {
+                    $set: {
+                        status: 'settlement_pending',
+                        reconciliationReason: (transactionStatus.reconciliationReason
+                            ? `${transactionStatus.reconciliationReason} | `
+                            : '') + claimNote
+                    }
+                },
+                { session }
+            );
+
+            if (userId) {
+                if (transactionStatus.type === 'investment_buy') {
+                    // Bind to the init-time price snapshot (see _finalizeAfterClaim);
+                    // fall back to a fresh read only for pre-snapshot records.
+                    let sharePrice;
+                    if (Number(transactionStatus.sharePrice) > 0) {
+                        sharePrice = Number(transactionStatus.sharePrice);
+                    } else {
+                        const settings = await investmentService.getInvestmentSettings();
+                        sharePrice = Number(settings && settings.sharePrice);
+                    }
+                    if (!(sharePrice > 0)) {
+                        await session.abortTransaction();
+                        throw new Error('Invalid share price for settlement');
+                    }
+
+                    const perShareKobo = sharePrice * 100;
+                    if (!Number.isInteger(perShareKobo) || perShareKobo <= 0) {
+                        await session.abortTransaction();
+                        throw new Error('Share price does not reconcile to whole kobo');
+                    }
+                    if (confirmedKobo % perShareKobo !== 0) {
+                        await session.abortTransaction();
+                        throw new Error(
+                            `Cannot settle '${refId}': confirmed amount ₦${amountNaira} is not a whole multiple of the share price ₦${sharePrice}. Requires manual review of the payer.`
+                        );
+                    }
+
+                    const qty = confirmedKobo / perShareKobo;
+                    const fulfillment = await investmentService.fulfillSharePurchase(userId, qty, refId, false, session, sharePrice);
+                    credited = !(fulfillment && fulfillment.message === 'Already processed');
+                } else {
+                    // Funding / payout credit — skip if an earlier crashed run already
+                    // committed the credit (crash between credit commit and finalize).
+                    const existingCredit = await WalletLedger.findOne({
+                        reference: refId,
+                        entryType: 'credit'
+                    }).session(session);
+
+                    if (!existingCredit) {
+                        await walletService.credit(userId, amountNaira, refId, 'funding', null, session);
+                        credited = true;
+                    }
+                }
+            }
+
+            const finalizeNote = [
+                note ? `${note}` : '',
+                `Admin settlement by ${adminId || 'superAdmin'}`,
+                `at ${new Date().toISOString()}`
+            ].filter(Boolean).join('; ');
+
+            const finalize = await TransactionStatus.updateOne(
+                { refId, status: 'settlement_pending' },
+                {
+                    $set: {
+                        status: 'success',
+                        reconciliationReason: (transactionStatus.reconciliationReason
+                            ? `${transactionStatus.reconciliationReason} | `
+                            : '') + finalizeNote
+                    }
+                },
+                { session }
+            );
+
+            if (finalize.modifiedCount !== 1) {
+                // A concurrent settlement claimed the transition first — its credit
+                // (if any) was committed, ours aborts. Never double-credit.
+                await session.abortTransaction();
+                const latest = await TransactionStatus.findOne({ refId });
+                return {
+                    success: true,
+                    status: (latest && latest.status) || 'success',
+                    alreadyProcessed: true,
+                    settled: false,
+                    credited: false,
+                    message: 'Settlement already claimed by a concurrent process'
+                };
+            }
+
+            await session.commitTransaction();
+
+            console.log(`[FUNDING-ADMIN-SETTLE] Reference ${refId}: processing → success. Credited this run: ${credited}. Amount ₦${amountNaira}.`);
+
+            if (userId) {
+                notificationService.sendFundingSuccess({
+                    userId,
+                    amount: amountNaira,
+                    method: (transactionStatus.channels && transactionStatus.channels[0]) || transactionStatus.channel || 'funding',
+                    reference: refId,
+                    type: transactionStatus.type || 'funding'
+                }).catch(notifErr => {
+                    console.error('[Funding Notification Background Error]', notifErr && notifErr.message);
+                });
+            }
+
+            return {
+                success: true,
+                settled: true,
+                status: 'success',
+                credited,
+                amount: amountNaira,
+                type: transactionStatus.type || 'funding',
+                reference: refId
+            };
+        } catch (err) {
+            await session.abortTransaction();
+            throw err;
+        } finally {
+            session.endSession();
+        }
+    }
+
+    /**
+     * Automated crash-recovery sweep for the funding settlement state machine.
+     *
+     * Searches for records stranded in an intermediate settlement state and
+     * finishes them exactly-once:
+     *   - 'settlement_pending'  → a settlement that crashed mid-flight (claim
+     *     acquired, credit/finalize interrupted),
+     *   - 'processing' older than maxAgeMs → the finalizeFundingCredit crash
+     *     window (claim acquired, credit/finalize crashed).
+     *
+     * Recovery is idempotent: adminSettleProcessing skips an already-committed
+     * credit and only completes the status transition. Records that genuinely
+     * cannot settle (e.g. a non-whole-share amount) are logged and skipped so
+     * one bad record cannot block the recovery of the rest.
+     *
+     * @param {object} [opts]
+     * @param {number} [opts.maxAgeMs] - consider 'processing' records older than this as crashed
+     * @param {number} [opts.dryRun] - when truthy, only log candidates, change nothing
+     */
+    async recoverStrandedSettlements({ maxAgeMs = 15 * 60 * 1000, dryRun = false } = {}) {
+        const cutoff = new Date(Date.now() - maxAgeMs);
+
+        const strandedSettlementPending = await TransactionStatus.find({
+            status: 'settlement_pending'
+        });
+
+        const strandedProcessing = await TransactionStatus.find({
+            status: 'processing',
+            lastAttempt: { $lt: cutoff }
+        });
+
+        const candidates = [
+            ...strandedSettlementPending.map(t => ({ refId: t.refId, state: 'settlement_pending' })),
+            ...strandedProcessing.map(t => ({ refId: t.refId, state: 'processing' }))
+        ];
+
+        if (candidates.length === 0) return { scanned: 0, settled: 0, skipped: 0 };
+
+        let settled = 0;
+        let skipped = 0;
+
+        for (const candidate of candidates) {
+            try {
+                if (dryRun) {
+                    console.log(`[SETTLEMENT-RECOVERY-DRY] Would settle ${candidate.refId} (state=${candidate.state})`);
+                    skipped++;
+                    continue;
+                }
+                const result = await this.adminSettleProcessing({ refId: candidate.refId });
+                if (result && result.settled) settled++;
+                else skipped++;
+            } catch (recoverErr) {
+                // Technical or validation failure — record stays in its evidence-
+                // preserving intermediate state for manual admin review.
+                skipped++;
+                console.error(`[SETTLEMENT-RECOVERY-SKIP] Reference=${candidate.refId}: ${recoverErr.message}`);
+            }
+        }
+
+        console.log(`[SETTLEMENT-RECOVERY] Scanned ${candidates.length} stranded records. Settled: ${settled}, skipped: ${skipped}.`);
+        return { scanned: candidates.length, settled, skipped };
     }
 
     // ─────────────────────────────────────────────────────────

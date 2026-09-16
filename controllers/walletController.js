@@ -14,68 +14,6 @@ const getWallet = async (req, res) => {
     res.json(wallet)
 }
 
-const debitWallet = async (req, res) => {
-    try {
-        const userId = req.user.id
-        const amount = Number(req.body.amount)
-        const refId = 'MAN-' + Date.now()
-        
-        await walletService.debit(userId, amount, refId, 'admin_debit')
-
-        res.json({ message: 'Wallet debited successfully', refId })
-    } catch (err) {
-        res.status(400).json({ error: err.message })
-    }
-}
-
-const creditWallet = async (req, res) => {
-    try {
-        const userId = req.user.id
-        const amount = Number(req.body.amount)
-        const refId = 'MAN-' + Date.now()
-
-        await walletService.credit(userId, amount, refId, 'admin_credit')
-
-        res.json({ message: 'Wallet credited successfully', refId })
-    } catch (err) {
-        res.status(400).json({ error: err.message })
-    }
-}
-
-const freezeWallet = async (req, res) => {
-    try {
-        const { amount, reason } = req.body;
-        if (!amount || amount <= 0) throw new Error('Valid amount is required');
-
-        const result = await walletService.freeze(
-            req.user.id,
-            amount,
-            'FRZ-' + Date.now(),
-            reason || 'Manual Freeze'
-        );
-        res.json({ success: true, ...result });
-    } catch (err) {
-        res.status(400).json({ success: false, message: err.message });
-    }
-}
-
-const unfreezeWallet = async (req, res) => {
-    try {
-        const { amount, reason } = req.body;
-        if (!amount || amount <= 0) throw new Error('Valid amount is required');
-
-        const result = await walletService.unfreeze(
-            req.user.id,
-            amount,
-            'UNF-' + Date.now(),
-            reason || 'Manual Unfreeze'
-        );
-        res.json({ success: true, ...result });
-    } catch (err) {
-        res.status(400).json({ success: false, message: err.message });
-    }
-}
-
 const bcrypt = require('bcryptjs')
 
 const redeemEarnings = async (req, res) => {
@@ -288,10 +226,6 @@ const transferMoney = async (req, res) => {
 
 module.exports = {
     getWallet,
-    debitWallet,
-    creditWallet,
-    freezeWallet,
-    unfreezeWallet,
     redeemEarnings,
     verifyTransferRecipient,
     transferMoney

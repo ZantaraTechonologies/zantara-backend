@@ -13,13 +13,19 @@ const {
     setDefaultGateway,
     testGatewayConnection,
     deleteGateway,
-    getReconciliationTransactions
+    getReconciliationTransactions,
+    resolveReconciliationTransaction
 } = require('../controllers/adminPaymentGatewayController');
 
 // All endpoints require verified admin token
 // Read endpoints accessible to 'admin' and 'superAdmin'
 router.get('/', verifyJWT, checkRoles('admin', 'superAdmin'), getAllGateways);
 router.get('/reconciliation', verifyJWT, checkRoles('admin', 'superAdmin'), getReconciliationTransactions);
+
+// Writable reconciliation: SUPERADMIN ONLY. Settles a 'processing' (crash-window)
+// payment to success with exactly-once credit. Registered before /:id to avoid
+// placeholder capture.
+router.post('/reconciliation/resolve', verifyJWT, checkRoles('superAdmin'), resolveReconciliationTransaction);
 
 // Capabilities endpoint: safe metadata only, no credentials
 // MUST be mounted before /:id to avoid param collision

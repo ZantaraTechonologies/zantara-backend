@@ -703,8 +703,8 @@ function test(name, fn) {
             assert.ok(h[1] === requireLegalCompliance, `${path} second layer must be the legal guard`);
         }
     });
-    test('G5. guarded: POST /wallet/debit,credit,transfer,redeem-earnings,fund', () => {
-        for (const path of ['/debit', '/credit', '/transfer', '/redeem-earnings', '/fund']) {
+    test('G5. guarded: POST /wallet/transfer,redeem-earnings,fund', () => {
+        for (const path of ['/transfer', '/redeem-earnings', '/fund']) {
             const h = layersFor(walletRouter, path);
             assert.ok(h[0] === verifyJWT && h[1] === requireLegalCompliance, `${path} mis-wired`);
         }

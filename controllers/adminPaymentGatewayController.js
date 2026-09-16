@@ -722,6 +722,59 @@ const getFundingMethods = async (req, res) => {
     }
 };
 
+/**
+ * POST /api/admin/payment-gateways/reconciliation/resolve
+ * SuperAdmin-only writable reconciliation: settles a TransactionStatus stuck in
+ * 'processing' (the finalizeFundingCredit crash window) to 'success' with
+ * exactly-once credit / share fulfillment. Non-processing records, mismatched
+ * amounts, and non-whole-share investments are rejected for manual review.
+ */
+const resolveReconciliationTransaction = async (req, res) => {
+    const { reference, note } = req.body || {};
+    if (!reference) {
+        return res.status(400).json({ success: false, message: 'reference is required' });
+    }
+
+    const adminId = req.user?._id || req.user?.id;
+    const operatorName = req.user?.name || req.user?.email || 'SuperAdmin';
+
+    try {
+        const result = await paymentGatewayService.adminSettleProcessing({
+            refId: reference,
+            adminId,
+            note: note || ''
+        });
+
+        try {
+            await logAction(adminId, operatorName, 'PAYMENT_GATEWAY_RECONCILIATION_RESOLVED',
+                `Reference ${reference} settled to success`,
+                {
+                    reference,
+                    status: result.status,
+                    credited: result.credited,
+                    type: result.type,
+                    amount: result.amount || null
+                },
+                result.settled ? 'success' : 'warning', req);
+        } catch (auditErr) {
+            console.error('[Admin Reconciliation Audit Error]', auditErr.message);
+        }
+
+        return res.json({ success: true, ...result });
+    } catch (err) {
+        console.error('[Admin Reconciliation Resolve Error]', err.message);
+        try {
+            await logAction(adminId, operatorName, 'PAYMENT_GATEWAY_RECONCILIATION_RESOLVE_FAILED',
+                `Reference ${reference} settlement rejected`,
+                { reference, error: err.message },
+                'failure', req);
+        } catch (auditErr) {
+            console.error('[Admin Reconciliation Audit Error]', auditErr.message);
+        }
+        return res.status(400).json({ success: false, message: err.message });
+    }
+};
+
 module.exports = {
     ensureDefaultGateways,
     getAllGateways,
@@ -734,5 +787,6 @@ module.exports = {
     testGatewayConnection,
     deleteGateway,
     getReconciliationTransactions,
+    resolveReconciliationTransaction,
     getFundingMethods
 };

@@ -146,6 +146,8 @@ mongoose.connect(MONGOURI).then(() => {
     // Start the monthly dividend cron job
     const { startDividendCron } = require('./utils/dividendCron');
     startDividendCron();
+    // Start the periodic settlement/transaction recovery cron (idempotent, exactly-once)
+    require('./cron/transactionRetryCron');
 }).catch((err) => {
     console.error('CRITICAL: Database connection failed!');
     console.error('Reason:', err.message || err);

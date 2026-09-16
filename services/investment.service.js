@@ -41,7 +41,7 @@ const generateRef = (prefix) => `${prefix}-${crypto.randomUUID().split('-')[0].t
  * @param {string} refId - Reference ID for idempotency and tracking
  * @param {boolean} isWalletPayment - Whether the payment was already deducted from wallet
  */
-const fulfillSharePurchase = async (userId, qty, refId, isWalletPayment = false, externalSession = null) => {
+const fulfillSharePurchase = async (userId, qty, refId, isWalletPayment = false, externalSession = null, sharePriceOverride = null) => {
     const qtyNum = Number(qty);
     if (isNaN(qtyNum) || qtyNum <= 0) {
         throw new Error('Invalid quantity for share fulfillment');
@@ -62,8 +62,10 @@ const fulfillSharePurchase = async (userId, qty, refId, isWalletPayment = false,
         // Idempotency check: Ensure this reference hasn't already been processed for shares
         const existingTx = await Transaction.findOne({ refId, type: 'share_purchase' });
         if (existingTx) {
-            await session.abortTransaction();
-            session.endSession();
+            if (!externalSession) {
+                await session.abortTransaction();
+                session.endSession();
+            }
             return { success: true, message: 'Already processed' };
         }
 
@@ -88,18 +90,26 @@ const fulfillSharePurchase = async (userId, qty, refId, isWalletPayment = false,
         if (isFirstPurchase) user.firstSharePurchasedAt = new Date();
         await user.save({ session });
 
+        // Authoritative share price: prefer the passed-in snapshot (set when the
+        // payment was INITIALIZED, e.g. gateway investment buy) so the recorded
+        // price and the derived quantity both bind to the same price — never a
+        // fresh re-read that could diverge (TOCTOU). Falls back to current settings.
+        const effectiveSharePrice = Number(sharePriceOverride) > 0
+            ? Number(sharePriceOverride)
+            : Number(settings.sharePrice) || 10000;
+
         // Record the transaction
         await Transaction.create([{
             userId,
             transactionId: refId || generateRef('SHARE'),
             refId: refId || generateRef('SHARE'),
             type: 'share_purchase',
-            amount: qty * settings.sharePrice,
+            amount: qty * effectiveSharePrice,
             status: 'success',
             service: isWalletPayment ? 'Wallet' : 'Paystack Transfer',
             details: { 
                 sharesQty: qty, 
-                pricePerShare: settings.sharePrice,
+                pricePerShare: effectiveSharePrice,
                 paymentMode: isWalletPayment ? 'wallet' : 'paystack_transfer'
             }
         }], { session });

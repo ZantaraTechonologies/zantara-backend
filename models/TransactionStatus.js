@@ -6,7 +6,7 @@ const transactionStatusSchema = new mongoose.Schema({
     type: { type: String, enum: ['funding', 'purchase', 'payout', 'investment_buy'], required: true }, // you already use 'funding'
     status: { 
         type: String, 
-        enum: ['pending', 'processing', 'failed', 'success', 'reconciliation_required'], 
+        enum: ['pending', 'processing', 'settlement_pending', 'failed', 'success', 'reconciliation_required'],
         default: 'pending', 
         index: true 
     },
@@ -16,6 +16,7 @@ const transactionStatusSchema = new mongoose.Schema({
     confirmedAmountKobo: { type: Number },              // external provider confirmed amount
     confirmedCurrency: { type: String },                // external provider confirmed currency
     confirmedProviderRef: { type: String },             // external provider transaction identifier
+    sharePrice: { type: Number },                       // investment_buy: authoritative server-side share price (₦) snapshotted at init; fulfillment MUST bind to this, never a re-read
     reconciliationReason: { type: String },             // security / anomaly justification
     channels: [{ type: String, enum: ['card', 'ussd', 'bank_transfer', 'virtual_account'] }],
     provider: { type: String, default: 'paystack' },    // gateway code e.g. 'paystack', 'monnify'
