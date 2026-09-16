@@ -3,6 +3,7 @@ const procurementService = require('../../services/procurement.service');
 const Service = require('../../models/Service');
 const { sendResponse } = require('../../utils/response');
 const { logPreviewFailure } = require('../../utils/pricingLogger');
+const { serializePricingPreview } = require('../../utils/customerResponseSerializer');
 
 /**
  * Controller for pricing calculation and previews.
@@ -101,18 +102,15 @@ class PricingController {
 
             return sendResponse(res, {
                 success: true,
-                data: {
+                data: serializePricingPreview({
                     serviceId: service._id,
                     serviceName: service.name,
-                    baseCostPrice: pricing.baseCostPrice,
                     salePrice: pricing.salePrice, // This is what the user pays
                     retailPrice: pricing.retailPrice,
                     savings: pricing.savings,
                     fee: pricing.salePrice - requestedAmount > 0 ? pricing.salePrice - requestedAmount : 0,
                     currency: 'NGN',
-                    isPreview: true,
-                    note: 'This is a preview price and may vary slightly at the time of final purchase.'
-                }
+                })
             });
 
         } catch (error) {

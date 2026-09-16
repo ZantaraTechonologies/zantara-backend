@@ -10,6 +10,7 @@ const { sendResponse } = require('../utils/response')
 const notificationService = require('../services/notification.service')
 const pricingService = require('../services/pricing.service')
 const mongoose = require('mongoose')
+const { serializePurchaseResult } = require('../utils/customerResponseSerializer')
 
 const purchaseAirtime = async (req, res) => {
 
@@ -614,7 +615,7 @@ const checkTransaction = async (req, res) => {
         }
 
         const result = await providerService.queryTransaction(localTx.refId || refId, provider)
-        return sendResponse(res, { success: true, data: result })
+        return sendResponse(res, { success: true, data: serializePurchaseResult(result) })
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: 'Error checking transaction status', error: err.message })
     }

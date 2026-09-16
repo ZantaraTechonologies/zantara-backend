@@ -11,6 +11,7 @@ const { processReferralBonus } = require('../utils/referral');
 const { calculateServicePrice, getProviderCost } = require('../utils/pricing');
 const notificationService = require('./notification.service');
 const Expense = require('../models/Expense');
+const { serializePurchaseResult } = require('../utils/customerResponseSerializer');
 
 const Service = require('../models/Service');
 const pricingEngine = require('./pricing.service');
@@ -184,7 +185,16 @@ class PurchaseService {
                     console.error('[Notification Background Error] Failure notification failed:', notifErr && notifErr.message);
                 });
 
-                return { success: false, message: response.message, error: response };
+                return {
+                    success: false,
+                    message: (response && response.message) || 'Service provider could not complete the transaction.',
+                    error: response && response.message
+                        ? { message: response.message }
+                        : { message: 'Service provider could not complete the transaction.' },
+                    transactionId: transaction._id,
+                    reference,
+                    data: null,
+                };
             }
 
             // 5. Finalize transaction on success with atomicity
@@ -278,23 +288,20 @@ class PurchaseService {
                 console.error('[Notification Background Error] Success notification failed:', err && err.message);
             });
 
-            // Build normalized Zantara response (preserves provider response while guaranteeing reference & transactionId)
-            const normalizedData = {
-                ...response,
-                success: true,
-                status: 'success',
-                message: response.message || 'Transaction processed successfully',
-                reference: reference,
+            // Build normalized Zantara response from an explicit allowlist.
+            // Provider internals (raw, financials, vendor costs, commissions)
+            // stay on the persisted Transaction for accounting/reconciliation
+            // and NEVER reach the customer DTO.
+            const normalizedData = serializePurchaseResult(response, {
+                reference,
                 transactionId: transaction.transactionId || response.transactionId || reference,
-                providerTransactionId: response.transactionId || null,
-                token: response.token || null,
-            };
+            });
 
-            return { 
-                success: true, 
-                data: normalizedData, 
+            return {
+                success: true,
+                data: normalizedData,
                 transactionId: transaction._id,
-                reference: reference 
+                reference,
             };
 
         } catch (err) {
