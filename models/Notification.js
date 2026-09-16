@@ -10,11 +10,19 @@ const notificationSchema = new mongoose.Schema({
     eventKey: { type: String } // Intrinsic notification event identity for cross-channel dedup (e.g., 'funding_success:ZNT-...')
 }, { timestamps: true });
 
-// Sparse unique index: only documents that SET eventKey participate. Existing
-// notifications without an eventKey remain valid and index-free (backward
-// compatible, non-destructive). A duplicate event dispatch then becomes a
-// safe 11000 no-op instead of a second customer-facing delivery.
-notificationSchema.index({ userId: 1, eventKey: 1 }, { unique: true, sparse: true });
+// Partial unique index: only notifications with a string eventKey participate.
+// Existing notifications without an eventKey remain valid and unindexed
+// (backward compatible, non-destructive). A duplicate event dispatch then
+// becomes a safe 11000 no-op instead of a second customer-facing delivery.
+notificationSchema.index(
+    { userId: 1, eventKey: 1 },
+    {
+        unique: true,
+        partialFilterExpression: {
+            eventKey: { $type: 'string' }
+        }
+    }
+);
 
 const Notification = mongoose.model('Notification', notificationSchema);
 
