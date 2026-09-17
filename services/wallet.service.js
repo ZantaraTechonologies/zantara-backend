@@ -92,11 +92,11 @@ class WalletService {
     /**
      * Freeze an amount in user's wallet.
      */
-    static async freeze(userId, amount, reference, source) {
-        if (amount <= 0) throw new Error('Amount must be greater than zero');
+    static async freeze(userId, amount, reference, source, existingSession = null) {
+        if (!Number.isFinite(amount) || amount <= 0) throw new Error('Amount must be greater than zero');
 
-        const session = await mongoose.startSession();
-        session.startTransaction();
+        const session = existingSession || await mongoose.startSession();
+        if (!existingSession) session.startTransaction();
 
         try {
             const wallet = await Wallet.findOne({ userId }).session(session);
@@ -121,24 +121,24 @@ class WalletService {
                 metadata: { action: 'freeze', frozenAmount: amount }
             }], { session });
 
-            await session.commitTransaction();
+            if (!existingSession) await session.commitTransaction();
             return { balance: balanceAfter, frozen: wallet.frozen };
         } catch (error) {
-            await session.abortTransaction();
+            if (!existingSession) await session.abortTransaction();
             throw error;
         } finally {
-            session.endSession();
+            if (!existingSession) session.endSession();
         }
     }
 
     /**
      * Unfreeze an amount and return to balance.
      */
-    static async unfreeze(userId, amount, reference, source) {
-        if (amount <= 0) throw new Error('Amount must be greater than zero');
+    static async unfreeze(userId, amount, reference, source, existingSession = null) {
+        if (!Number.isFinite(amount) || amount <= 0) throw new Error('Amount must be greater than zero');
 
-        const session = await mongoose.startSession();
-        session.startTransaction();
+        const session = existingSession || await mongoose.startSession();
+        if (!existingSession) session.startTransaction();
 
         try {
             const wallet = await Wallet.findOne({ userId }).session(session);
@@ -163,13 +163,13 @@ class WalletService {
                 metadata: { action: 'unfreeze', unfrozenAmount: amount }
             }], { session });
 
-            await session.commitTransaction();
+            if (!existingSession) await session.commitTransaction();
             return { balance: balanceAfter, frozen: wallet.frozen };
         } catch (error) {
-            await session.abortTransaction();
+            if (!existingSession) await session.abortTransaction();
             throw error;
         } finally {
-            session.endSession();
+            if (!existingSession) session.endSession();
         }
     }
 }

@@ -12,6 +12,7 @@ const withdrawalSchema = new mongoose.Schema({
     reference: { type: String, unique: true },
     processedAt: { type: Date },
     processedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    adminNote: { type: String, default: '' },
     rejectionReason: { type: String },
     notes: { type: String }
 }, { timestamps: true });
