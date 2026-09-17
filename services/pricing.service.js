@@ -1,5 +1,6 @@
 const PricingRule = require('../models/PricingRule');
 const Service = require('../models/Service');
+const { resolvePinQuantity } = require('../utils/pinQuantity');
 
 /**
  * Service responsible for resolving the sale price of a service based on layered rules.
@@ -10,10 +11,15 @@ class PricingService {
      * @param {Object} user - The user making the purchase.
      * @param {Object} service - The normalized Service object.
      * @param {Object} providerOffer - The selected ProviderOffer.
-     * @param {number} requestedAmount - The face value or requested amount (if applicable).
-     * @returns {Promise<Object>} - Pricing breakdown.
+     * @param {number} requestedAmount - For `pin` this is the UNIT (per-card) face value;
+     *                                    for other categories it is the total request amount.
+     * @param {*} [quantityArg] - PIN batch size (cards). Absent defaults to 1.
+     * @returns {Promise<Object>} - Pricing breakdown (totals for `pin`, unchanged for others).
      */
-    async resolvePricing(user, service, providerOffer, requestedAmount) {
+    async resolvePricing(user, service, providerOffer, requestedAmount, quantityArg) {
+        const isPin = service.category === 'pin';
+        const quantity = isPin ? resolvePinQuantity(quantityArg) : 1;
+
         // For airtime, the cost is the requested face value. For data, it's the fixed plan cost.
         const costPrice = (service.category === 'airtime' || service.category === 'electricity') 
             ? Number(requestedAmount) 
@@ -60,14 +66,14 @@ class PricingService {
 
         const rawSalePrice = salePrice;
         
-        // Round only the final chargeable salePrice to the nearest whole Naira (NGN)
-        const roundedSalePrice = Math.round(salePrice);
-        const profit = roundedSalePrice - costPrice;
+        // Round only the final chargeable unit salePrice to the nearest whole Naira (NGN)
+        const roundedUnitSalePrice = Math.round(salePrice);
+        const profit = roundedUnitSalePrice - costPrice;
 
-        // Calculate "Market Reference Price" (SRP)
+        // Calculate "Market Reference Price" (SRP) per unit
         // If the service has a suggestedRetailPrice (SRP), use it as the benchmark.
         // Otherwise, fall back to what a standard retail user would pay.
-        let referencePrice = service.suggestedRetailPrice || roundedSalePrice;
+        let referencePrice = service.suggestedRetailPrice || roundedUnitSalePrice;
         
         if (!service.suggestedRetailPrice || service.suggestedRetailPrice <= costPrice) {
             const retailRule = await this._findBestRule(service, 'retail');
@@ -80,16 +86,25 @@ class PricingService {
             referencePrice = Math.round(costPrice + retailMarkup);
         }
 
+        // A PIN service is a fixed-cost UNIT: totalProviderCost = unitCost * qty and
+        // totalSalePrice = unitSalePrice * qty. Non-PIN categories are already totalled
+        // by the caller, so quantity is always 1 for them.
+        const totalBaseCostPrice = costPrice * quantity;
+        const totalRawSalePrice = rawSalePrice * quantity;
+        const totalSalePrice = roundedUnitSalePrice * quantity;
+        const totalReferencePrice = referencePrice * quantity;
+
         // The savings is what the user is gaining compared to the market/standard price
-        const savings = Math.max(0, referencePrice - roundedSalePrice);
+        const savings = Math.max(0, totalReferencePrice - totalSalePrice);
 
         return {
-            baseCostPrice: costPrice,
-            rawSalePrice: rawSalePrice, 
-            salePrice: roundedSalePrice,
-            retailPrice: referencePrice, // Renamed internally to referencePrice but kept as retailPrice for API compatibility
+            baseCostPrice: totalBaseCostPrice,
+            rawSalePrice: totalRawSalePrice,
+            salePrice: totalSalePrice,
+            retailPrice: totalReferencePrice, // Renamed internally to referencePrice but kept as retailPrice for API compatibility
             savings: savings,
-            profit: profit,
+            profit: profit * quantity,
+            quantity: quantity,
             appliedPricingRuleId: rule ? rule._id : null,
             markupType: markupType,
             markupValue: markupValue,

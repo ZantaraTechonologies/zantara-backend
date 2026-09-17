@@ -82,9 +82,35 @@ class PricingController {
             }
 
             // 3. Resolve pricing using the engine
-            const parsedQuantity = quantity ? Number(quantity) : 1;
-            const requestedAmount = (amount || service.suggestedRetailPrice || 0) * parsedQuantity;
-            const pricing = await pricingService.resolvePricing(user, service, offer, requestedAmount);
+            // PIN amounts are a UNIT face value per card; the engine scales the
+            // few costs by quantity. Variable-cost categories (airtime, electricity)
+            // and fixed-plan categories (data, cable) already use the total amount.
+            const isPin = String((service && service.category) || '').toLowerCase() === 'pin';
+            const { resolvePinQuantity, validatePinQuantity } = require('../../utils/pinQuantity');
+            let parsedQuantity;
+            if (isPin) {
+                const validation = validatePinQuantity(quantity);
+                if (!validation.ok) {
+                    logPreviewFailure({
+                        userId,
+                        serviceId,
+                        serviceCode,
+                        amount,
+                        quantity,
+                        errorReason: validation.message,
+                        source: 'pricingController/calculatePrice',
+                        clientType: req.headers['x-client-type'] || 'unknown',
+                    });
+                    return sendResponse(res, { status: 400, success: false, message: validation.message });
+                }
+                parsedQuantity = validation.quantity;
+            } else {
+                parsedQuantity = resolvePinQuantity(quantity);
+            }
+            const requestedAmount = isPin
+                ? (amount || service.suggestedRetailPrice || 0)
+                : (amount || service.suggestedRetailPrice || 0) * parsedQuantity;
+            const pricing = await pricingService.resolvePricing(user, service, offer, requestedAmount, parsedQuantity);
 
             if (!pricing) {
                 logPreviewFailure({

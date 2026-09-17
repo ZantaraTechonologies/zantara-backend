@@ -22,6 +22,7 @@ const {
     logMissingExpectedPrice,
     logLegacyPricingFallback,
 } = require('../utils/pricingLogger');
+const { resolvePinQuantity } = require('../utils/pinQuantity');
 
 class PurchaseService {
     /**
@@ -39,6 +40,8 @@ class PurchaseService {
 
             let costPrice, finalAmount, pricingSnapshot = null;
             let currentProvider = provider;
+            // PIN batch size (fixed-cost cards). Absent/invalid resolves to 1.
+            const quantity = resolvePinQuantity(details?.quantity);
 
             // --- BATCH 2: NEW ENGINES INTEGRATION ---
             // Try to find the normalized service by its code (e.g., MTN_DATA_1GB)
@@ -61,15 +64,17 @@ class PurchaseService {
                 offer = await procurementEngine.selectBestOffer(service._id);
                 if (offer) {
                     currentProvider = offer.providerId.name;
-                    // 2. Resolve pricing based on rules
-                    pricingResult = await pricingEngine.resolvePricing(user, service, offer, amount);
+                    // 2. Resolve pricing based on rules.
+                    // `amount` is the TOTAL for variable-cost categories and the
+                    // UNIT face value for `pin`; the engine scales pins by quantity.
+                    pricingResult = await pricingEngine.resolvePricing(user, service, offer, amount, quantity);
                 }
             }
 
             if (pricingResult) {
                 // Use results from the new engines
-                costPrice = pricingResult.baseCostPrice;
-                finalAmount = pricingResult.salePrice;
+                costPrice = pricingResult.baseCostPrice; // total provider cost (pins: unitCost * qty)
+                finalAmount = pricingResult.salePrice;   // total customer charge (pins: unitPrice * qty)
                 pricingSnapshot = {
                     serviceId: service._id,
                     providerId: offer.providerId._id,
@@ -87,6 +92,11 @@ class PurchaseService {
                 });
                 costPrice = await getProviderCost(serviceId, amount);
                 finalAmount = await calculateServicePrice(user, amount, costPrice);
+                if (type === 'pin' && quantity > 1) {
+                    // Legacy pin pricing is per-card; scale the whole order.
+                    costPrice = costPrice * quantity;
+                    finalAmount = finalAmount * quantity;
+                }
             }
 
             // --- BATCH 3.1: PURCHASE CHECKSUM (MISMATCH PREVENTION) ---
@@ -155,7 +165,7 @@ class PurchaseService {
                 userRole: user.role && user.role !== 'user' ? user.role : (user.accountType || user.role),
                 provider: currentProvider,
                 status: 'pending',
-                details: { ...details, originalAmount: amount, request_id: reference },
+                details: { ...details, originalAmount: amount, request_id: reference, quantity },
                 pricingSnapshot: pricingSnapshot // Persist the engine snapshot
             });
 

@@ -530,23 +530,27 @@ const purchaseExamPin = async (req, res) => {
 
         const provider = service?.provider || 'VTPass';
 
-        const parsedQuantity = quantity ? Number(quantity) : 1;
-        const totalAmount = amount * parsedQuantity;
+        const { validatePinQuantity } = require('../utils/pinQuantity');
+        const quantityValidation = validatePinQuantity(quantity);
+        if (!quantityValidation.ok) {
+            return sendResponse(res, { status: 400, success: false, message: quantityValidation.message })
+        }
+        const purchasedQuantity = quantityValidation.quantity;
 
         const result = await purchaseService.processPurchase(userId, {
             type: 'pin',
             serviceId: variation_code || serviceID,
-            amount: totalAmount,
+            amount, // UNIT face value per card; the engine scales pins by quantity
             pin,
             provider,
             expectedPrice,
-            details: { request_id: generateVTPassRequestId(), serviceID, variation_code, quantity, phone, billersCode, roles: req.user.roles },
+            details: { request_id: generateVTPassRequestId(), serviceID, variation_code, quantity: purchasedQuantity, phone, billersCode, roles: req.user.roles },
             providerCall: (refId, resolvedCost) => providerService.purchaseExamPin({
                 request_id: refId,
                 serviceID: vendorServiceID,
                 variation_code: service?.providerCode || variation_code,
-                amount: resolvedCost || (service?.costPrice || service?.price || amount) * parsedQuantity,
-                quantity,
+                amount: resolvedCost || (service?.costPrice || service?.price || amount) * purchasedQuantity,
+                quantity: purchasedQuantity,
                 phone,
                 billersCode
             }, provider)
