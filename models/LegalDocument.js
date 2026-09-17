@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 
 const DOCUMENT_TYPES = ['terms', 'privacy', 'refund_complaints'];
+const MANDATORY_DOCUMENT_TYPES = ['terms', 'privacy'];
 const DOCUMENT_STATUS = ['draft', 'published', 'archived'];
 const ACCEPTANCE_MODES = ['agreement', 'acknowledgement', 'none'];
 
@@ -48,6 +49,7 @@ legalDocumentSchema.index({ documentType: 1, version: -1 });
 
 const legalDocumentModel = mongoose.model('LegalDocument', legalDocumentSchema);
 legalDocumentModel.DOCUMENT_TYPES = DOCUMENT_TYPES;
+legalDocumentModel.MANDATORY_DOCUMENT_TYPES = MANDATORY_DOCUMENT_TYPES;
 legalDocumentModel.DOCUMENT_STATUS = DOCUMENT_STATUS;
 legalDocumentModel.ACCEPTANCE_MODES = ACCEPTANCE_MODES;
 module.exports = legalDocumentModel;

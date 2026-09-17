@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const LegalDocument = require('../models/LegalDocument');
 const LegalAcceptance = require('../models/LegalAcceptance');
-const { DOCUMENT_TYPES, ACCEPTANCE_MODES } = require('../models/LegalDocument');
+const { DOCUMENT_TYPES, ACCEPTANCE_MODES, MANDATORY_DOCUMENT_TYPES } = require('../models/LegalDocument');
 const { markdownToHtml, computeHash } = require('../utils/legalHtml');
 
 function httpError(status, code, message) {
@@ -97,6 +97,14 @@ class LegalDocumentService {
     async getRequirements({ userId = null } = {}) {
         const currentDocs = await this.getCurrentDocuments();
 
+        // LEGAL-01 / LEGAL-02: Mandatory documents ('terms' and 'privacy') must have an
+        // active, published version. If either is absent, missingMandatoryDocuments will
+        // flag it so protected operations can fail closed with 503 LEGAL_SERVICE_UNAVAILABLE.
+        const mandatoryTypes = LegalDocument.MANDATORY_DOCUMENT_TYPES || MANDATORY_DOCUMENT_TYPES || ['terms', 'privacy'];
+        const missingMandatoryDocuments = mandatoryTypes.filter(type =>
+            !currentDocs.some(d => d.documentType === type && d.requiresAcceptance)
+        );
+
         // Helper: latest acceptance for a (userId, documentType).
         const latestAcceptance = async (type) => {
             if (!userId) return null;
@@ -150,7 +158,8 @@ class LegalDocumentService {
         return {
             documents,
             pendingReacceptance: anyPendingReacceptance,
-            missingAcceptances
+            missingAcceptances,
+            missingMandatoryDocuments
         };
     }
 

@@ -797,6 +797,267 @@ function test(name, fn) {
         axios.post = originalPost;
     }
 
+    // ------------------------------------------------------------
+    // K. Phase 2 HIGH 6 Security Invariants (R1 - R20)
+    // ------------------------------------------------------------
+    console.log('\n--- K. Phase 2 HIGH 6 Security Invariants (R1 - R20) ---');
+    const paystackRouter = require('../routes/paystack');
+    const monnifyRouter = require('../routes/monnify');
+    const webhooksRouter = require('../routes/webhooks');
+
+    // R1: Zero published mandatory documents causes protected legal middleware to block (HTTP 503) rather than call next().
+    {
+        resetStore();
+        let nextCalled = false;
+        const res = makeRes();
+        await requireLegalCompliance({ user: { id: 'U_R1' } }, res, () => { nextCalled = true; });
+        test('R1. zero published mandatory documents blocks with 503 LEGAL_SERVICE_UNAVAILABLE (never calls next)', () => {
+            assert.strictEqual(nextCalled, false, 'next() must NOT be called when zero documents are published');
+            assert.strictEqual(res.statusCode, 503);
+            assert.strictEqual(res.body?.code, 'LEGAL_SERVICE_UNAVAILABLE');
+            assert.strictEqual(res.body?.success, false);
+            assert.ok(res.body?.message, 'expected customer-facing message');
+        });
+    }
+
+    // R2: Terms exists but Privacy missing => 503
+    {
+        resetStore();
+        await legalService.publish(
+            (await legalService.createDraft({ ...TOS_AGREE, createdBy: 'A1' }))._id, { publishedBy: 'A1' });
+        let nextCalled = false;
+        const res = makeRes();
+        await requireLegalCompliance({ user: { id: 'U_R2' } }, res, () => { nextCalled = true; });
+        test('R2. terms exists but privacy missing -> 503 LEGAL_SERVICE_UNAVAILABLE', () => {
+            assert.strictEqual(nextCalled, false);
+            assert.strictEqual(res.statusCode, 503);
+            assert.strictEqual(res.body?.code, 'LEGAL_SERVICE_UNAVAILABLE');
+        });
+    }
+
+    // R3: Privacy exists but Terms missing => 503
+    {
+        resetStore();
+        await legalService.publish(
+            (await legalService.createDraft({ ...PRIVACY_ACK, createdBy: 'A1' }))._id, { publishedBy: 'A1' });
+        let nextCalled = false;
+        const res = makeRes();
+        await requireLegalCompliance({ user: { id: 'U_R3' } }, res, () => { nextCalled = true; });
+        test('R3. privacy exists but terms missing -> 503 LEGAL_SERVICE_UNAVAILABLE', () => {
+            assert.strictEqual(nextCalled, false);
+            assert.strictEqual(res.statusCode, 503);
+            assert.strictEqual(res.body?.code, 'LEGAL_SERVICE_UNAVAILABLE');
+        });
+    }
+
+    // R4: Both mandatory docs exist but user accepts neither => 428
+    {
+        resetStore();
+        await publishBaseline();
+        let nextCalled = false;
+        const res = makeRes();
+        await requireLegalCompliance({ user: { id: 'U_R4' } }, res, () => { nextCalled = true; });
+        test('R4. both mandatory docs exist but user accepts neither -> 428 LEGAL_ACCEPTANCE_REQUIRED', () => {
+            assert.strictEqual(nextCalled, false);
+            assert.strictEqual(res.statusCode, 428);
+            assert.strictEqual(res.body?.code, 'LEGAL_ACCEPTANCE_REQUIRED');
+        });
+    }
+
+    // R5: Both mandatory docs exist and current acceptances exist => next()
+    {
+        resetStore();
+        await publishBaseline();
+        const terms = docs.find(d => d.documentType === 'terms' && d.status === 'published');
+        const privacy = docs.find(d => d.documentType === 'privacy' && d.status === 'published');
+        await legalService.recordAcceptance({
+            userId: 'U_R5', documentType: 'terms', version: terms.version,
+            contentHash: computeHash(terms.contentHtml), channel: 'web'
+        });
+        await legalService.recordAcceptance({
+            userId: 'U_R5', documentType: 'privacy', version: privacy.version,
+            contentHash: computeHash(privacy.contentHtml), channel: 'web'
+        });
+        let nextCalled = false;
+        const res = makeRes();
+        await requireLegalCompliance({ user: { id: 'U_R5' } }, res, () => { nextCalled = true; });
+        test('R5. both mandatory docs exist and current acceptances exist -> next() called', () => {
+            assert.strictEqual(nextCalled, true);
+            assert.strictEqual(res.statusCode, null);
+        });
+    }
+
+    // R6: POST /api/paystack/initialize route contains verifyJWT -> requireLegalCompliance -> payment
+    {
+        test('R6. POST /api/paystack/initialize contains verifyJWT -> requireLegalCompliance -> payment', () => {
+            const h = layersFor(paystackRouter, '/initialize');
+            assert.ok(h, 'POST /api/paystack/initialize layer not found');
+            assert.strictEqual(h.length, 3, 'expected exactly 3 handlers: verifyJWT, requireLegalCompliance, payment');
+            assert.strictEqual(h[0], verifyJWT, 'first handler must be verifyJWT');
+            assert.strictEqual(h[1], requireLegalCompliance, 'second handler must be requireLegalCompliance');
+        });
+    }
+
+    // R7: POST /api/monnify/initialize route contains verifyJWT -> requireLegalCompliance -> payment
+    {
+        test('R7. POST /api/monnify/initialize contains verifyJWT -> requireLegalCompliance -> payment', () => {
+            const h = layersFor(monnifyRouter, '/initialize');
+            assert.ok(h, 'POST /api/monnify/initialize layer not found');
+            assert.strictEqual(h.length, 3, 'expected exactly 3 handlers: verifyJWT, requireLegalCompliance, payment');
+            assert.strictEqual(h[0], verifyJWT, 'first handler must be verifyJWT');
+            assert.strictEqual(h[1], requireLegalCompliance, 'second handler must be requireLegalCompliance');
+        });
+    }
+
+    // R8: POST /api/monnify/generate-virtual-accounts contains verifyJWT -> requireLegalCompliance -> generateVirtualAccounts
+    {
+        test('R8. POST /api/monnify/generate-virtual-accounts contains verifyJWT -> requireLegalCompliance -> controller', () => {
+            const h = layersFor(monnifyRouter, '/generate-virtual-accounts');
+            assert.ok(h, 'POST /api/monnify/generate-virtual-accounts layer not found');
+            assert.strictEqual(h.length, 3, 'expected exactly 3 handlers: verifyJWT, requireLegalCompliance, controller');
+            assert.strictEqual(h[0], verifyJWT, 'first handler must be verifyJWT');
+            assert.strictEqual(h[1], requireLegalCompliance, 'second handler must be requireLegalCompliance');
+        });
+    }
+
+    // R9: POST /api/flutterwave/initialize remains guarded
+    {
+        test('R9. POST /api/flutterwave/initialize remains guarded with verifyJWT + requireLegalCompliance', () => {
+            const h = layersFor(flutterwaveRouter, '/initialize');
+            assert.ok(h && h[0] === verifyJWT && h[1] === requireLegalCompliance);
+        });
+    }
+
+    // R10: POST /api/wallet/fund remains guarded
+    {
+        test('R10. POST /api/wallet/fund remains guarded with verifyJWT + requireLegalCompliance', () => {
+            const h = layersFor(walletRouter, '/fund');
+            assert.ok(h && h[0] === verifyJWT && h[1] === requireLegalCompliance);
+        });
+    }
+
+    // R11: Service purchase routes remain guarded
+    {
+        test('R11. all service purchase routes remain guarded (/airtime, /data, /electricity, /cable, /purchase-pin)', () => {
+            for (const path of ['/airtime', '/data', '/electricity', '/cable', '/purchase-pin']) {
+                const h = layersFor(servicesRouter, path);
+                assert.ok(h && h[0] === verifyJWT && h[1] === requireLegalCompliance, `${path} not guarded`);
+            }
+        });
+    }
+
+    // R12: Transfer and redeem-earnings remain guarded
+    {
+        test('R12. wallet transfer and redeem-earnings remain guarded', () => {
+            for (const path of ['/transfer', '/redeem-earnings']) {
+                const h = layersFor(walletRouter, path);
+                assert.ok(h && h[0] === verifyJWT && h[1] === requireLegalCompliance, `${path} not guarded`);
+            }
+        });
+    }
+
+    // R13: Withdrawal remains guarded
+    {
+        test('R13. POST /withdrawal remains guarded', () => {
+            const h = layersFor(withdrawalRouter, '/');
+            assert.ok(h && h[0] === verifyJWT && h[1] === requireLegalCompliance);
+        });
+    }
+
+    // R14: Dedicated investment initiation remains guarded
+    {
+        test('R14. dedicated investment routes remain guarded (/buy, /exit, /reinvest, /redeem, /withdraw)', () => {
+            for (const path of ['/buy', '/exit', '/reinvest', '/redeem', '/withdraw']) {
+                const h = layersFor(investmentRouter, path);
+                assert.ok(h && h[0] === verifyJWT && h[1] === requireLegalCompliance, `${path} not guarded`);
+            }
+        });
+    }
+
+    // R15: /api/wallet/verify remains intentionally unguarded by legal middleware
+    {
+        test('R15. /api/wallet/verify remains intentionally unguarded by requireLegalCompliance (settlement/polling)', () => {
+            const h = layersFor(walletRouter, '/verify');
+            assert.ok(h, 'wallet /verify layer not found');
+            assert.ok(h[0] === verifyJWT, 'first handler should be verifyJWT');
+            assert.ok(!has(h, requireLegalCompliance), 'verify route must NEVER have requireLegalCompliance');
+        });
+    }
+
+    // R16: /api/paystack/verify/:reference remains intentionally unguarded
+    {
+        test('R16. /api/paystack/verify/:reference remains intentionally unguarded (polling/recovery)', () => {
+            const h = layersFor(paystackRouter, '/verify/:reference');
+            assert.ok(h, 'paystack /verify/:reference layer not found');
+            assert.ok(h[0] === verifyJWT);
+            assert.ok(!has(h, requireLegalCompliance), 'verify route must NEVER have requireLegalCompliance');
+        });
+    }
+
+    // R17: Provider webhook routes remain intentionally unguarded
+    {
+        test('R17. provider webhooks remain intentionally unguarded by requireLegalCompliance', () => {
+            const h = layersFor(webhooksRouter, '/payment/:gatewayCode');
+            assert.ok(h, 'webhook layer not found');
+            assert.ok(!has(h, requireLegalCompliance), 'webhook route must NEVER have requireLegalCompliance');
+        });
+    }
+
+    // R18: Database/legal service failure does not call next()
+    {
+        const originalGetReq = legalService.getRequirements;
+        legalService.getRequirements = async () => { throw new Error('Simulated DB failure'); };
+        let nextErr = null;
+        let cleanNext = false;
+        const res = makeRes();
+        await requireLegalCompliance({ user: { id: 'U_R18' } }, res, (err) => {
+            if (err) nextErr = err;
+            else cleanNext = true;
+        });
+        legalService.getRequirements = originalGetReq;
+
+        test('R18. database/legal service error fails closed and passes error to next(err) (never clean next())', () => {
+            assert.strictEqual(cleanNext, false, 'clean next() must never be called on failure');
+            assert.ok(nextErr instanceof Error, 'error must be passed to errorHandler');
+            assert.strictEqual(nextErr.message, 'Simulated DB failure');
+        });
+    }
+
+    // R19: refund_complaints absence alone does NOT produce LEGAL_SERVICE_UNAVAILABLE
+    {
+        resetStore();
+        // Publish only terms and privacy (mandatory types) — leave refund_complaints unpublished
+        const t = await legalService.publish(
+            (await legalService.createDraft({ ...TOS_AGREE, createdBy: 'A1' }))._id, { publishedBy: 'A1' });
+        const p = await legalService.publish(
+            (await legalService.createDraft({ ...PRIVACY_ACK, createdBy: 'A1' }))._id, { publishedBy: 'A1' });
+        await legalService.recordAcceptance({
+            userId: 'U_R19', documentType: 'terms', version: t.version,
+            contentHash: computeHash(t.contentHtml), channel: 'web'
+        });
+        await legalService.recordAcceptance({
+            userId: 'U_R19', documentType: 'privacy', version: p.version,
+            contentHash: computeHash(p.contentHtml), channel: 'web'
+        });
+        let nextCalled = false;
+        const res = makeRes();
+        await requireLegalCompliance({ user: { id: 'U_R19' } }, res, () => { nextCalled = true; });
+        test('R19. refund_complaints absence alone does NOT block operation with 503 (informational doc)', () => {
+            assert.strictEqual(nextCalled, true, 'operation must proceed when mandatory docs are compliant');
+            assert.strictEqual(res.statusCode, null);
+        });
+    }
+
+    // R20: Paystack investment_buy initialization is subject to legal guard through the route middleware
+    {
+        test('R20. POST /api/paystack/initialize has requireLegalCompliance before payment handler (guards investment_buy)', () => {
+            const h = layersFor(paystackRouter, '/initialize');
+            assert.ok(h && h.length === 3);
+            assert.strictEqual(h[0], verifyJWT);
+            assert.strictEqual(h[1], requireLegalCompliance);
+        });
+    }
+
     console.log('\n====================================================');
     console.log(`  RESULT: ${passed} passed, ${failed} failed`);
     if (failures.length) {
