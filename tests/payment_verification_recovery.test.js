@@ -60,6 +60,8 @@ async function runVerificationRecoveryTests() {
     const origTxCreate = TransactionStatus.create;
     const origTxUpdateOne = TransactionStatus.updateOne;
     const origWhCreate = WebhookEvent.create;
+    const origWhFindOne = WebhookEvent.findOne;
+    const origWhFindOneAndUpdate = WebhookEvent.findOneAndUpdate;
     const origTxModelCreate = Transaction.create;
     const origGetGateway = paymentGatewayService.getGateway;
     const origWalletCredit = walletService.credit;
@@ -187,7 +189,7 @@ async function runVerificationRecoveryTests() {
     };
 
     WebhookEvent.create = (doc) => {
-        const existing = mockWebhookEvents.find(w => w.eventId === doc.eventId);
+        const existing = mockWebhookEvents.find(w => w.provider === doc.provider && w.eventId === doc.eventId);
         if (existing) {
             const err = new Error('E11000 duplicate key error');
             err.code = 11000;
@@ -201,6 +203,30 @@ async function runVerificationRecoveryTests() {
         };
         mockWebhookEvents.push(item);
         return Promise.resolve(item);
+    };
+
+    const webhookMatches = (event, filter = {}) => {
+        if (filter.provider && event.provider !== filter.provider) return false;
+        if (filter.eventId && event.eventId !== filter.eventId) return false;
+        if (filter.status && event.status !== filter.status) return false;
+        if (filter.$or && !filter.$or.some(part => webhookMatches(event, part))) return false;
+        return true;
+    };
+
+    WebhookEvent.findOne = (filter = {}) => {
+        return mockQuery(mockWebhookEvents.find(event => webhookMatches(event, filter)) || null);
+    };
+
+    WebhookEvent.findOneAndUpdate = (filter = {}, update = {}) => {
+        const event = mockWebhookEvents.find(item => webhookMatches(item, filter));
+        if (!event) return Promise.resolve(null);
+        if (update.$set) Object.assign(event, update.$set);
+        if (update.$inc) {
+            for (const [key, value] of Object.entries(update.$inc)) {
+                event[key] = Number(event[key] || 0) + value;
+            }
+        }
+        return Promise.resolve(event);
     };
 
     walletService.credit = async (userId, amount, reference, source) => {
@@ -554,6 +580,8 @@ async function runVerificationRecoveryTests() {
         TransactionStatus.create = origTxCreate;
         TransactionStatus.updateOne = origTxUpdateOne;
         WebhookEvent.create = origWhCreate;
+        WebhookEvent.findOne = origWhFindOne;
+        WebhookEvent.findOneAndUpdate = origWhFindOneAndUpdate;
         Transaction.create = origTxModelCreate;
         paymentGatewayService.getGateway = origGetGateway;
         walletService.credit = origWalletCredit;

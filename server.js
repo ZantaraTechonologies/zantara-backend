@@ -29,8 +29,11 @@ app.use('/api/webhooks', require('./routes/webhooks'));
 
 // ---- PAYSTACK WEBHOOK (RAW BODY) — MUST BE BEFORE express.json() ----
 const { webhook } = require('./controllers/paystackController');
-// Use express.raw so req.body is a Buffer for HMAC verification
-app.post('/webhooks/paystack', express.raw({ type: 'application/json' }), webhook);
+const paystackRawBody = express.raw({ type: '*/*' });
+// Keep every externally reachable compatibility URL on the same verified path.
+app.post('/webhooks/paystack', paystackRawBody, webhook);
+app.post('/api/paystack/webhook', paystackRawBody, webhook);
+app.post('/api/wallet/paystack/webhook', paystackRawBody, webhook);
 
 // ---- MONNIFY WEBHOOK ----
 const { webhook: monnifyWebhook } = require('./controllers/monnifyController');

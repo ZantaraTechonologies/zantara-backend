@@ -63,6 +63,8 @@ async function runWebhookRecoveryTests() {
     const origTxCreate = TransactionStatus.create;
     const origTxUpdateOne = TransactionStatus.updateOne;
     const origWhCreate = WebhookEvent.create;
+    const origWhFindOne = WebhookEvent.findOne;
+    const origWhFindOneAndUpdate = WebhookEvent.findOneAndUpdate;
     const origLedgerFindOne = WalletLedger.findOne;
     const origTxModelCreate = Transaction.create;
     const origGetGateway = paymentGatewayService.getGateway;
@@ -203,7 +205,7 @@ async function runWebhookRecoveryTests() {
     };
 
     WebhookEvent.create = (doc) => {
-        const existing = mockWebhookEvents.find(w => w.eventId === doc.eventId);
+        const existing = mockWebhookEvents.find(w => w.provider === doc.provider && w.eventId === doc.eventId);
         if (existing) {
             const err = new Error('E11000 duplicate key error');
             err.code = 11000;
@@ -217,6 +219,30 @@ async function runWebhookRecoveryTests() {
         };
         mockWebhookEvents.push(item);
         return Promise.resolve(item);
+    };
+
+    const webhookMatches = (event, filter = {}) => {
+        if (filter.provider && event.provider !== filter.provider) return false;
+        if (filter.eventId && event.eventId !== filter.eventId) return false;
+        if (filter.status && event.status !== filter.status) return false;
+        if (filter.$or && !filter.$or.some(part => webhookMatches(event, part))) return false;
+        return true;
+    };
+
+    WebhookEvent.findOne = (filter = {}) => {
+        return mockQuery(mockWebhookEvents.find(event => webhookMatches(event, filter)) || null);
+    };
+
+    WebhookEvent.findOneAndUpdate = (filter = {}, update = {}) => {
+        const event = mockWebhookEvents.find(item => webhookMatches(item, filter));
+        if (!event) return Promise.resolve(null);
+        if (update.$set) Object.assign(event, update.$set);
+        if (update.$inc) {
+            for (const [key, value] of Object.entries(update.$inc)) {
+                event[key] = Number(event[key] || 0) + value;
+            }
+        }
+        return Promise.resolve(event);
     };
 
     walletService.credit = async (userId, amount, reference, source) => {
@@ -391,18 +417,18 @@ async function runWebhookRecoveryTests() {
             assert.strictEqual(mockTransactions[0].status, 'failed');
         });
 
-        await test('27. Webhook secondary verification NOT success → no recovery (stays failed)', async () => {
+        await test('27. Inconclusive webhook verification is retryable and does not recover yet', async () => {
             resetState();
             storeGatewayMock();
             seedFunding('REF-R9', { status: 'failed', errorMessage: 'The transaction was not completed' });
             axios.get = async () => { axiosVerifyCount++; return { data: paystackNotCompleted }; };
 
             const result = await paymentGatewayService.routeWebhook('paystack', makeWebhookRequest('REF-R9', 111000091));
-            assert.strictEqual(result.status, 200);
-            assert.ok(result.message.includes('unconfirmed'));
+            assert.strictEqual(result.status, 503);
+            assert.ok(result.message.includes('inconclusive'));
             assert.strictEqual(walletCredits.length, 0, 'Unconfirmed webhook must not credit');
             assert.strictEqual(mockTransactions[0].status, 'failed');
-            assert.strictEqual(mockWebhookEvents[0].status, 'failed', 'Event flagged failed for unconfirmed verification');
+            assert.strictEqual(mockWebhookEvents[0].status, 'retryable', 'Event remains eligible for authenticated redelivery');
         });
 
         await test('28. Regression: normal pending → success path unchanged', async () => {
@@ -427,7 +453,7 @@ async function runWebhookRecoveryTests() {
 
             const result = await paymentGatewayService.routeWebhook('paystack', makeWebhookRequest('REF-R11', 111000111));
             assert.strictEqual(result.status, 200);
-            assert.ok(result.message.includes('unconfirmed'));
+            assert.ok(result.message.includes('confirmed payment failure'));
             assert.strictEqual(walletCredits.length, 0, 'Genuinely failed verify must not credit');
             assert.strictEqual(mockTransactions[0].status, 'failed', 'Must remain failed, no recovery');
 
@@ -445,6 +471,8 @@ async function runWebhookRecoveryTests() {
         TransactionStatus.create = origTxCreate;
         TransactionStatus.updateOne = origTxUpdateOne;
         WebhookEvent.create = origWhCreate;
+        WebhookEvent.findOne = origWhFindOne;
+        WebhookEvent.findOneAndUpdate = origWhFindOneAndUpdate;
         WalletLedger.findOne = origLedgerFindOne;
         Transaction.create = origTxModelCreate;
         paymentGatewayService.getGateway = origGetGateway;

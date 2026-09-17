@@ -90,9 +90,9 @@ class MonnifyAdapter extends BasePaymentAdapter {
     async verifyPayment(reference) {
         if (!reference) throw new Error('MonnifyAdapter: reference is required for verification');
 
-        const token = await this.getAccessToken();
-
+        let token;
         try {
+            token = await this.getAccessToken();
             // Official Monnify v2 transaction status query endpoint
             const response = await axios.get(
                 `${this.baseUrl}/api/v2/transactions/${encodeURIComponent(reference)}`,
@@ -106,7 +106,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
             if (!resData || !resData.requestSuccessful || !resData.responseBody) {
                 return {
                     success: false,
-                    status: 'failed',
+                    status: 'pending',
                     reference,
                     amount: 0,
                     currency: 'NGN',
@@ -139,8 +139,10 @@ class MonnifyAdapter extends BasePaymentAdapter {
                 raw: body
             };
         } catch (err) {
-            // Fallback to query endpoint if v2 by path fails
+            // Fallback to query endpoint if v2 by path fails and authentication
+            // succeeded. A transport failure is inconclusive, never terminal.
             try {
+                if (!token) throw new Error('Monnify access token unavailable');
                 const queryRes = await axios.get(
                     `${this.baseUrl}/api/v1/merchant/transactions/query?paymentReference=${encodeURIComponent(reference)}`,
                     {
@@ -152,9 +154,10 @@ class MonnifyAdapter extends BasePaymentAdapter {
                     const body = queryRes.data.responseBody;
                     const payStatus = String(body.paymentStatus || '').toUpperCase();
                     const isPaid = payStatus === 'PAID' || payStatus === 'OVERPAID';
+                    const isFailed = ['FAILED', 'EXPIRED', 'CANCELLED'].includes(payStatus);
                     return {
                         success: isPaid,
-                        status: isPaid ? 'success' : 'pending',
+                        status: isPaid ? 'success' : (isFailed ? 'failed' : 'pending'),
                         reference: body.paymentReference || reference,
                         providerTransactionId: String(body.transactionReference || ''),
                         amount: Number(body.amountPaid ?? 0),
@@ -169,7 +172,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
             const msg = err.response?.data?.responseMessage || err.message;
             return {
                 success: false,
-                status: 'failed',
+                status: 'pending',
                 reference,
                 amount: 0,
                 currency: 'NGN',

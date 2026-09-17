@@ -56,6 +56,7 @@ async function runAtomicityTests() {
     const origTxCreate = TransactionStatus.create;
     const origTxUpdateOne = TransactionStatus.updateOne;
     const origWhFindOne = WebhookEvent.findOne;
+    const origWhFindOneAndUpdate = WebhookEvent.findOneAndUpdate;
     const origWhCreate = WebhookEvent.create;
     const origWalletCredit = walletService.credit;
     const origNotifSendInApp = notificationService.sendInApp;
@@ -101,15 +102,34 @@ async function runAtomicityTests() {
             return Promise.resolve({ modifiedCount });
         };
 
-        // WebhookEvent.findOne (legacy path — only used in old code)
+        const webhookMatches = (event, filter = {}) => {
+            if (filter.provider && event.provider !== filter.provider) return false;
+            if (filter.eventId && event.eventId !== filter.eventId) return false;
+            if (filter.status && event.status !== filter.status) return false;
+            if (filter.$or && !filter.$or.some(part => webhookMatches(event, part))) return false;
+            return true;
+        };
+
         WebhookEvent.findOne = (filter = {}) => {
-            const found = mockWebhookEvents.find(w => w.eventId === filter.eventId);
+            const found = mockWebhookEvents.find(w => webhookMatches(w, filter));
             return Promise.resolve(found || null);
         };
 
-        // WebhookEvent.create — with unique index simulation
+        WebhookEvent.findOneAndUpdate = (filter = {}, update = {}) => {
+            const found = mockWebhookEvents.find(w => webhookMatches(w, filter));
+            if (!found) return Promise.resolve(null);
+            if (update.$set) Object.assign(found, update.$set);
+            if (update.$inc) {
+                for (const [key, value] of Object.entries(update.$inc)) {
+                    found[key] = Number(found[key] || 0) + value;
+                }
+            }
+            return Promise.resolve(found);
+        };
+
+        // WebhookEvent.create — provider-scoped unique index simulation
         WebhookEvent.create = (doc) => {
-            const existing = mockWebhookEvents.find(w => w.eventId === doc.eventId);
+            const existing = mockWebhookEvents.find(w => w.provider === doc.provider && w.eventId === doc.eventId);
             if (existing) {
                 const dupErr = new Error('E11000 duplicate key error');
                 dupErr.code = 11000;
@@ -596,6 +616,7 @@ async function runAtomicityTests() {
     TransactionStatus.create = origTxCreate;
     TransactionStatus.updateOne = origTxUpdateOne;
     WebhookEvent.findOne = origWhFindOne;
+    WebhookEvent.findOneAndUpdate = origWhFindOneAndUpdate;
     WebhookEvent.create = origWhCreate;
     walletService.credit = origWalletCredit;
     notificationService.sendInApp = origNotifSendInApp;

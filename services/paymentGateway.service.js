@@ -17,6 +17,8 @@ const MonnifyAdapter = require('../adapters/payment/monnify.adapter');
 const FlutterwaveAdapter = require('../adapters/payment/flutterwave.adapter');
 const { SUPPORTED_ADAPTER_CODES } = require('../adapters/payment/paymentAdapterRegistry');
 
+const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60 * 1000;
+
 class PaymentGatewayService {
     constructor() {
         this.adapters = {
@@ -1195,12 +1197,86 @@ class PaymentGatewayService {
     // ─────────────────────────────────────────────────────────
 
     /**
-     * Routes and processes incoming webhooks for a specific gateway.
+     * Atomically creates or claims an authenticated webhook event.
      *
-     * WebhookEvent idempotency:
-     *   We attempt to CREATE the WebhookEvent record first (create-before-check).
-     *   The unique index on eventId turns a duplicate delivery into a duplicate-key error,
-     *   which we catch and treat as "already processed" — race-safe without a findOne+create gap.
+     * pending means one request owns a short processing lease. A duplicate may
+     * only reprocess a retryable event or a stale lease. processed and failed are
+     * terminal states and are safely deduplicated.
+     */
+    async _claimWebhookEvent({ providerCode, normalized, payload }) {
+        const identity = { provider: providerCode, eventId: normalized.eventId };
+        const now = new Date();
+        const processingExpiresAt = new Date(now.getTime() + WEBHOOK_PROCESSING_LEASE_MS);
+
+        try {
+            const webhookEvent = await WebhookEvent.create({
+                ...identity,
+                eventType: normalized.eventType,
+                payload,
+                status: 'pending',
+                attemptCount: 1,
+                lastAttemptAt: now,
+                processingExpiresAt
+            });
+            return { webhookEvent, identity };
+        } catch (dbErr) {
+            if (dbErr.code !== 11000) throw dbErr;
+
+            const webhookEvent = await WebhookEvent.findOneAndUpdate(
+                {
+                    ...identity,
+                    $or: [
+                        { status: 'retryable' },
+                        { status: 'pending', processingExpiresAt: { $lte: now } },
+                        { status: 'pending', processingExpiresAt: { $exists: false } }
+                    ]
+                },
+                {
+                    $set: {
+                        status: 'pending',
+                        eventType: normalized.eventType,
+                        payload,
+                        errorMessage: null,
+                        lastAttemptAt: now,
+                        processingExpiresAt
+                    },
+                    $inc: { attemptCount: 1 }
+                },
+                { new: true }
+            );
+
+            if (webhookEvent) {
+                console.log(`[Webhook Retry] eventId=${normalized.eventId} for ${providerCode} claimed for reprocessing.`);
+                return { webhookEvent, identity, retried: true };
+            }
+
+            const existing = await WebhookEvent.findOne(identity);
+            if (existing && ['processed', 'failed'].includes(existing.status)) {
+                console.log(`[Webhook Idempotency] eventId=${normalized.eventId} for ${providerCode} is terminal (${existing.status}). Duplicate ignored.`);
+                return {
+                    response: { status: 200, message: 'Event already processed' },
+                    identity
+                };
+            }
+
+            // 503 follows the application's existing temporary-unavailability
+            // convention and asks the provider to redeliver after the active lease.
+            return {
+                response: { status: 503, message: 'Webhook event is currently processing; retry later' },
+                identity
+            };
+        }
+    }
+
+    async _setWebhookEventState(webhookEvent, status, errorMessage = null) {
+        webhookEvent.status = status;
+        webhookEvent.errorMessage = errorMessage;
+        webhookEvent.processingExpiresAt = null;
+        await webhookEvent.save();
+    }
+
+    /**
+     * Routes and processes incoming webhooks for a specific gateway.
      */
     async routeWebhook(providerCode, req) {
         const gateway = await this.getGateway(providerCode);
@@ -1231,30 +1307,9 @@ class PaymentGatewayService {
 
         // 3. Normalize Event
         const normalized = adapter.normalizeWebhook(payload);
-        const eventId = normalized.eventId;
-
-        // 4. WebhookEvent Idempotency — CREATE FIRST (race-safe)
-        //    The unique index on eventId makes this atomic:
-        //    - First delivery succeeds: create returns a new document.
-        //    - Duplicate delivery throws a 11000 duplicate-key error → already processed.
-        //    This avoids the findOne+create TOCTOU race.
-        let webhookEvent;
-        try {
-            webhookEvent = await WebhookEvent.create({
-                provider: providerCode,
-                eventType: normalized.eventType,
-                eventId,
-                payload,
-                status: 'pending'
-            });
-        } catch (dbErr) {
-            if (dbErr.code === 11000) {
-                // Duplicate event — idempotent success
-                console.log(`[Webhook Idempotency] eventId=${eventId} for ${providerCode} already exists. Duplicate delivery ignored.`);
-                return { status: 200, message: 'Event already processed' };
-            }
-            throw dbErr;
-        }
+        const claim = await this._claimWebhookEvent({ providerCode, normalized, payload });
+        if (claim.response) return claim.response;
+        const webhookEvent = claim.webhookEvent;
 
         // 5. Process Successful Payment Event
         if (normalized.status === 'success') {
@@ -1278,31 +1333,68 @@ class PaymentGatewayService {
 
             if (transaction) {
                 // Secondary server-side verification before wallet credit (never trust webhook alone)
-                const serverVerify = await adapter.verifyPayment(refId);
+                let serverVerify;
+                try {
+                    serverVerify = await adapter.verifyPayment(refId);
+                } catch (verifyErr) {
+                    // A transport/adapter exception cannot authoritatively establish
+                    // payment failure. Keep the transaction recoverable.
+                    serverVerify = {
+                        success: false,
+                        status: 'pending',
+                        reference: refId,
+                        message: `Provider verification unavailable: ${verifyErr.message}`
+                    };
+                }
 
                 if (serverVerify.status === 'success') {
-                    await this.finalizeFundingCredit({
-                        transactionStatus: transaction,
-                        gatewayPaymentResult: {
-                            ...serverVerify,
-                            gateway: providerCode
-                        },
-                        source: 'webhook'
-                    });
+                    try {
+                        await this.finalizeFundingCredit({
+                            transactionStatus: transaction,
+                            gatewayPaymentResult: {
+                                ...serverVerify,
+                                gateway: providerCode
+                            },
+                            source: 'webhook'
+                        });
+                    } catch (settlementErr) {
+                        const terminalSecurityFailure = [
+                            'PAYMENT_GATEWAY_MISMATCH',
+                            'PAYMENT_REFERENCE_MISMATCH',
+                            'PAYMENT_CURRENCY_MISMATCH',
+                            'PAYMENT_AMOUNT_MISMATCH'
+                        ].includes(settlementErr.code);
+                        await this._setWebhookEventState(
+                            webhookEvent,
+                            terminalSecurityFailure ? 'failed' : 'retryable',
+                            settlementErr.message
+                        );
+                        throw settlementErr;
+                    }
+                } else if (serverVerify.status === 'failed') {
+                    // The provider authoritatively confirmed a terminal failure.
+                    // Preserve existing TransactionStatus handling and stop retries.
+                    await this._setWebhookEventState(
+                        webhookEvent,
+                        'failed',
+                        `Secondary verification confirmed failure: ${serverVerify.message}`
+                    );
+                    return { status: 200, message: 'Secondary verification confirmed payment failure' };
                 } else {
-                    webhookEvent.status = 'failed';
-                    webhookEvent.errorMessage = `Secondary verification failed: ${serverVerify.message}`;
-                    await webhookEvent.save();
-                    console.warn(`[Webhook] Secondary verification failed for ${refId} via ${providerCode}: ${serverVerify.message}`);
-                    return { status: 200, message: 'Secondary verification unconfirmed' };
+                    await this._setWebhookEventState(
+                        webhookEvent,
+                        'retryable',
+                        `Secondary verification inconclusive: ${serverVerify.message}`
+                    );
+                    console.warn(`[Webhook] Secondary verification inconclusive for ${refId} via ${providerCode}: ${serverVerify.message}`);
+                    return { status: 503, message: 'Secondary verification inconclusive; retry later' };
                 }
             } else {
                 console.warn(`[Webhook] No TransactionStatus found for refId=${refId} from ${providerCode}`);
             }
         }
 
-        webhookEvent.status = 'processed';
-        await webhookEvent.save();
+        await this._setWebhookEventState(webhookEvent, 'processed');
 
         return { status: 200, message: 'Webhook processed successfully' };
     }

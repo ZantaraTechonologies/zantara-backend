@@ -87,7 +87,7 @@ class FlutterwaveAdapter extends BasePaymentAdapter {
             if (!resData || resData.status !== 'success' || !resData.data) {
                 return {
                     success: false,
-                    status: 'failed',
+                    status: 'pending',
                     reference,
                     amount: 0,
                     currency: 'NGN',
@@ -114,7 +114,7 @@ class FlutterwaveAdapter extends BasePaymentAdapter {
             const msg = err.response?.data?.message || err.message;
             return {
                 success: false,
-                status: 'failed',
+                status: 'pending',
                 reference,
                 amount: 0,
                 currency: 'NGN',
