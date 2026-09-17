@@ -15,7 +15,7 @@ const retryTransaction = async refId => {
         return { message: 'Max retries reached. Transaction failed permanently.' }
     }
 
-    const { type, refId, retries } = transactionStatus
+    const { type, retries } = transactionStatus
 
     // Retrieve original Transaction to obtain the fulfilling provider
     const originalTx = await Transaction.findOne({
