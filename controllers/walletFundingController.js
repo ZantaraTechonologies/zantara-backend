@@ -66,12 +66,11 @@ const verifyFunding = async (req, res) => {
         const { reference } = req.query;
         if (!reference) return res.status(400).json({ status: 'not_found', message: 'Reference is required' });
 
-        const row = await TransactionStatus.findOne({ refId: reference });
+        const row = await TransactionStatus.findOne({
+            refId: reference,
+            userId: req.user.id
+        });
         if (!row) return res.status(404).json({ status: 'not_found' });
-
-        if (row.userId && String(row.userId) !== String(req.user.id)) {
-            return res.status(403).json({ status: 'forbidden' });
-        }
 
         // If already explicitly completed or failed, return immediately
         if (row.status === 'success' || row.status === 'failed') {

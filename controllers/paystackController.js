@@ -133,6 +133,15 @@ const paymentGatewayService = require('../services/paymentGateway.service');
 const verifyTransaction = async (req, res) => {
     try {
         const { reference } = req.params;
+
+        const transaction = await TransactionStatus.findOne({
+            refId: reference,
+            userId: req.user.id
+        });
+        if (!transaction) {
+            return res.status(404).json({ success: false, status: 'not_found' });
+        }
+
         const result = await paymentGatewayService.verifyFunding(reference);
         res.json({
             success: result.status === 'success',
