@@ -1,14 +1,16 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 const PaymentGateway = require('../models/PaymentGateway');
 const TransactionStatus = require('../models/TransactionStatus');
+const Transaction = require('../models/Transaction');
 const WebhookEvent = require('../models/WebhookEvent');
 const WalletLedger = require('../models/WalletLedger');
 const walletService = require('./wallet.service');
 const notificationService = require('./notification.service');
 const investmentService = require('./investment.service');
-const { logTransaction } = require('../utils/transaction');
+const { parseInvestmentMoney } = require('../utils/investmentValidation');
 const { generateReference } = require('../utils/generateID');
 const { decryptSecret, isEncrypted } = require('../utils/crypto');
 
@@ -18,6 +20,8 @@ const FlutterwaveAdapter = require('../adapters/payment/flutterwave.adapter');
 const { SUPPORTED_ADAPTER_CODES } = require('../adapters/payment/paymentAdapterRegistry');
 
 const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60 * 1000;
+const SETTLEMENT_LEASE_MS = 15 * 60 * 1000;
+const AUTOMATIC_SETTLEMENT_TYPES = new Set(['funding', 'investment_buy']);
 
 class PaymentGatewayService {
     constructor() {
@@ -182,8 +186,14 @@ class PaymentGatewayService {
      * Initializes wallet funding through the resolved gateway.
      */
     async initializeFunding({ gatewayCode, channel, user, amount, callbackUrl, metadata = {}, isDirectTransfer = false }) {
-        const rawAmount = Number(amount);
-        if (!rawAmount || rawAmount < 50) {
+        let parsedAmount;
+        try {
+            parsedAmount = parseInvestmentMoney(amount, { label: 'Funding amount' });
+        } catch (error) {
+            throw new Error('Funding amount must be a positive value with at most two decimal places');
+        }
+        const rawAmount = parsedAmount.naira;
+        if (rawAmount < 50) {
             throw new Error('Minimum funding amount is ₦50.00');
         }
 
@@ -246,12 +256,12 @@ class PaymentGatewayService {
             ? generateReference()
             : `${gateway.code.toUpperCase()}_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
 
-        const amountKobo = Math.round(rawAmount * 100);
+        const amountKobo = parsedAmount.kobo;
         const channels = channel ? [channel] : (gateway.supportedChannels && gateway.supportedChannels.length ? gateway.supportedChannels : ['card', 'bank_transfer', 'ussd']);
 
         // Authoritative share price snapshot for investment-buy payments: read the
         // CURRENT server-side price at INIT time. Fulfillment must bind to this
-        // snapshot (see _finalizeAfterClaim), never a fresh re-read, eliminating
+        // snapshot used by the authoritative settlement transaction, eliminating
         // the TOCTOU where a price change mid-payment broke legitimate purchases.
         //
         // FAIL-CLOSED: for a NEW investment_buy payment the authoritative share
@@ -263,13 +273,44 @@ class PaymentGatewayService {
         let sharePriceSnapshot = null;
         if (txType === 'investment_buy') {
             const invSettings = await investmentService.getInvestmentSettings();
-            const sp = Number(invSettings && invSettings.sharePrice);
-            if (!Number.isFinite(sp) || sp <= 0) {
+            if (!invSettings.investmentEnabled) {
                 const err = new Error('Share purchase is temporarily unavailable. Please try again later.');
                 err.code = 'INVALID_INVESTMENT_CONFIGURATION';
                 throw err;
             }
-            sharePriceSnapshot = sp;
+            let sharePrice;
+            try {
+                sharePrice = parseInvestmentMoney(invSettings.sharePrice, { label: 'Share price' });
+            } catch (error) {
+                const configurationError = new Error('Share purchase is temporarily unavailable. Please try again later.');
+                configurationError.code = 'INVALID_INVESTMENT_CONFIGURATION';
+                throw configurationError;
+            }
+            if (amountKobo % sharePrice.kobo !== 0) {
+                const err = new Error('Investment amount must purchase a whole number of shares.');
+                err.code = 'INVALID_INVESTMENT_AMOUNT';
+                throw err;
+            }
+            const qty = amountKobo / sharePrice.kobo;
+            if (qty < invSettings.minSharesPerPurchase || qty > invSettings.maxSharesPerUser || qty > invSettings.totalSharesAvailable) {
+                const err = new Error('Investment amount is outside the permitted share limits.');
+                err.code = 'INVALID_INVESTMENT_AMOUNT';
+                throw err;
+            }
+            let sharesOwned;
+            try {
+                sharesOwned = await investmentService.getAuthoritativeShareBalance(user._id || user.id);
+            } catch (error) {
+                const err = new Error('Investment account share balance requires manual reconciliation.');
+                err.code = 'INVALID_INVESTMENT_CONFIGURATION';
+                throw err;
+            }
+            if (sharesOwned + qty > invSettings.maxSharesPerUser) {
+                const err = new Error('Investment amount exceeds the permitted per-user share limit.');
+                err.code = 'INVALID_INVESTMENT_AMOUNT';
+                throw err;
+            }
+            sharePriceSnapshot = sharePrice.naira;
         }
 
         // 4. Persist Pending TransactionStatus Record — gateway permanently bound here
@@ -280,6 +321,7 @@ class PaymentGatewayService {
             status: 'pending',
             amountKobo,
             amount: rawAmount,
+            expectedCurrency: 'NGN',
             channels,
             provider: gateway.code,
             service: gateway.name,
@@ -329,791 +371,516 @@ class PaymentGatewayService {
     // UNIVERSAL WALLET-CREDIT SAFETY FINALIZER
     // ─────────────────────────────────────────────────────────
 
-    /**
-     * UNIVERSAL WALLET-CREDIT SAFETY FINALIZER
-     *
-     * Guarantees exactly-once, atomic, fully-verified wallet credit.
-     *
-     * Atomicity design:
-     *   Step 1 — Atomic claim: TransactionStatus pending → processing (modifiedCount === 1 wins the lock)
-     *   Step 2 — Atomic credit: walletService.credit() runs its own MongoDB session (wallet + ledger)
-     *   Step 3 — Atomic finalize: TransactionStatus processing → success in the same wallet session
-     *
-     *   If Step 2 throws after Step 1 (e.g. wallet not found, network crash):
-     *     - TransactionStatus remains 'processing'
-     *     - Admin can inspect 'processing' records for manual reconciliation.
-     *
-     *   NOTE: Exactly-once credit is enforced by the TransactionStatus state
-     *   machine (atomic claim + terminal-success check), NOT by the
-     *   WalletLedger.reference index — that index is intentionally non-unique
-     *   and must never be relied on for dedupe.
-     *
-     *   This is the safest pattern achievable without a 2-phase-commit or
-     *   change-data-capture pipeline, and is production-grade for MongoDB.
-     *
-     * Failure modes:
-     *   provider payment confirmed → TransactionStatus = processing
-     *                                → walletService crashes
-     *                                → status stays 'processing'  ← admin alarm, NOT 'failed'
-     *
-     *   provider payment confirmed → TransactionStatus = processing
-     *                                → walletService succeeds
-     *                                → status = 'success'         ← happy path
-     *
-     *   provider payment NOT confirmed (gateway says failed):
-     *                                → status stays 'pending' or → 'failed'  (no credit)
-     *
-     *   amount / currency / reference mismatch:
-     *                                → status = 'reconciliation_required'   (preserve evidence, no credit)
-     *
-     * Failed-state recovery (narrow, webhook-only):
-     *   A FUNDING record currently in 'failed' may ONLY be recovered by an
-     *   authenticated provider webhook whose independent server-to-server
-     *   verification re-confirms explicit provider success. Recovery requires
-     *   strict eligibility (see _isWebhookRecoveryEligible) and an atomic
-     *   failed → processing claim before re-using the exact same credit path.
-     *   No client/callback/admin source, and no 'reconciliation_required'
-     *   record, may ever auto-recover.
-     */
-    async finalizeFundingCredit({ transactionStatus, gatewayPaymentResult, source = 'webhook' }) {
-        if (!transactionStatus) {
-            throw new Error('[Funding Safety] TransactionStatus record is required');
-        }
-
-        const refId = transactionStatus.refId;
-
-        // A. Already completed — return idempotently without crediting again
-        if (transactionStatus.status === 'success') {
-            console.log(`[Funding Safety] Reference ${refId} already finalized. Source: ${source}`);
-            return {
-                success: true,
-                status: 'success',
-                alreadyProcessed: true,
-                credited: false,
-                message: 'Transaction has already been credited successfully.'
-            };
-        }
-
-        // B. Stuck in processing (previous crash window) — log for admin visibility and skip
-        //    Exactly-once credit is enforced by the TransactionStatus state machine
-        //    (atomic pending→processing claim + terminal-success check), NOT by the
-        //    WalletLedger.reference index — that index is intentionally non-unique and
-        //    must not be relied on for dedupe. Records stuck in 'processing' need
-        //    manual reconciliation review.
-        if (transactionStatus.status === 'processing') {
-            console.warn(`[FUNDING-SAFETY-WARN] Reference ${refId} is stuck in 'processing'. Previous finalization may have crashed mid-flight. Manual reconciliation review required.`);
-            return {
-                success: false,
-                status: 'processing',
-                alreadyProcessed: true,
-                credited: false,
-                message: 'Transaction is being finalized. If this persists, contact support.'
-            };
-        }
-
-        // C. Already in reconciliation — terminal, never re-process automatically.
-        //    reconciliation_required preserves evidence of a real-money anomaly for
-        //    manual admin review. Do NOT auto-recover it.
-        if (transactionStatus.status === 'reconciliation_required') {
-            console.log(`[Funding Safety] Reference ${refId} is in terminal state 'reconciliation_required'. No action taken. Source: ${source}`);
-            return {
-                success: false,
-                status: 'reconciliation_required',
-                alreadyProcessed: true,
-                credited: false,
-                message: `Transaction is in state 'reconciliation_required' and cannot be re-processed.`
-            };
-        }
-
-        // C1. Mid-settlement (claim acquired, settle-step in flight/crashed) — a
-        //     competing webhook must never re-credit while the recovery sweep or
-        //     an admin is finishing this payment. The settle path completes it
-        //     exactly-once (settlement_pending → success); here we defer.
-        if (transactionStatus.status === 'settlement_pending') {
-            console.log(`[Funding Safety] Reference ${refId} is mid-settlement ('settlement_pending'). Deferring webhook finalization. Source: ${source}`);
-            return {
-                success: false,
-                status: 'settlement_pending',
-                alreadyProcessed: true,
-                credited: false,
-                message: 'Transaction is being finalized by reconciliation. Please wait a moment.'
-            };
-        }
-
-        // C2. Failed state — by default terminal, EXCEPT the single narrow,
-        //     authenticated-webhook FUNDING recovery (see _handleFailedState).
-        //     No client / callback / admin source may ever resurrect a failed record.
-        if (transactionStatus.status === 'failed') {
-            return this._handleFailedState({ transactionStatus, gatewayPaymentResult, refId, source });
-        }
-
-        // D. Confirm gateway matches transaction gateway binding (prevents cross-gateway verification)
-        if (transactionStatus.provider && gatewayPaymentResult.gateway) {
-            if (transactionStatus.provider.toLowerCase() !== gatewayPaymentResult.gateway.toLowerCase()) {
-                const err = new Error(`[Security Alert] Gateway mismatch: expected ${transactionStatus.provider}, got ${gatewayPaymentResult.gateway}`);
-                err.code = 'PAYMENT_GATEWAY_MISMATCH';
-                console.error(`[PAYMENT-SECURITY-ALERT] Reference=${refId}: ${err.message}`);
-                throw err;
-            }
-        }
-
-        // E. Confirm provider reported success
-        //    Only an EXPLICIT terminal 'failed' verdict marks the record failed.
-        //    pending / processing / ambiguous / not_found / transport errors must
-        //    never permanently mark the record failed — they are left 'pending'
-        //    (or 'processing') so a later verify or webhook can still recover.
-        if (gatewayPaymentResult.status !== 'success') {
-            if (gatewayPaymentResult.status === 'failed') {
-                await TransactionStatus.updateOne(
-                    { refId, status: 'pending' },
-                    { $set: { status: 'failed', errorMessage: gatewayPaymentResult.message || 'Payment failed at gateway' } }
-                );
-
-                // Terminal funding-failed advisory (In-App + Push only; never SMS/email,
-                // never claims refund/credit). Fired only AFTER the record is durably
-                // marked failed. Non-blocking and deduplicated by reference.
-                if (transactionStatus.userId) {
-                    const failedAmount = ((transactionStatus.amountKobo || 0) / 100) || 0;
-                    notificationService.sendFundingAdvisory(transactionStatus.userId, {
-                        kind: 'failed',
-                        amount: failedAmount,
-                        reference: refId
-                    }).catch(advisoryErr => {
-                        console.error('[Funding Advisory Error]', advisoryErr && advisoryErr.message);
-                    });
-                }
-            }
-            return {
-                success: false,
-                status: gatewayPaymentResult.status || 'pending',
-                message: gatewayPaymentResult.message || 'Payment provider did not confirm success'
-            };
-        }
-
-        // F. Reference verification
-        if (gatewayPaymentResult.reference && gatewayPaymentResult.reference !== refId) {
-            const reason = `Reference mismatch: expected ${refId}, got ${gatewayPaymentResult.reference}`;
-            console.error(`[PAYMENT-SECURITY-ALERT] ${reason}`);
-            await TransactionStatus.updateOne(
-                { refId },
-                {
-                    $set: {
-                        status: 'reconciliation_required',
-                        reconciliationReason: reason,
-                        confirmedAmountKobo: Math.round(Number(gatewayPaymentResult.amount || 0) * 100),
-                        confirmedCurrency: (gatewayPaymentResult.currency || '').toUpperCase(),
-                        confirmedProviderRef: gatewayPaymentResult.providerTransactionId || ''
-                    }
-                }
-            );
-            const err = new Error(`[Security Alert] ${reason}`);
-            err.code = 'PAYMENT_REFERENCE_MISMATCH';
-            throw err;
-        }
-
-        // G. Currency verification
-        const confirmedCurrency = (gatewayPaymentResult.currency || 'NGN').toUpperCase();
-        if (confirmedCurrency !== 'NGN') {
-            const reason = `Currency mismatch: expected NGN, provider confirmed ${confirmedCurrency}`;
-            console.error(`[PAYMENT-SECURITY-ALERT] Reference=${refId}: ${reason}`);
-            await TransactionStatus.updateOne(
-                { refId },
-                {
-                    $set: {
-                        status: 'reconciliation_required',
-                        reconciliationReason: reason,
-                        confirmedAmountKobo: Math.round(Number(gatewayPaymentResult.amount || 0) * 100),
-                        confirmedCurrency,
-                        confirmedProviderRef: gatewayPaymentResult.providerTransactionId || ''
-                    }
-                }
-            );
-            const err = new Error(`[Security Alert] ${reason}`);
-            err.code = 'PAYMENT_CURRENCY_MISMATCH';
-            throw err;
-        }
-
-        // H. Amount verification (integer Kobo comparison — avoids floating-point errors)
-        const expectedKobo = transactionStatus.amountKobo
-            || Math.round(Number(transactionStatus.amount || 0) * 100);
-        const confirmedKobo = Math.round(Number(gatewayPaymentResult.amount || 0) * 100);
-
-        if (expectedKobo > 0 && confirmedKobo !== expectedKobo) {
-            const reason = `Amount mismatch: expected ₦${expectedKobo / 100}, provider confirmed ₦${confirmedKobo / 100}`;
-            console.error(`[PAYMENT-SECURITY-ALERT] Reference=${refId}: ${reason}`);
-            // Preserve evidence — do NOT mark as 'failed' (real money moved)
-            await TransactionStatus.updateOne(
-                { refId },
-                {
-                    $set: {
-                        status: 'reconciliation_required',
-                        reconciliationReason: reason,
-                        confirmedAmountKobo: confirmedKobo,
-                        confirmedCurrency,
-                        confirmedProviderRef: gatewayPaymentResult.providerTransactionId || ''
-                    }
-                }
-            );
-            const err = new Error(`[Security Alert] ${reason}`);
-            err.code = 'PAYMENT_AMOUNT_MISMATCH';
-            throw err;
-        }
-
-        // ─── ATOMIC STEP 1: Claim the finalization lock ───────────────────────
-        //
-        // Transition: pending → processing
-        //   - Only ONE concurrent caller wins (modifiedCount === 1).
-        //   - The losing caller returns immediately — the winning caller proceeds.
-        //   - 'processing' is a visible intermediate state for ops monitoring.
-        //   - If the process crashes after this point, status='processing' remains
-        //     and is a clear signal for admin reconciliation.
-        //
-        const claimResult = await TransactionStatus.updateOne(
-            { refId, status: 'pending' },
-            {
-                $set: {
-                    status: 'processing',
-                    confirmedAmountKobo: confirmedKobo,
-                    confirmedCurrency,
-                    confirmedProviderRef: gatewayPaymentResult.providerTransactionId || ''
-                }
-            }
-        );
-
-        if (claimResult.modifiedCount !== 1) {
-            // Another concurrent process already claimed (or it was already success/processing)
-            console.log(`[Funding Safety] Reference ${refId}: finalization lock already claimed by concurrent process. Source: ${source}`);
-            return {
-                success: true,
-                status: 'success',
-                alreadyProcessed: true,
-                credited: false,
-                message: 'Transaction finalized concurrently'
-            };
-        }
-
-        // ─── ATOMIC STEP 2 + 3: Credit wallet/fulfill, finalize to success ─────
-        // Extracted into _finalizeAfterClaim so the webhook failed-state recovery
-        // can atomically claim failed → processing and then reuse this EXACT
-        // identical credit + finalize path (guaranteeing true exactly-once credit).
-        return this._finalizeAfterClaim({
-            transactionStatus,
-            gatewayPaymentResult,
-            refId,
-            confirmedKobo,
-            confirmedCurrency,
-            source,
-            recovery: false
-        });
-    }
-
-    /**
-     * Atomically finalizes an already-claimed (processing) transaction:
-     * wallet credit / investment fulfillment → processing → success → notification → immutable audit log.
-     *
-     * Caller MUST have already claimed the state machine lock, otherwise the
-     * processing → success transition below will be a no-op and the caller
-     * returns success:false. Exactly-once is preserved by the state machine.
-     */
-    async _finalizeAfterClaim({ transactionStatus, gatewayPaymentResult, refId, confirmedKobo, confirmedCurrency, source, recovery = false }) {
-        const amountNaira = confirmedKobo / 100;
-        const userId = transactionStatus.userId;
-
-        // ─── ATOMIC STEP 2: Credit wallet + create ledger ─────────────────────
-        //
-        // walletService.credit() uses its own MongoDB session internally
-        // (Wallet balance update + WalletLedger creation are atomic within that session).
-        //
-        // If this throws, TransactionStatus stays 'processing'.
-        // That state is an admin alarm — NOT a silent failure.
-        //
-        try {
-            if (userId) {
-                if (transactionStatus.type === 'investment_buy') {
-                    // CRIT 3: Share quantity MUST be derived from the bank-verified
-                    // amount (confirmedKobo) at the SERVER-side share price. Client-
-                    // supplied gateway metadata.qty is never trusted — a payer can
-                    // inject an arbitrary quantity into payment metadata and receive
-                    // far more shares than were purchased.
-                    //
-                    // TOCTOU fix: the authoritative price is the SHARE-PRICE SNAPSHOT
-                    // taken when the payment was initialized (transactionStatus.sharePrice).
-                    // The quantity is bound to that snapshot, so a price change between
-                    // init and fulfillment can neither reject a legitimate payment nor
-                    // silently change how many shares the payer bought. Records created
-                    // before the snapshot feature (no sharePrice stored) fall back to a
-                    // current-settings read for backward compatibility.
-                    let sharePrice;
-                    if (Number(transactionStatus.sharePrice) > 0) {
-                        sharePrice = Number(transactionStatus.sharePrice);
-                    } else {
-                        const settings = await investmentService.getInvestmentSettings();
-                        sharePrice = Number(settings.sharePrice);
-                    }
-                    if (!(sharePrice > 0)) {
-                        throw new Error('Invalid share price configured for investment fulfillment');
-                    }
-
-                    const perShareKobo = sharePrice * 100;
-                    if (!Number.isInteger(perShareKobo) || perShareKobo <= 0) {
-                        throw new Error('Share price does not reconcile to whole kobo');
-                    }
-
-                    if (confirmedKobo % perShareKobo !== 0) {
-                        throw new Error(`Confirmed amount ₦${amountNaira.toLocaleString()} is not a whole multiple of share price ₦${sharePrice.toLocaleString()} per share`);
-                    }
-
-                    const qty = confirmedKobo / perShareKobo;
-
-                    const metaQty = Number((gatewayPaymentResult.metadata || {}).qty);
-                    if (metaQty > 0 && metaQty !== qty) {
-                        console.error(`[PAYMENT-SECURITY-ALERT] Reference=${refId}: metadata.qty=${metaQty} diverges from amount-derived qty=${qty}. Deriving from confirmed amount.`);
-                    }
-
-                    await investmentService.fulfillSharePurchase(userId, qty, refId, false, null, sharePrice);
-                } else {
-                    await walletService.credit(userId, amountNaira, refId, 'funding');
-                }
-            }
-        } catch (creditErr) {
-            // Critical: wallet credit failed AFTER the lock was claimed.
-            // Status stays 'processing' — do NOT mark success or failed.
-            // This is visible to admin for manual reconciliation.
-            console.error(`[FUNDING-CRITICAL] Reference=${refId}: wallet credit failed after lock claimed. Status='processing'. Manual review required.`, creditErr.message);
-            throw creditErr;
-        }
-
-        // ─── ATOMIC STEP 3: Finalize to success ───────────────────────────────
-        //
-        // Transition: processing → success
-        // If this fails (e.g. transient network error) after the wallet was credited,
-        // the record stays 'processing' and is a clear admin signal for manual review.
-        //
-        await TransactionStatus.updateOne(
-            { refId, status: 'processing' },
-            { $set: { status: 'success' } }
-        );
-
-        // Non-blocking notification — never delays or rolls back financial result.
-        // Professionalized copy: customer-facing funding method only (gateway
-        // names are NEVER surfaced), no SMS for funding, and the event is
-        // deduplicated by reference so a concurrent duplicate dispatch is a no-op.
-        if (userId) {
-            notificationService.sendFundingSuccess({
-                userId,
-                amount: amountNaira,
-                method: (transactionStatus.channels && transactionStatus.channels[0]) || transactionStatus.channel || 'funding',
-                reference: refId,
-                type: transactionStatus.type || 'funding'
-            }).catch(notifErr => {
-                console.error('[Funding Notification Background Error]', notifErr && notifErr.message);
-            });
-        }
-
-        // Immutable audit log
-        await logTransaction({
-            userId,
-            refId,
-            type: transactionStatus.type || 'funding',
-            service: transactionStatus.service || gatewayPaymentResult.gateway || 'Payment Gateway',
-            amount: amountNaira,
-            status: 'success',
-            response: gatewayPaymentResult.raw || {}
-        });
-
-        if (recovery) {
-            console.log(`[FUNDING-RECOVERY] Reference ${refId}: recovered 'failed' → 'success' via authenticated webhook. Amount ₦${amountNaira}.`);
-        }
-        console.log(`[Funding Safety] Reference ${refId}: finalized successfully. Amount ₦${amountNaira}. Source: ${source}`);
-
+    _newSettlementClaim() {
+        const now = new Date();
         return {
-            success: true,
-            status: 'success',
-            credited: true,
-            amount: amountNaira,
-            reference: refId,
-            ...(recovery ? { recovered: true } : {})
+            token: crypto.randomBytes(32).toString('hex'),
+            claimedAt: now,
+            expiresAt: new Date(now.getTime() + SETTLEMENT_LEASE_MS)
         };
     }
 
-    /**
-     * Handles a TransactionStatus record currently in 'failed'.
-     *
-     * By default 'failed' is terminal. The single exception is an authenticated
-     * provider WEBHOOK that re-confirms provider success for a FUNDING transaction
-     * (source === 'webhook' AND strict _isWebhookRecoveryEligible passes). Once
-     * eligible, the recovery atomically claims failed → processing (modifiedCount === 1)
-     * and reuses _finalizeAfterClaim, so the credit is exactly-once.
-     */
-    async _handleFailedState({ transactionStatus, gatewayPaymentResult, refId, source }) {
-        const eligible = await this._isWebhookRecoveryEligible({ transactionStatus, gatewayPaymentResult, refId, source });
+    _requirePositiveSafeKobo(value, label) {
+        if (!Number.isSafeInteger(value) || value <= 0) {
+            const error = new Error(`${label} must be a positive safe-integer kobo amount`);
+            error.code = 'PAYMENT_EVIDENCE_INVALID';
+            throw error;
+        }
+        return value;
+    }
 
-        if (!eligible) {
-            console.log(`[Funding Safety] Reference ${refId} is in terminal state 'failed'. No action taken. Source: ${source}`);
-            return {
-                success: false,
-                status: 'failed',
-                alreadyProcessed: true,
-                credited: false,
-                message: `Transaction is in state 'failed' and cannot be re-processed.`
-            };
+    _nairaToKobo(value, label) {
+        if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+            const error = new Error(`${label} must be a positive finite number`);
+            error.code = 'PAYMENT_EVIDENCE_INVALID';
+            throw error;
+        }
+        const rawKobo = value * 100;
+        const kobo = Math.round(rawKobo);
+        if (!Number.isSafeInteger(kobo) || Math.abs(rawKobo - kobo) > 1e-7) {
+            const error = new Error(`${label} must reconcile exactly to safe integer kobo`);
+            error.code = 'PAYMENT_EVIDENCE_INVALID';
+            throw error;
+        }
+        return kobo;
+    }
+
+    _validatedGatewayEvidence(transactionStatus, gatewayPaymentResult) {
+        const refId = transactionStatus && transactionStatus.refId;
+        if (!transactionStatus || !refId) throw new Error('[Funding Safety] Local transaction reference is required');
+        if (!transactionStatus.userId) throw new Error(`[Funding Safety] Reference '${refId}' has no authoritative local owner`);
+        if (!AUTOMATIC_SETTLEMENT_TYPES.has(transactionStatus.type)) {
+            throw new Error(`[Funding Safety] Unsupported automatic settlement type '${transactionStatus.type}'`);
         }
 
-        const confirmedCurrency = (gatewayPaymentResult.currency || 'NGN').toUpperCase();
-        const confirmedKobo = Math.round(Number(gatewayPaymentResult.amount || 0) * 100);
+        const localProvider = String(transactionStatus.provider || '').trim().toLowerCase();
+        const confirmedProvider = String(gatewayPaymentResult && gatewayPaymentResult.gateway || '').trim().toLowerCase();
+        if (!localProvider || !confirmedProvider || localProvider !== confirmedProvider) {
+            const error = new Error(`Provider mismatch: expected '${localProvider || 'missing'}', confirmed '${confirmedProvider || 'missing'}'`);
+            error.code = 'PAYMENT_GATEWAY_MISMATCH';
+            throw error;
+        }
 
-        // ─── ATOMIC RECOVERY CLAIM: failed → processing ────────────────────────
-        // Exactly one concurrent webhook wins (modifiedCount === 1). The losing
-        // caller re-reads and reports the winner's state; NO second credit.
-        const recoveryClaim = await TransactionStatus.updateOne(
-            { refId, status: 'failed' },
+        const confirmedReference = String(gatewayPaymentResult.reference || '').trim();
+        if (!confirmedReference || confirmedReference !== refId) {
+            const error = new Error(`Reference mismatch: expected '${refId}', confirmed '${confirmedReference || 'missing'}'`);
+            error.code = 'PAYMENT_REFERENCE_MISMATCH';
+            throw error;
+        }
+
+        const expectedKobo = this._requirePositiveSafeKobo(transactionStatus.amountKobo, 'Expected amount');
+        const confirmedKobo = this._nairaToKobo(gatewayPaymentResult.amount, 'Confirmed amount');
+        if (expectedKobo !== confirmedKobo) {
+            const error = new Error(`Amount mismatch: expected ${expectedKobo} kobo, confirmed ${confirmedKobo} kobo`);
+            error.code = 'PAYMENT_AMOUNT_MISMATCH';
+            throw error;
+        }
+
+        const expectedCurrency = String(transactionStatus.expectedCurrency || '').trim().toUpperCase();
+        const confirmedCurrency = String(gatewayPaymentResult.currency || '').trim().toUpperCase();
+        if (!expectedCurrency || !confirmedCurrency || expectedCurrency !== confirmedCurrency) {
+            const error = new Error(`Currency mismatch: expected '${expectedCurrency || 'missing'}', confirmed '${confirmedCurrency || 'missing'}'`);
+            error.code = 'PAYMENT_CURRENCY_MISMATCH';
+            throw error;
+        }
+
+        const confirmedProviderRef = String(gatewayPaymentResult.providerTransactionId || '').trim();
+        if (!confirmedProviderRef) {
+            const error = new Error('Confirmed provider transaction identifier is required');
+            error.code = 'PAYMENT_EVIDENCE_INVALID';
+            throw error;
+        }
+
+        return {
+            confirmedAmountKobo: confirmedKobo,
+            confirmedCurrency,
+            confirmedProvider,
+            confirmedReference,
+            confirmedProviderRef
+        };
+    }
+
+    _assertPersistedSettlementEvidence(transactionStatus) {
+        const invalid = message => {
+            const error = new Error(message);
+            error.code = 'SETTLEMENT_EVIDENCE_INVALID';
+            return error;
+        };
+        if (!transactionStatus || !transactionStatus.refId) throw invalid('Persisted settlement reference is required');
+        if (!transactionStatus.userId) throw invalid(`Reference '${transactionStatus.refId}' has no authoritative local owner`);
+        if (!AUTOMATIC_SETTLEMENT_TYPES.has(transactionStatus.type)) {
+            throw invalid(`Unsupported automatic settlement type '${transactionStatus.type}'`);
+        }
+
+        let expectedKobo;
+        let confirmedKobo;
+        try {
+            expectedKobo = this._requirePositiveSafeKobo(transactionStatus.amountKobo, 'Expected amount');
+            confirmedKobo = this._requirePositiveSafeKobo(transactionStatus.confirmedAmountKobo, 'Confirmed amount');
+        } catch (error) {
+            throw invalid(error.message);
+        }
+        if (expectedKobo !== confirmedKobo) throw invalid('Persisted settlement amount mismatch');
+
+        const provider = String(transactionStatus.provider || '').trim().toLowerCase();
+        const confirmedProvider = String(transactionStatus.confirmedProvider || '').trim().toLowerCase();
+        if (!provider || !confirmedProvider || provider !== confirmedProvider) throw invalid('Persisted settlement provider mismatch');
+
+        const confirmedReference = String(transactionStatus.confirmedReference || '').trim();
+        if (!confirmedReference || confirmedReference !== transactionStatus.refId) throw invalid('Persisted settlement reference mismatch');
+
+        const expectedCurrency = String(transactionStatus.expectedCurrency || '').trim().toUpperCase();
+        const confirmedCurrency = String(transactionStatus.confirmedCurrency || '').trim().toUpperCase();
+        if (!expectedCurrency || !confirmedCurrency || expectedCurrency !== confirmedCurrency) throw invalid('Persisted settlement currency mismatch');
+        const confirmedProviderRef = String(transactionStatus.confirmedProviderRef || '').trim();
+        if (!confirmedProviderRef) throw invalid('Persisted provider transaction identifier is required');
+
+        return { expectedKobo, confirmedKobo, provider, expectedCurrency, confirmedProviderRef };
+    }
+
+    _providerTransactionReuseError(provider, providerTransactionId, ownerRefId, attemptedRefId) {
+        const error = new Error(
+            `Provider transaction '${provider}:${providerTransactionId}' already belongs to local reference '${ownerRefId}' and cannot settle '${attemptedRefId}'`
+        );
+        error.code = 'PAYMENT_PROVIDER_TRANSACTION_REUSED';
+        return error;
+    }
+
+    async _assertProviderTransactionOwner({ provider, providerTransactionId, refId, session = null }) {
+        const query = TransactionStatus.findOne({
+            confirmedProvider: provider,
+            confirmedProviderRef: providerTransactionId
+        });
+        const owner = session ? await query.session(session) : await query;
+        if (owner && String(owner.refId) !== String(refId)) {
+            throw this._providerTransactionReuseError(provider, providerTransactionId, owner.refId, refId);
+        }
+    }
+
+    async _markReconciliationRequired(transactionStatus, error) {
+        if (!transactionStatus || transactionStatus.status === 'failed') return;
+        const result = error.gatewayPaymentResult || {};
+        const confirmedAmount = typeof result.amount === 'number' && Number.isFinite(result.amount) && result.amount > 0
+            ? Math.round(result.amount * 100)
+            : null;
+        await TransactionStatus.updateOne(
+            { refId: transactionStatus.refId, status: transactionStatus.status },
             {
                 $set: {
-                    status: 'processing',
-                    confirmedAmountKobo: confirmedKobo,
-                    confirmedCurrency,
-                    confirmedProviderRef: gatewayPaymentResult.providerTransactionId || '',
-                    reconciliationReason: `Authenticated webhook recovery (providerTransactionId=${gatewayPaymentResult.providerTransactionId || 'n/a'}; gateway=${gatewayPaymentResult.gateway || 'n/a'}; source=${source})`
+                    status: 'reconciliation_required',
+                    reconciliationReason: error.message,
+                    ...(Number.isSafeInteger(confirmedAmount) ? { confirmedAmountKobo: confirmedAmount } : {}),
+                    ...(result.currency ? { confirmedCurrency: String(result.currency).toUpperCase() } : {}),
+                    ...(result.reference ? { confirmedReference: String(result.reference) } : {})
                 }
             }
         );
+    }
 
-        if (recoveryClaim.modifiedCount !== 1) {
-            // Another process recovered/claimed it first (or state changed under us).
-            const latest = await TransactionStatus.findOne({ refId });
-            console.log(`[Funding Safety] Reference ${refId}: webhook recovery claim not acquired (status now '${latest && latest.status}'). No second credit.`);
+    async finalizeFundingCredit({ transactionStatus, gatewayPaymentResult, source = 'webhook' }) {
+        if (!transactionStatus) throw new Error('[Funding Safety] TransactionStatus record is required');
+        const refId = transactionStatus.refId;
+
+        if (transactionStatus.status === 'success') {
+            return { success: true, status: 'success', alreadyProcessed: true, credited: false };
+        }
+        if (['processing', 'settlement_pending', 'reconciliation_required'].includes(transactionStatus.status)) {
+            return { success: false, status: transactionStatus.status, alreadyProcessed: true, credited: false };
+        }
+
+        if (!gatewayPaymentResult || gatewayPaymentResult.status !== 'success') {
+            if (gatewayPaymentResult && gatewayPaymentResult.status === 'failed') {
+                const failed = await TransactionStatus.updateOne(
+                    { refId, status: 'pending' },
+                    { $set: { status: 'failed', errorMessage: gatewayPaymentResult.message || 'Payment failed at gateway' } }
+                );
+                if (failed.modifiedCount === 1 && transactionStatus.userId) {
+                    notificationService.sendFundingAdvisory(transactionStatus.userId, {
+                        kind: 'failed', amount: (transactionStatus.amountKobo || 0) / 100, reference: refId
+                    }).catch(error => console.error('[Funding Advisory Error]', error.message));
+                }
+            }
             return {
-                success: latest && latest.status === 'success',
-                status: (latest && latest.status) || 'processing',
-                alreadyProcessed: true,
-                credited: false,
-                message: 'Transaction recovery already claimed by a concurrent process'
+                success: false,
+                status: gatewayPaymentResult && gatewayPaymentResult.status || 'pending',
+                message: gatewayPaymentResult && gatewayPaymentResult.message || 'Payment provider did not confirm success'
             };
         }
 
-        console.log(`[FUNDING-RECOVERY] Reference ${refId}: failed → processing recovery claim acquired via authenticated webhook.`);
-        return this._finalizeAfterClaim({
-            transactionStatus,
-            gatewayPaymentResult,
-            refId,
-            confirmedKobo,
-            confirmedCurrency,
-            source,
-            recovery: true
-        });
-    }
-
-    /**
-     * Strict eligibility for webhook failed→success recovery. ALL must hold:
-     *   1. source === 'webhook'            (authenticated provider event already persisted by routeWebhook)
-     *   2. transactionStatus.type === 'funding'
-     *   3. gateway verify explicitly reports status === 'success' (independent server-to-server confirmation)
-     *   4. provider binding matches the confirmed gateway
-     *   5. provider reference matches refId
-     *   6. confirmed currency is NGN
-     *   7. confirmed amount (Kobo) matches the expected amount
-     *   8. NO pre-existing funding credit ledger row for this reference
-     *
-     * Returns a boolean; NEVER throws (an eligibility error must leave the record
-     * exactly as-is in 'failed').
-     */
-    async _isWebhookRecoveryEligible({ transactionStatus, gatewayPaymentResult, refId, source }) {
+        let evidence;
         try {
-            if (source !== 'webhook') return false;
-            if (!transactionStatus || transactionStatus.type !== 'funding') return false;
-            if (!gatewayPaymentResult || gatewayPaymentResult.status !== 'success') return false;
-
-            // Provider binding match — never recover across gateways.
-            if (transactionStatus.provider && gatewayPaymentResult.gateway) {
-                if (transactionStatus.provider.toLowerCase() !== String(gatewayPaymentResult.gateway).toLowerCase()) return false;
+            evidence = this._validatedGatewayEvidence(transactionStatus, gatewayPaymentResult);
+            await this._assertProviderTransactionOwner({
+                provider: evidence.confirmedProvider,
+                providerTransactionId: evidence.confirmedProviderRef,
+                refId
+            });
+        } catch (error) {
+            error.gatewayPaymentResult = gatewayPaymentResult;
+            await this._markReconciliationRequired(transactionStatus, error);
+            if (transactionStatus.status === 'failed') {
+                return { success: false, status: 'failed', alreadyProcessed: true, credited: false };
             }
-
-            // Provider reference must match the local reference exactly.
-            if (gatewayPaymentResult.reference && gatewayPaymentResult.reference !== refId) return false;
-
-            // Currency must be NGN.
-            if ((gatewayPaymentResult.currency || 'NGN').toUpperCase() !== 'NGN') return false;
-
-            // Amount must match exactly (Kobo), and be a sane positive value.
-            const expectedKobo = transactionStatus.amountKobo
-                || Math.round(Number(transactionStatus.amount || 0) * 100);
-            const confirmedKobo = Math.round(Number(gatewayPaymentResult.amount || 0) * 100);
-            if (confirmedKobo <= 0) return false;
-            if (expectedKobo > 0 && confirmedKobo !== expectedKobo) return false;
-
-            // Must NOT have been previously credited. The WalletLedger reference
-            // index is non-unique, so the state machine is the real guard — but
-            // this explicit check blocks double-credit even on past/admin runs.
-            const existingCredit = await WalletLedger.findOne({ reference: refId, entryType: 'credit' });
-            if (existingCredit) return false;
-
-            return true;
-        } catch (eligibilityErr) {
-            console.error(`[FUNDING-RECOVERY-WARN] Reference=${refId}: eligibility check error. Recovery skipped, record left 'failed'.`, eligibilityErr.message);
-            return false;
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────
-    // ADMIN RECONCILIATION SETTLEMENT (write-path for stuck payments)
-    // ─────────────────────────────────────────────────────────
-
-    /**
-     * Admin settlement of a TransactionStatus stuck in 'processing' — the crash
-     * window left by finalizeFundingCredit (lock claimed, credit/finalize crashed),
-     * or a stranded 'settlement_pending' claim needing completion.
-     *
-     * Recovery semantics:
-     *   - Only crash-window records are settled: 'processing' (claim acquired,
-     *     credit/finalize crashed) and 'settlement_pending' (claim acquired,
-     *     finalize crashed). Terminal 'failed' and 'reconciliation_required'
-     *     records keep their evidence-preserving semantics and are reviewed
-     *     independently.
-     *   - Exactly-once: the claim, the wallet credit / share fulfillment, and the
-     *     settlement_pending → success transition are executed inside ONE MongoDB
-     *     session and commit atomically. The finalize transition guards on the
-     *     claimed state (modifiedCount === 1) BEFORE commit, so a concurrent
-     *     settlement that already reached success makes the guard a no-op and
-     *     this run aborts with its credit rolled back — a double-credit is
-     *     impossible even when two settlers both start from 'processing'.
-     *   - Idempotent across crashes: if the credit ALREADY committed (crash
-     *     between an earlier credit commit and the finalize), the existing-ledger
-     *     check skips the credit and only the status transition is made.
-     *
-     * @param {string} refId - TransactionStatus refId to settle
-     * @param {string} [adminId] - performing admin id (for audit/notes)
-     * @param {string} [note] - optional admin note recorded in reconciliationReason
-     */
-    async adminSettleProcessing({ refId, adminId = null, note = '' }) {
-        if (!refId) {
-            throw new Error('Reference is required for settlement');
+            throw error;
         }
 
-        const session = await mongoose.startSession();
-        session.startTransaction();
+        if (transactionStatus.status === 'failed') {
+            if (source !== 'webhook' || transactionStatus.type !== 'funding') {
+                return { success: false, status: 'failed', alreadyProcessed: true, credited: false };
+            }
+            const priorCredit = await WalletLedger.findOne({
+                reference: refId,
+                userId: transactionStatus.userId,
+                entryType: 'credit',
+                source: { $in: ['funding', 'funding_retry'] }
+            });
+            if (priorCredit) {
+                return { success: false, status: 'failed', alreadyProcessed: true, credited: false };
+            }
+        } else if (transactionStatus.status !== 'pending') {
+            return { success: false, status: transactionStatus.status, alreadyProcessed: true, credited: false };
+        }
 
+        const claim = this._newSettlementClaim();
+        let claimResult;
         try {
-            const transactionStatus = await TransactionStatus.findOne({ refId }).session(session);
-            if (!transactionStatus) {
-                await session.abortTransaction();
-                throw new Error(`TransactionStatus record '${refId}' not found`);
-            }
-
-            if (transactionStatus.status !== 'processing' && transactionStatus.status !== 'settlement_pending') {
-                await session.abortTransaction();
-                throw new Error(
-                    `Cannot settle reference '${refId}': status is '${transactionStatus.status}', expected 'processing'. Only crash-window (processing) records are eligible.`
-                );
-            }
-
-            const confirmedKobo = transactionStatus.confirmedAmountKobo || transactionStatus.amountKobo;
-            if (!confirmedKobo || confirmedKobo <= 0) {
-                await session.abortTransaction();
-                throw new Error(`Reference '${refId}' has no confirmed amount to settle against`);
-            }
-
-            const userId = transactionStatus.userId;
-            const amountNaira = confirmedKobo / 100;
-            let credited = false;
-
-            // ATOMIC CLAIM + CREDIT + FINALIZE in ONE session. Crashes anywhere
-            // roll the whole batch back to 'processing' (admin alarm, not silent
-            // failure); success commits the claim→success transition and the
-            // credit together, so no intermediate 'settlement_pending' is ever
-            // left durable by this path.
-            const claimNote = [
-                note ? `${note}` : '',
-                `Admin settlement claim by ${adminId || 'superAdmin'}`,
-                `at ${new Date().toISOString()}`
-            ].filter(Boolean).join('; ');
-
-            await TransactionStatus.updateOne(
-                { refId, status: 'processing' },
+            claimResult = await TransactionStatus.updateOne(
+                { refId, status: transactionStatus.status },
                 {
                     $set: {
-                        status: 'settlement_pending',
-                        reconciliationReason: (transactionStatus.reconciliationReason
-                            ? `${transactionStatus.reconciliationReason} | `
-                            : '') + claimNote
+                        status: 'processing',
+                        ...evidence,
+                        settlementClaimToken: claim.token,
+                        settlementLeaseExpiresAt: claim.expiresAt,
+                        lastAttempt: claim.claimedAt,
+                        ...(transactionStatus.status === 'failed'
+                            ? { reconciliationReason: `Authenticated webhook recovery at ${claim.claimedAt.toISOString()}` }
+                            : {})
                     }
-                },
+                }
+            );
+        } catch (error) {
+            if (error && error.code === 11000) {
+                try {
+                    await this._assertProviderTransactionOwner({
+                        provider: evidence.confirmedProvider,
+                        providerTransactionId: evidence.confirmedProviderRef,
+                        refId
+                    });
+                } catch (reuseError) {
+                    reuseError.gatewayPaymentResult = gatewayPaymentResult;
+                    await this._markReconciliationRequired(transactionStatus, reuseError);
+                    throw reuseError;
+                }
+            }
+            throw error;
+        }
+
+        if (claimResult.modifiedCount !== 1) {
+            const latest = await TransactionStatus.findOne({ refId });
+            return {
+                success: latest && latest.status === 'success',
+                status: latest && latest.status || 'processing',
+                alreadyProcessed: true,
+                credited: false
+            };
+        }
+
+        return this._settleOwnedClaim({ refId, claimToken: claim.token, source, gatewayPaymentResult });
+    }
+
+    async _settleOwnedClaim({ refId, claimToken, source = 'recovery', gatewayPaymentResult = null, actorNote = '' }) {
+        if (!refId || !claimToken) throw new Error('Settlement reference and claim token are required');
+        const session = await mongoose.startSession();
+        session.startTransaction();
+        let transactionStatus;
+        let amountNaira;
+        let credited = false;
+
+        try {
+            transactionStatus = await TransactionStatus.findOne({ refId }).session(session);
+            if (!transactionStatus) throw new Error(`TransactionStatus record '${refId}' not found`);
+            if (!['processing', 'settlement_pending'].includes(transactionStatus.status)) {
+                throw new Error(`Cannot settle reference '${refId}': status is '${transactionStatus.status}'`);
+            }
+            if (transactionStatus.settlementClaimToken !== claimToken) {
+                const error = new Error(`Settlement claim ownership lost for '${refId}'`);
+                error.code = 'SETTLEMENT_CLAIM_LOST';
+                throw error;
+            }
+            const leaseExpiry = new Date(transactionStatus.settlementLeaseExpiresAt || 0);
+            if (!leaseExpiry.getTime() || leaseExpiry <= new Date()) {
+                const error = new Error(`Settlement lease expired for '${refId}'`);
+                error.code = 'SETTLEMENT_LEASE_EXPIRED';
+                throw error;
+            }
+
+            const evidence = this._assertPersistedSettlementEvidence(transactionStatus);
+            await this._assertProviderTransactionOwner({
+                provider: evidence.provider,
+                providerTransactionId: evidence.confirmedProviderRef,
+                refId,
+                session
+            });
+            amountNaira = evidence.confirmedKobo / 100;
+
+            const settleClaim = await TransactionStatus.updateOne(
+                { refId, status: { $in: ['processing', 'settlement_pending'] }, settlementClaimToken: claimToken },
+                { $set: { status: 'settlement_pending', ...(actorNote ? { reconciliationReason: actorNote } : {}) } },
                 { session }
             );
+            if (settleClaim.matchedCount !== 1) throw new Error(`Settlement claim ownership lost for '${refId}'`);
 
-            if (userId) {
-                if (transactionStatus.type === 'investment_buy') {
-                    // Bind to the init-time price snapshot (see _finalizeAfterClaim);
-                    // fall back to a fresh read only for pre-snapshot records.
-                    let sharePrice;
-                    if (Number(transactionStatus.sharePrice) > 0) {
-                        sharePrice = Number(transactionStatus.sharePrice);
-                    } else {
-                        const settings = await investmentService.getInvestmentSettings();
-                        sharePrice = Number(settings && settings.sharePrice);
+            if (transactionStatus.type === 'investment_buy') {
+                const sharePrice = Number(transactionStatus.sharePrice);
+                let sharePriceKobo;
+                try {
+                    sharePriceKobo = this._nairaToKobo(sharePrice, 'Share price');
+                } catch (error) {
+                    error.code = 'SETTLEMENT_EVIDENCE_INVALID';
+                    throw error;
+                }
+                if (evidence.confirmedKobo % sharePriceKobo !== 0) {
+                    const error = new Error(`Confirmed amount for '${refId}' is not a whole multiple of the snapshotted share price`);
+                    error.code = 'SETTLEMENT_EVIDENCE_INVALID';
+                    throw error;
+                }
+                const qty = evidence.confirmedKobo / sharePriceKobo;
+                let fulfillment;
+                try {
+                    fulfillment = await investmentService.fulfillSharePurchase(
+                        transactionStatus.userId, qty, refId, false, session, sharePrice
+                    );
+                } catch (error) {
+                    if (error.code === 'SETTLEMENT_EVIDENCE_INVALID' ||
+                        /share limit|share supply|investment feature is currently disabled|audit does not reconcile/i.test(error.message || '')) {
+                        error.code = 'SETTLEMENT_EVIDENCE_INVALID';
                     }
-                    if (!(sharePrice > 0)) {
-                        await session.abortTransaction();
-                        throw new Error('Invalid share price for settlement');
+                    throw error;
+                }
+                credited = !(fulfillment && fulfillment.message === 'Already processed');
+            } else {
+                const settlementKey = `payment:${evidence.provider}:${refId}`;
+                const historicalCredit = await WalletLedger.findOne({
+                    reference: refId,
+                    userId: transactionStatus.userId,
+                    entryType: 'credit',
+                    source: { $in: ['funding', 'funding_retry'] }
+                }).session(session);
+                if (historicalCredit) {
+                    if (historicalCredit.amount !== amountNaira) {
+                        const error = new Error('Historical funding credit amount does not reconcile');
+                        error.code = 'SETTLEMENT_EVIDENCE_INVALID';
+                        throw error;
                     }
-
-                    const perShareKobo = sharePrice * 100;
-                    if (!Number.isInteger(perShareKobo) || perShareKobo <= 0) {
-                        await session.abortTransaction();
-                        throw new Error('Share price does not reconcile to whole kobo');
-                    }
-                    if (confirmedKobo % perShareKobo !== 0) {
-                        await session.abortTransaction();
-                        throw new Error(
-                            `Cannot settle '${refId}': confirmed amount ₦${amountNaira} is not a whole multiple of the share price ₦${sharePrice}. Requires manual review of the payer.`
-                        );
-                    }
-
-                    const qty = confirmedKobo / perShareKobo;
-                    const fulfillment = await investmentService.fulfillSharePurchase(userId, qty, refId, false, session, sharePrice);
-                    credited = !(fulfillment && fulfillment.message === 'Already processed');
                 } else {
-                    // Funding / payout credit — skip if an earlier crashed run already
-                    // committed the credit (crash between credit commit and finalize).
-                    const existingCredit = await WalletLedger.findOne({
-                        reference: refId,
-                        entryType: 'credit'
-                    }).session(session);
+                    await walletService.credit(
+                        transactionStatus.userId,
+                        amountNaira,
+                        refId,
+                        'funding',
+                        null,
+                        session,
+                        { settlementKey }
+                    );
+                    credited = true;
+                }
 
-                    if (!existingCredit) {
-                        await walletService.credit(userId, amountNaira, refId, 'funding', null, session);
-                        credited = true;
-                    }
+                const existingAudit = await Transaction.findOne({ transactionId: refId }).session(session);
+                if (!existingAudit) {
+                    await Transaction.create([{
+                        userId: transactionStatus.userId,
+                        transactionId: refId,
+                        refId,
+                        type: 'funding',
+                        service: transactionStatus.service || evidence.provider,
+                        amount: amountNaira,
+                        status: 'success',
+                        response: gatewayPaymentResult && gatewayPaymentResult.raw || {}
+                    }], { session });
                 }
             }
 
-            const finalizeNote = [
-                note ? `${note}` : '',
-                `Admin settlement by ${adminId || 'superAdmin'}`,
-                `at ${new Date().toISOString()}`
-            ].filter(Boolean).join('; ');
-
-            const finalize = await TransactionStatus.updateOne(
-                { refId, status: 'settlement_pending' },
+            const finalized = await TransactionStatus.updateOne(
+                { refId, status: 'settlement_pending', settlementClaimToken: claimToken },
                 {
-                    $set: {
-                        status: 'success',
-                        reconciliationReason: (transactionStatus.reconciliationReason
-                            ? `${transactionStatus.reconciliationReason} | `
-                            : '') + finalizeNote
-                    }
+                    $set: { status: 'success', lastAttempt: new Date() },
+                    $unset: { settlementClaimToken: 1, settlementLeaseExpiresAt: 1 }
                 },
                 { session }
             );
-
-            if (finalize.modifiedCount !== 1) {
-                // A concurrent settlement claimed the transition first — its credit
-                // (if any) was committed, ours aborts. Never double-credit.
-                await session.abortTransaction();
-                const latest = await TransactionStatus.findOne({ refId });
-                return {
-                    success: true,
-                    status: (latest && latest.status) || 'success',
-                    alreadyProcessed: true,
-                    settled: false,
-                    credited: false,
-                    message: 'Settlement already claimed by a concurrent process'
-                };
+            if (finalized.modifiedCount !== 1) {
+                const error = new Error(`Settlement claim ownership lost before finalization for '${refId}'`);
+                error.code = 'SETTLEMENT_CLAIM_LOST';
+                throw error;
             }
 
             await session.commitTransaction();
-
-            console.log(`[FUNDING-ADMIN-SETTLE] Reference ${refId}: processing → success. Credited this run: ${credited}. Amount ₦${amountNaira}.`);
-
-            if (userId) {
-                notificationService.sendFundingSuccess({
-                    userId,
-                    amount: amountNaira,
-                    method: (transactionStatus.channels && transactionStatus.channels[0]) || transactionStatus.channel || 'funding',
-                    reference: refId,
-                    type: transactionStatus.type || 'funding'
-                }).catch(notifErr => {
-                    console.error('[Funding Notification Background Error]', notifErr && notifErr.message);
-                });
-            }
-
-            return {
-                success: true,
-                settled: true,
-                status: 'success',
-                credited,
-                amount: amountNaira,
-                type: transactionStatus.type || 'funding',
-                reference: refId
-            };
-        } catch (err) {
+        } catch (error) {
             await session.abortTransaction();
-            throw err;
+            if (error.code === 'SETTLEMENT_EVIDENCE_INVALID' || error.code === 'PAYMENT_PROVIDER_TRANSACTION_REUSED') {
+                await TransactionStatus.updateOne(
+                    { refId, settlementClaimToken: claimToken, status: { $in: ['processing', 'settlement_pending'] } },
+                    {
+                        $set: { status: 'reconciliation_required', reconciliationReason: error.message },
+                        $unset: { settlementClaimToken: 1, settlementLeaseExpiresAt: 1 }
+                    }
+                );
+            }
+            throw error;
         } finally {
             session.endSession();
         }
+
+        notificationService.sendFundingSuccess({
+            userId: transactionStatus.userId,
+            amount: amountNaira,
+            method: transactionStatus.channels && transactionStatus.channels[0] || 'funding',
+            reference: refId,
+            type: transactionStatus.type
+        }).catch(error => console.error('[Funding Notification Background Error]', error.message));
+
+        return {
+            success: true,
+            settled: true,
+            status: 'success',
+            credited,
+            amount: amountNaira,
+            type: transactionStatus.type,
+            reference: refId,
+            source
+        };
     }
 
-    /**
-     * Automated crash-recovery sweep for the funding settlement state machine.
-     *
-     * Searches for records stranded in an intermediate settlement state and
-     * finishes them exactly-once:
-     *   - 'settlement_pending'  → a settlement that crashed mid-flight (claim
-     *     acquired, credit/finalize interrupted),
-     *   - 'processing' older than maxAgeMs → the finalizeFundingCredit crash
-     *     window (claim acquired, credit/finalize crashed).
-     *
-     * Recovery is idempotent: adminSettleProcessing skips an already-committed
-     * credit and only completes the status transition. Records that genuinely
-     * cannot settle (e.g. a non-whole-share amount) are logged and skipped so
-     * one bad record cannot block the recovery of the rest.
-     *
-     * @param {object} [opts]
-     * @param {number} [opts.maxAgeMs] - consider 'processing' records older than this as crashed
-     * @param {number} [opts.dryRun] - when truthy, only log candidates, change nothing
-     */
-    async recoverStrandedSettlements({ maxAgeMs = 15 * 60 * 1000, dryRun = false } = {}) {
-        const cutoff = new Date(Date.now() - maxAgeMs);
+    async adminSettleProcessing({ refId, adminId = null, note = '', claimToken = null, automatedRecovery = false }) {
+        if (!refId) throw new Error('Reference is required for settlement');
+        if (claimToken) {
+            return this._settleOwnedClaim({ refId, claimToken, source: automatedRecovery ? 'automatic_recovery' : 'admin_reconciliation' });
+        }
 
-        const strandedSettlementPending = await TransactionStatus.find({
-            status: 'settlement_pending'
+        const claim = this._newSettlementClaim();
+        const actorNote = automatedRecovery
+            ? `Automatic lease-expiry recovery at ${claim.claimedAt.toISOString()}`
+            : [note, `Admin settlement by ${adminId || 'superAdmin'}`, `at ${claim.claimedAt.toISOString()}`].filter(Boolean).join('; ');
+        const claimed = await TransactionStatus.updateOne(
+            {
+                refId,
+                status: { $in: ['processing', 'settlement_pending'] },
+                $or: [
+                    { settlementLeaseExpiresAt: { $lte: claim.claimedAt } },
+                    { settlementClaimToken: { $exists: false }, settlementLeaseExpiresAt: { $exists: false } }
+                ]
+            },
+            {
+                $set: {
+                    status: 'settlement_pending',
+                    settlementClaimToken: claim.token,
+                    settlementLeaseExpiresAt: claim.expiresAt,
+                    lastAttempt: claim.claimedAt,
+                    reconciliationReason: actorNote
+                }
+            }
+        );
+        if (claimed.modifiedCount !== 1) {
+            const latest = await TransactionStatus.findOne({ refId });
+            if (!latest) throw new Error(`TransactionStatus record '${refId}' not found`);
+            throw new Error(`Cannot settle reference '${refId}': status or active settlement lease is not eligible`);
+        }
+
+        return this._settleOwnedClaim({
+            refId,
+            claimToken: claim.token,
+            source: automatedRecovery ? 'automatic_recovery' : 'admin_reconciliation',
+            actorNote
         });
+    }
 
-        const strandedProcessing = await TransactionStatus.find({
-            status: 'processing',
-            lastAttempt: { $lt: cutoff }
+    async recoverStrandedSettlements({ dryRun = false } = {}) {
+        const now = new Date();
+        const stranded = await TransactionStatus.find({
+            status: { $in: ['processing', 'settlement_pending'] },
+            type: { $in: ['funding', 'investment_buy'] },
+            settlementLeaseExpiresAt: { $lte: now }
         });
-
-        const candidates = [
-            ...strandedSettlementPending.map(t => ({ refId: t.refId, state: 'settlement_pending' })),
-            ...strandedProcessing.map(t => ({ refId: t.refId, state: 'processing' }))
-        ];
-
-        if (candidates.length === 0) return { scanned: 0, settled: 0, skipped: 0 };
+        if (stranded.length === 0) return { scanned: 0, settled: 0, skipped: 0 };
 
         let settled = 0;
         let skipped = 0;
-
-        for (const candidate of candidates) {
-            try {
-                if (dryRun) {
-                    console.log(`[SETTLEMENT-RECOVERY-DRY] Would settle ${candidate.refId} (state=${candidate.state})`);
-                    skipped++;
-                    continue;
-                }
-                const result = await this.adminSettleProcessing({ refId: candidate.refId });
-                if (result && result.settled) settled++;
-                else skipped++;
-            } catch (recoverErr) {
-                // Technical or validation failure — record stays in its evidence-
-                // preserving intermediate state for manual admin review.
+        for (const candidate of stranded) {
+            if (dryRun) {
                 skipped++;
-                console.error(`[SETTLEMENT-RECOVERY-SKIP] Reference=${candidate.refId}: ${recoverErr.message}`);
+                continue;
+            }
+            try {
+                const result = await this.adminSettleProcessing({ refId: candidate.refId, automatedRecovery: true });
+                if (result.settled) settled++;
+                else skipped++;
+            } catch (error) {
+                skipped++;
+                console.error(`[SETTLEMENT-RECOVERY-SKIP] Reference=${candidate.refId}: ${error.message}`);
             }
         }
-
-        console.log(`[SETTLEMENT-RECOVERY] Scanned ${candidates.length} stranded records. Settled: ${settled}, skipped: ${skipped}.`);
-        return { scanned: candidates.length, settled, skipped };
+        return { scanned: stranded.length, settled, skipped };
     }
 
     // ─────────────────────────────────────────────────────────
@@ -1207,6 +974,7 @@ class PaymentGatewayService {
         const identity = { provider: providerCode, eventId: normalized.eventId };
         const now = new Date();
         const processingExpiresAt = new Date(now.getTime() + WEBHOOK_PROCESSING_LEASE_MS);
+        const processingToken = crypto.randomBytes(32).toString('hex');
 
         try {
             const webhookEvent = await WebhookEvent.create({
@@ -1216,7 +984,8 @@ class PaymentGatewayService {
                 status: 'pending',
                 attemptCount: 1,
                 lastAttemptAt: now,
-                processingExpiresAt
+                processingExpiresAt,
+                processingToken
             });
             return { webhookEvent, identity };
         } catch (dbErr) {
@@ -1238,7 +1007,8 @@ class PaymentGatewayService {
                         payload,
                         errorMessage: null,
                         lastAttemptAt: now,
-                        processingExpiresAt
+                        processingExpiresAt,
+                        processingToken
                     },
                     $inc: { attemptCount: 1 }
                 },
@@ -1269,10 +1039,21 @@ class PaymentGatewayService {
     }
 
     async _setWebhookEventState(webhookEvent, status, errorMessage = null) {
-        webhookEvent.status = status;
-        webhookEvent.errorMessage = errorMessage;
-        webhookEvent.processingExpiresAt = null;
-        await webhookEvent.save();
+        if (!webhookEvent || !webhookEvent.processingToken) return false;
+        const result = await WebhookEvent.findOneAndUpdate(
+            {
+                provider: webhookEvent.provider,
+                eventId: webhookEvent.eventId,
+                status: 'pending',
+                processingToken: webhookEvent.processingToken
+            },
+            {
+                $set: { status, errorMessage, processingExpiresAt: null },
+                $unset: { processingToken: 1 }
+            },
+            { new: true }
+        );
+        return !!result;
     }
 
     /**
@@ -1316,15 +1097,21 @@ class PaymentGatewayService {
             const refId = normalized.reference;
             let transaction = await TransactionStatus.findOne({ refId });
 
-            // Handle virtual account transfers where TransactionStatus might not exist yet
-            if (!transaction && normalized.userId) {
+            // Only a provider-assigned Monnify virtual-account reference may establish
+            // ownership when a transfer has no pre-existing local transaction record.
+            const virtualOwnerId = providerCode === 'monnify'
+                && normalized.virtualAccountReference === `VIRTUAL_${normalized.userId}`
+                ? normalized.userId
+                : null;
+            if (!transaction && virtualOwnerId) {
                 transaction = await TransactionStatus.create({
                     refId,
-                    userId: normalized.userId,
+                    userId: virtualOwnerId,
                     type: 'funding',
                     status: 'pending',
                     amountKobo: Math.round(normalized.amount * 100),
                     amount: normalized.amount,
+                    expectedCurrency: normalized.currency,
                     channels: ['bank_transfer'],
                     provider: providerCode,
                     service: gateway.name

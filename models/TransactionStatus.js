@@ -13,8 +13,11 @@ const transactionStatusSchema = new mongoose.Schema({
 
     // Observability & Reconciliation fields:
     amountKobo: { type: Number },                       // store integer minor units to avoid FP issues
+    expectedCurrency: { type: String, uppercase: true },
     confirmedAmountKobo: { type: Number },              // external provider confirmed amount
     confirmedCurrency: { type: String },                // external provider confirmed currency
+    confirmedProvider: { type: String },
+    confirmedReference: { type: String },
     confirmedProviderRef: { type: String },             // external provider transaction identifier
     sharePrice: { type: Number },                       // investment_buy: authoritative server-side share price (₦) snapshotted at init; fulfillment MUST bind to this, never a re-read
     reconciliationReason: { type: String },             // security / anomaly justification
@@ -26,9 +29,23 @@ const transactionStatusSchema = new mongoose.Schema({
 
     retries: { type: Number, default: 0 },
     lastAttempt: { type: Date, default: Date.now },
-}, { timestamps: true });
+    settlementClaimToken: { type: String },
+    settlementLeaseExpiresAt: { type: Date },
+}, { timestamps: true, autoIndex: false });
 
 // Helpful indexes for dashboards/cleanup:
 transactionStatusSchema.index({ createdAt: -1 });
+transactionStatusSchema.index({ status: 1, settlementLeaseExpiresAt: 1 });
+transactionStatusSchema.index(
+    { confirmedProvider: 1, confirmedProviderRef: 1 },
+    {
+        unique: true,
+        partialFilterExpression: {
+            confirmedProvider: { $type: 'string' },
+            confirmedProviderRef: { $type: 'string' }
+        },
+        name: 'confirmedProvider_1_confirmedProviderRef_1_unique_partial'
+    }
+);
 
 module.exports = mongoose.model('TransactionStatus', transactionStatusSchema);

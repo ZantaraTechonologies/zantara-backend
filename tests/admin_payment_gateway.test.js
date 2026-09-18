@@ -162,15 +162,15 @@ async function runAdminPaymentGatewayTests() {
     };
 
     TransactionStatus.countDocuments = async (filter) => {
-        if (filter.gateway) {
-            return transactionsDB.filter(t => t.gateway === filter.gateway).length;
+        if (filter.provider) {
+            return transactionsDB.filter(t => t.provider === filter.provider).length;
         }
         return transactionsDB.length;
     };
 
     WebhookEvent.countDocuments = async (filter) => {
-        if (filter.gatewayCode) {
-            return webhooksDB.filter(w => w.gatewayCode === filter.gatewayCode).length;
+        if (filter.provider) {
+            return webhooksDB.filter(w => w.provider === filter.provider).length;
         }
         return webhooksDB.length;
     };
@@ -467,23 +467,23 @@ async function runAdminPaymentGatewayTests() {
             transactionsDB = [
                 {
                     _id: new mongoose.Types.ObjectId(),
-                    reference: 'ZAN-PROC-991',
-                    gateway: 'paystack',
+                    refId: 'ZAN-PROC-991',
+                    provider: 'paystack',
                     status: 'processing',
-                    amount: 5000,
-                    currency: 'NGN',
+                    amountKobo: 500000,
+                    expectedCurrency: 'NGN',
                     userId: { _id: new mongoose.Types.ObjectId(), name: 'Tunde Client', email: 'tunde@example.com' },
                     createdAt: new Date(Date.now() - 15 * 60 * 1000), // 15 mins ago
                     updatedAt: new Date(Date.now() - 15 * 60 * 1000)
                 },
                 {
                     _id: new mongoose.Types.ObjectId(),
-                    reference: 'ZAN-RECON-882',
-                    gateway: 'monnify',
+                    refId: 'ZAN-RECON-882',
+                    provider: 'monnify',
                     status: 'reconciliation_required',
-                    amount: 10000,
+                    amountKobo: 1000000,
                     confirmedAmountKobo: 100000, // ₦1000 (mismatch!)
-                    currency: 'NGN',
+                    expectedCurrency: 'NGN',
                     confirmedCurrency: 'NGN',
                     confirmedProviderRef: 'MNFY-TX-5544',
                     reconciliationReason: 'Amount mismatch: expected ₦10000, provider confirmed ₦1000',
@@ -493,10 +493,10 @@ async function runAdminPaymentGatewayTests() {
                 },
                 {
                     _id: new mongoose.Types.ObjectId(),
-                    reference: 'ZAN-SUCCESS-111',
-                    gateway: 'paystack',
+                    refId: 'ZAN-SUCCESS-111',
+                    provider: 'paystack',
                     status: 'success', // Should NOT be in reconciliation endpoint
-                    amount: 2000
+                    amountKobo: 200000
                 }
             ];
 
@@ -537,7 +537,7 @@ async function runAdminPaymentGatewayTests() {
         await test('17. Gateway deletion is blocked if historical financial transactions exist', async () => {
             const paystack = gatewaysDB.find(g => g.code === 'paystack');
             // Mock that 1 transaction exists for paystack
-            transactionsDB = [{ gateway: 'paystack', reference: 'REF-OLD-1' }];
+            transactionsDB = [{ provider: 'paystack', refId: 'REF-OLD-1' }];
 
             const { req, res } = mockReqRes({
                 user: { role: 'superAdmin' },

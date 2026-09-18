@@ -6,8 +6,10 @@ class WalletService {
     /**
      * Credit a user's wallet and record a ledger entry.
      */
-    static async credit(userId, amount, reference, source, transactionId = null, existingSession = null) {
-        if (amount <= 0) throw new Error('Amount must be greater than zero');
+    static async credit(userId, amount, reference, source, transactionId = null, existingSession = null, options = {}) {
+        if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
+            throw new Error('Amount must be a finite number greater than zero');
+        }
 
         const session = existingSession || await mongoose.startSession();
         if (!existingSession) session.startTransaction();
@@ -32,7 +34,8 @@ class WalletService {
                 source,
                 amount,
                 balanceBefore,
-                balanceAfter
+                balanceAfter,
+                ...(options.settlementKey ? { settlementKey: options.settlementKey } : {})
             }], { session });
 
             if (!existingSession) await session.commitTransaction();
@@ -49,7 +52,9 @@ class WalletService {
      * Debit a user's wallet and record a ledger entry.
      */
     static async debit(userId, amount, reference, source, transactionId = null, existingSession = null) {
-        if (amount <= 0) throw new Error('Amount must be greater than zero');
+        if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
+            throw new Error('Amount must be a finite number greater than zero');
+        }
 
         const session = existingSession || await mongoose.startSession();
         if (!existingSession) session.startTransaction();

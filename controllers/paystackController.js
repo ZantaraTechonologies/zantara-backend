@@ -6,6 +6,7 @@ const Wallet = require('../models/Wallet');
 const { logTransaction } = require('../utils/transaction');
 const { initializePayment } = require('../utils/paystack');
 const investmentService = require('../services/investment.service');
+const { parseInvestmentMoney } = require('../utils/investmentValidation');
 
 // Optional helper for robust metadata parsing
 const parseMetadata = (metadata) => {
@@ -23,7 +24,9 @@ const payment = async (req, res) => {
     try {
         const { amount, channels, reference, metadata, isDirectTransfer } = req.body;
         const secret = process.env.PAYSTACK_SECRET_KEY;
-        const amountKobo = Math.round(amount * 100);
+        const parsedAmount = parseInvestmentMoney(amount, { label: 'Funding amount' });
+        if (parsedAmount.naira < 50) throw new Error('Minimum funding amount is ₦50.00');
+        const amountKobo = parsedAmount.kobo;
         
         // Always generate a reference if not provided
         const finalReference = reference || `REF-${crypto.randomBytes(4).toString('hex').toUpperCase()}-${Date.now()}`;
@@ -43,13 +46,37 @@ const payment = async (req, res) => {
         let sharePriceSnapshot = null;
         if (txType === 'investment_buy') {
             const settings = await investmentService.getInvestmentSettings();
-            const sp = Number(settings && settings.sharePrice);
-            if (!Number.isFinite(sp) || sp <= 0) {
+            if (!settings.investmentEnabled) {
                 const err = new Error('Share purchase is temporarily unavailable. Please try again later.');
                 err.code = 'INVALID_INVESTMENT_CONFIGURATION';
                 throw err;
             }
-            sharePriceSnapshot = sp;
+            const sharePrice = parseInvestmentMoney(settings.sharePrice, { label: 'Share price' });
+            if (amountKobo % sharePrice.kobo !== 0) {
+                const err = new Error('Investment amount must purchase a whole number of shares.');
+                err.code = 'INVALID_INVESTMENT_AMOUNT';
+                throw err;
+            }
+            const qty = amountKobo / sharePrice.kobo;
+            if (qty < settings.minSharesPerPurchase || qty > settings.maxSharesPerUser || qty > settings.totalSharesAvailable) {
+                const err = new Error('Investment amount is outside the permitted share limits.');
+                err.code = 'INVALID_INVESTMENT_AMOUNT';
+                throw err;
+            }
+            let sharesOwned;
+            try {
+                sharesOwned = await investmentService.getAuthoritativeShareBalance(req.user.id);
+            } catch (error) {
+                const err = new Error('Investment account share balance requires manual reconciliation.');
+                err.code = 'INVALID_INVESTMENT_CONFIGURATION';
+                throw err;
+            }
+            if (sharesOwned + qty > settings.maxSharesPerUser) {
+                const err = new Error('Investment amount exceeds the permitted per-user share limit.');
+                err.code = 'INVALID_INVESTMENT_AMOUNT';
+                throw err;
+            }
+            sharePriceSnapshot = sharePrice.naira;
         }
 
         const makeTxStatus = (channels) => ({
@@ -57,8 +84,11 @@ const payment = async (req, res) => {
             userId: req.user.id,
             type: txType,
             amountKobo: amountKobo,
+            expectedCurrency: 'NGN',
             channels,
             status: 'pending',
+            provider: 'paystack',
+            service: 'Paystack',
             ...(sharePriceSnapshot != null ? { sharePrice: sharePriceSnapshot } : {})
         });
 
@@ -68,10 +98,10 @@ const payment = async (req, res) => {
                 email: req.user.email,
                 amount: amountKobo,
                 reference: finalReference, // REQUIRED to prevent "Charge attempted" error
-                metadata: { 
-                    userId: req.user.id, 
-                    ...(metadata || {}), 
-                    refId: finalReference 
+                metadata: {
+                    ...(metadata || {}),
+                    userId: req.user.id,
+                    refId: finalReference
                 },
                 bank_transfer: { account_expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() }
             }, {
@@ -99,8 +129,8 @@ const payment = async (req, res) => {
         // Standard Initialize for all other channels (Card, USSD, etc)
         const init = await initializePayment(
             req.user.email,
-            amount,
-            { userId: req.user.id, ...(metadata || {}), refId: finalReference },
+            parsedAmount.naira,
+            { ...(metadata || {}), userId: req.user.id, refId: finalReference },
             finalReference,
             channels
         );

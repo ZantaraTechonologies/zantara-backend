@@ -2,20 +2,43 @@ const cron = require('node-cron');
 const mongoose = require('mongoose');
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
-const Setting = require('../models/Setting');
 const notificationService = require('../services/notification.service');
+const investmentService = require('../services/investment.service');
+const { parseInvestmentMoney, parseShareQuantity, parsePercentage } = require('./investmentValidation');
 
 /**
  * Fetches all investment settings from the DB with safe defaults
  */
 const getInvestmentSettings = async () => {
-    const keys = ['investmentEnabled', 'investorAllocationPercent', 'dividendPayoutDay'];
-    const defaults = { investmentEnabled: true, investorAllocationPercent: 20, dividendPayoutDay: 1 };
-    const records = await Setting.find({ key: { $in: keys } });
-    const map = {};
-    records.forEach(r => (map[r.key] = r.value));
-    keys.forEach(k => { if (map[k] === undefined) map[k] = defaults[k]; });
-    return map;
+    return investmentService.getInvestmentSettings();
+};
+
+const allocateDividendPool = (shareholders, poolKobo) => {
+    if (!Number.isSafeInteger(poolKobo) || poolKobo <= 0) return [];
+    const validated = shareholders.map(shareholder => ({
+        shareholder,
+        shares: parseShareQuantity(shareholder.sharesOwned, 'Persisted shareholder quantity')
+    }));
+    const totalShares = validated.reduce((sum, item) => sum + BigInt(item.shares), 0n);
+    if (totalShares <= 0n) return [];
+
+    const allocations = validated.map(item => {
+        const numerator = BigInt(poolKobo) * BigInt(item.shares);
+        return {
+            ...item,
+            amountKobo: Number(numerator / totalShares),
+            remainder: numerator % totalShares
+        };
+    });
+    let remainingKobo = poolKobo - allocations.reduce((sum, item) => sum + item.amountKobo, 0);
+    allocations.sort((left, right) => {
+        if (left.remainder === right.remainder) {
+            return String(left.shareholder._id).localeCompare(String(right.shareholder._id));
+        }
+        return left.remainder > right.remainder ? -1 : 1;
+    });
+    for (let index = 0; index < remainingKobo; index++) allocations[index].amountKobo++;
+    return allocations;
 };
 
 /**
@@ -68,8 +91,19 @@ const runDividendPayout = async () => {
         return { success: false, reason: `Zero profit detected for ${month}` };
     }
 
-    // 3. Calculate dividend pool
-    const dividendPool = totalNetProfit * (settings.investorAllocationPercent / 100);
+    // 3. Calculate the pool in integer kobo, rounding down so allocation can
+    // never exceed the configured percentage of realized profit.
+    const profit = parseInvestmentMoney(totalNetProfit, { label: 'Net profit' });
+    const allocationPercent = parsePercentage(settings.investorAllocationPercent, {
+        label: 'Investor allocation percent',
+        allowHundred: true
+    });
+    const allocationBasisPoints = Math.round(allocationPercent * 100);
+    const dividendPoolKobo = Number(BigInt(profit.kobo) * BigInt(allocationBasisPoints) / 10000n);
+    if (dividendPoolKobo <= 0) {
+        return { success: false, reason: `Dividend pool for ${month} is below one kobo` };
+    }
+    const dividendPool = dividendPoolKobo / 100;
     console.log(`[DividendCron] Net Profit: ₦${totalNetProfit.toLocaleString()} | Pool (${settings.investorAllocationPercent}%): ₦${dividendPool.toLocaleString()}`);
 
     // 4. Get all shareholders and total shares
@@ -81,7 +115,11 @@ const runDividendPayout = async () => {
         return { success: false, reason: 'No shareholders' };
     }
 
-    const totalSharesIssued = shareholders.reduce((sum, u) => sum + u.sharesOwned, 0);
+    const allocations = allocateDividendPool(shareholders, dividendPoolKobo);
+    const totalSharesIssued = allocations.reduce((sum, item) => sum + item.shares, 0);
+    if (!Number.isSafeInteger(totalSharesIssued) || totalSharesIssued <= 0) {
+        throw new Error('Total issued share supply requires manual reconciliation');
+    }
     console.log(`[DividendCron] Distributing to ${shareholders.length} shareholders (${totalSharesIssued} total shares)`);
 
     // 5. Distribute proportionally to each shareholder
@@ -92,8 +130,9 @@ const runDividendPayout = async () => {
         const txDocs = [];
         const updateOps = [];
 
-        for (const shareholder of shareholders) {
-            const userDividend = parseFloat(((shareholder.sharesOwned / totalSharesIssued) * dividendPool).toFixed(2));
+        for (const allocation of allocations) {
+            const shareholder = allocation.shareholder;
+            const userDividend = allocation.amountKobo / 100;
             if (userDividend <= 0) continue;
 
             updateOps.push({
@@ -177,4 +216,4 @@ const startDividendCron = () => {
     console.log('[DividendCron] Monthly dividend scheduler registered ✅');
 };
 
-module.exports = { startDividendCron, runDividendPayout };
+module.exports = { startDividendCron, runDividendPayout, allocateDividendPool };

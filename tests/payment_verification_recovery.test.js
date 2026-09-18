@@ -6,6 +6,7 @@ const axios = require('axios');
 // Models
 const TransactionStatus = require('../models/TransactionStatus');
 const WebhookEvent = require('../models/WebhookEvent');
+const WalletLedger = require('../models/WalletLedger');
 const Transaction = require('../models/Transaction');
 
 // Services & Utilities
@@ -51,6 +52,8 @@ async function runVerificationRecoveryTests() {
     let mockTransactions = [];
     let mockWebhookEvents = [];
     let walletCredits = [];
+    let mockLedgerRows = [];
+    let mockAudits = [];
 
     // Paystack verify() transport stub — each test restores/overrides per use-case.
     const origAxiosGet = axios.get;
@@ -59,29 +62,75 @@ async function runVerificationRecoveryTests() {
     const origTxFindOne = TransactionStatus.findOne;
     const origTxCreate = TransactionStatus.create;
     const origTxUpdateOne = TransactionStatus.updateOne;
+    const origStartSession = mongoose.startSession;
     const origWhCreate = WebhookEvent.create;
     const origWhFindOne = WebhookEvent.findOne;
     const origWhFindOneAndUpdate = WebhookEvent.findOneAndUpdate;
+    const origLedgerFindOne = WalletLedger.findOne;
+    const origTxModelFindOne = Transaction.findOne;
     const origTxModelCreate = Transaction.create;
     const origGetGateway = paymentGatewayService.getGateway;
     const origWalletCredit = walletService.credit;
     const origNotifySendInApp = notificationService.sendInApp;
+    const origNotifyFundingSuccess = notificationService.sendFundingSuccess;
 
-    Transaction.create = async () => ({ _id: new mongoose.Types.ObjectId() });
+    const matchesValue = (actual, expected) => {
+        if (expected && typeof expected === 'object' && !Array.isArray(expected)) {
+            if (expected.$in) return expected.$in.includes(actual);
+        }
+        return actual === expected;
+    };
+    const transactionMatches = (item, filter = {}) => Object.entries(filter).every(([key, value]) => matchesValue(item[key], value));
+    const applyUpdate = (item, update = {}) => {
+        if (update.$set) Object.assign(item, update.$set);
+        if (update.$unset) Object.keys(update.$unset).forEach(key => delete item[key]);
+    };
 
     // Helper to mock mongoose query chains
-    const mockQuery = (data) => ({
+    const mockQuery = (data, sessionReader = null) => ({
         sort: () => mockQuery(data),
         limit: () => mockQuery(data),
-        session: () => mockQuery(data),
+        session: session => Promise.resolve(sessionReader ? sessionReader(session) : data),
         then: (resolve) => Promise.resolve(resolve(data)),
         catch: (reject) => Promise.reject(reject)
+    });
+
+    mongoose.startSession = async () => ({
+        stagedTransactions: new Map(),
+        stagedCredits: [],
+        stagedLedger: [],
+        stagedAudits: [],
+        startTransaction() {},
+        readTransaction(refId) {
+            if (this.stagedTransactions.has(refId)) return this.stagedTransactions.get(refId);
+            const current = mockTransactions.find(item => item.refId === refId);
+            if (!current) return null;
+            const copy = { ...current };
+            this.stagedTransactions.set(refId, copy);
+            return copy;
+        },
+        async commitTransaction() {
+            for (const [refId, staged] of this.stagedTransactions) {
+                const current = mockTransactions.find(item => item.refId === refId);
+                if (current) {
+                    Object.keys(current).forEach(key => delete current[key]);
+                    Object.assign(current, staged);
+                }
+            }
+            walletCredits.push(...this.stagedCredits);
+            mockLedgerRows.push(...this.stagedLedger);
+            mockAudits.push(...this.stagedAudits);
+        },
+        async abortTransaction() {},
+        endSession() {}
     });
 
     const resetState = () => {
         mockTransactions = [];
         mockWebhookEvents = [];
         walletCredits = [];
+        mockLedgerRows = [];
+        mockAudits = [];
         paymentGatewayService.getGateway = origGetGateway;
     };
 
@@ -93,6 +142,7 @@ async function runVerificationRecoveryTests() {
             status: 'pending',
             amountKobo: 500000,
             amount: 5000,
+            expectedCurrency: 'NGN',
             channels: ['card'],
             provider: 'paystack',
             service: 'Paystack',
@@ -154,11 +204,13 @@ async function runVerificationRecoveryTests() {
 
     // Mock models
     TransactionStatus.findOne = (filter = {}) => {
-        let found = null;
-        if (filter.refId) {
-            found = mockTransactions.find(t => t.refId === filter.refId);
-        }
-        return mockQuery(found || null);
+        const found = mockTransactions.find(t => transactionMatches(t, filter)) || null;
+        return mockQuery(found, session => {
+            const candidate = filter.refId
+                ? session.readTransaction(filter.refId)
+                : mockTransactions.map(item => session.readTransaction(item.refId)).find(item => transactionMatches(item, filter));
+            return candidate && transactionMatches(candidate, filter) ? candidate : null;
+        });
     };
 
     TransactionStatus.create = (doc) => {
@@ -174,15 +226,14 @@ async function runVerificationRecoveryTests() {
         return Promise.resolve(item);
     };
 
-    TransactionStatus.updateOne = (filter, update) => {
-        const item = mockTransactions.find(t => {
-            if (filter.refId && t.refId !== filter.refId) return false;
-            if (filter.status && t.status !== filter.status) return false;
-            return true;
-        });
+    TransactionStatus.updateOne = (filter, update, options = {}) => {
+        const source = options.session
+            ? mockTransactions.map(item => options.session.readTransaction(item.refId))
+            : mockTransactions;
+        const item = source.find(t => transactionMatches(t, filter));
         if (item) {
-            if (update.$set) Object.assign(item, update.$set);
-            if (update.$set) item.updatedAt = new Date();
+            applyUpdate(item, update);
+            item.updatedAt = new Date();
             return Promise.resolve({ modifiedCount: 1, matchedCount: 1 });
         }
         return Promise.resolve({ modifiedCount: 0, matchedCount: 0 });
@@ -209,6 +260,7 @@ async function runVerificationRecoveryTests() {
         if (filter.provider && event.provider !== filter.provider) return false;
         if (filter.eventId && event.eventId !== filter.eventId) return false;
         if (filter.status && event.status !== filter.status) return false;
+        if (filter.processingToken && event.processingToken !== filter.processingToken) return false;
         if (filter.$or && !filter.$or.some(part => webhookMatches(event, part))) return false;
         return true;
     };
@@ -221,6 +273,7 @@ async function runVerificationRecoveryTests() {
         const event = mockWebhookEvents.find(item => webhookMatches(item, filter));
         if (!event) return Promise.resolve(null);
         if (update.$set) Object.assign(event, update.$set);
+        if (update.$unset) Object.keys(update.$unset).forEach(key => delete event[key]);
         if (update.$inc) {
             for (const [key, value] of Object.entries(update.$inc)) {
                 event[key] = Number(event[key] || 0) + value;
@@ -229,12 +282,33 @@ async function runVerificationRecoveryTests() {
         return Promise.resolve(event);
     };
 
-    walletService.credit = async (userId, amount, reference, source) => {
-        walletCredits.push({ userId, amount, reference, source, time: Date.now() });
+    WalletLedger.findOne = (filter = {}) => {
+        const found = mockLedgerRows.find(item => transactionMatches(item, filter)) || null;
+        return mockQuery(found, session => [...mockLedgerRows, ...session.stagedLedger].find(item => transactionMatches(item, filter)) || null);
+    };
+
+    Transaction.findOne = (filter = {}) => {
+        const found = mockAudits.find(item => transactionMatches(item, filter)) || null;
+        return mockQuery(found, session => [...mockAudits, ...session.stagedAudits].find(item => transactionMatches(item, filter)) || null);
+    };
+
+    Transaction.create = async (docs, options = {}) => {
+        assert.ok(options.session, 'Transaction audit must participate in the settlement session');
+        const rows = (Array.isArray(docs) ? docs : [docs]).map(doc => ({ ...doc, _id: new mongoose.Types.ObjectId() }));
+        options.session.stagedAudits.push(...rows);
+        return Array.isArray(docs) ? rows : rows[0];
+    };
+
+    walletService.credit = async (userId, amount, reference, source, transactionId, session, options = {}) => {
+        assert.ok(session, 'Wallet credit must participate in the settlement session');
+        assert.strictEqual(options.settlementKey, `payment:paystack:${reference}`);
+        session.stagedCredits.push({ userId, amount, reference, source, time: Date.now() });
+        session.stagedLedger.push({ userId, amount, reference, source, entryType: 'credit', settlementKey: options.settlementKey });
         return { balance: 50000 + amount };
     };
 
     notificationService.sendInApp = async () => ({ success: true });
+    notificationService.sendFundingSuccess = async () => ({ success: true });
 
     const makeWebhookRequest = (refId, eventId) => {
         const payload = {
@@ -576,16 +650,20 @@ async function runVerificationRecoveryTests() {
     } finally {
         // Restore all mocks
         axios.get = origAxiosGet;
+        mongoose.startSession = origStartSession;
         TransactionStatus.findOne = origTxFindOne;
         TransactionStatus.create = origTxCreate;
         TransactionStatus.updateOne = origTxUpdateOne;
         WebhookEvent.create = origWhCreate;
         WebhookEvent.findOne = origWhFindOne;
         WebhookEvent.findOneAndUpdate = origWhFindOneAndUpdate;
+        WalletLedger.findOne = origLedgerFindOne;
+        Transaction.findOne = origTxModelFindOne;
         Transaction.create = origTxModelCreate;
         paymentGatewayService.getGateway = origGetGateway;
         walletService.credit = origWalletCredit;
         notificationService.sendInApp = origNotifySendInApp;
+        notificationService.sendFundingSuccess = origNotifyFundingSuccess;
     }
 
     console.log('\n----------------------------------------------------');

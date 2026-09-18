@@ -156,7 +156,10 @@ async function runMultigatewayUnifiedWebhookTests() {
         let signatureBufferSeen = null;
         let normalizeInputSeen = null;
 
-        await testSetup.mockWebhookEventCreate(() => { createCalls++; return Promise.resolve({ _id: 'wh', eventId: 'EVT-RAW-1', status: 'pending', save: async () => ({}) }); });
+        await testSetup.mockWebhookEventCreate(doc => {
+            createCalls++;
+            return Promise.resolve({ _id: 'wh', ...doc });
+        });
 
         const fakeAdapter = {
             verifyWebhookSignature(headers, body) {
@@ -395,15 +398,22 @@ function mockReqRes(options = {}) {
 // Minimal WebhookEvent.create stub (only used by the G test)
 const testSetup = {
     _origCreate: null,
+    _origFindOneAndUpdate: null,
     async mockWebhookEventCreate(impl) {
         const WebhookEvent = require('../models/WebhookEvent');
         this._origCreate = WebhookEvent.create;
+        this._origFindOneAndUpdate = WebhookEvent.findOneAndUpdate;
         WebhookEvent.create = impl;
+        WebhookEvent.findOneAndUpdate = async () => ({ status: 'processed' });
     },
     async restoreWebhookEventCreate() {
         if (this._origCreate) {
             require('../models/WebhookEvent').create = this._origCreate;
             this._origCreate = null;
+        }
+        if (this._origFindOneAndUpdate) {
+            require('../models/WebhookEvent').findOneAndUpdate = this._origFindOneAndUpdate;
+            this._origFindOneAndUpdate = null;
         }
     }
 };

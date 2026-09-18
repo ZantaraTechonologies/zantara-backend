@@ -28,6 +28,7 @@ const crypto = require('crypto');
 
 const PaymentGateway = require('../models/PaymentGateway');
 const TransactionStatus = require('../models/TransactionStatus');
+const User = require('../models/User');
 
 const paymentGatewayService = require('../services/paymentGateway.service');
 const investmentService = require('../services/investment.service');
@@ -59,12 +60,14 @@ async function runInvestmentInitFailClosedTests() {
     let txCreated = [];
     let gatewayInitCalls = [];
     let psInitCalls = [];
+    let mockUserShares = 0;
 
     // Save originals for restoration
     const origGetInvestmentSettings = investmentService.getInvestmentSettings;
     const origPgCountDocuments = PaymentGateway.countDocuments;
     const origPgFindOne = PaymentGateway.findOne;
     const origTxCreate = TransactionStatus.create;
+    const origUserCollectionFindOne = User.collection.findOne;
     const origAxiosPost = axios.post;
     const origServiceAdapterInit = paymentGatewayService.adapters.paystack.prototype.initializePayment;
 
@@ -73,6 +76,7 @@ async function runInvestmentInitFailClosedTests() {
         txCreated = [];
         gatewayInitCalls = [];
         psInitCalls = [];
+        mockUserShares = 0;
 
         // Default gateway (Paystack) controllable per-scenario.
         mockGateways = [
@@ -100,6 +104,7 @@ async function runInvestmentInitFailClosedTests() {
             txCreated.push(doc);
             return Promise.resolve({ ...doc, _id: crypto.randomUUID() });
         };
+        User.collection.findOne = async () => ({ sharesOwned: mockUserShares, isShareholder: mockUserShares > 0 });
 
         paymentGatewayService.adapters.paystack.prototype.initializePayment = async ({ reference }) => {
             gatewayInitCalls.push(reference);
@@ -131,7 +136,8 @@ async function runInvestmentInitFailClosedTests() {
             if (mode === 'zero') return { investmentEnabled: true, sharePrice: 0 };
             if (mode === 'negative') return { investmentEnabled: true, sharePrice: -500 };
             if (mode === 'nan') return { investmentEnabled: true, sharePrice: 'not-a-number' };
-            if (mode === 'valid') return { investmentEnabled: true, sharePrice: 10000 };
+            if (mode === 'disabled') return { investmentEnabled: false, sharePrice: 10000, minSharesPerPurchase: 1, maxSharesPerUser: 20, totalSharesAvailable: 200 };
+            if (mode === 'valid') return { investmentEnabled: true, sharePrice: 10000, minSharesPerPurchase: 1, maxSharesPerUser: 20, totalSharesAvailable: 200 };
             // funding / no investment_buy → asset settings are irrelevant
             return { investmentEnabled: true, sharePrice: 10000 };
         };
@@ -158,7 +164,7 @@ async function runInvestmentInitFailClosedTests() {
 
     const serviceInitArgs = () => ({
         gatewayCode: 'paystack',
-        user: { _id: 'user-1', email: 'u1@test.com' },
+        user: { _id: 'user-1', email: 'u1@test.com', sharesOwned: 0 },
         amount: 30000,
         metadata: { type: 'investment_buy' }
     });
@@ -169,7 +175,7 @@ async function runInvestmentInitFailClosedTests() {
             channels: ['card', 'bank_transfer'],
             metadata: { type: 'investment_buy' }
         },
-        user: { id: 'user-1', email: 'u1@test.com' }
+        user: { id: 'user-1', email: 'u1@test.com', sharesOwned: 0 }
     });
 
     function assertRejectedBySettings(resultOrErr) {
@@ -333,6 +339,43 @@ async function runInvestmentInitFailClosedTests() {
             assert.strictEqual(gatewayInitCalls.length, 1, 'gateway initialization must proceed for funding');
         });
 
+        await test('S-J. paymentGateway service: disabled investments cannot initialize a charge', async () => {
+            resetMocks();
+            stubInvestmentSettings('disabled');
+            await assert.rejects(() => paymentGatewayService.initializeFunding(serviceInitArgs()), { code: 'INVALID_INVESTMENT_CONFIGURATION' });
+            assert.strictEqual(txCreated.length, 0);
+            assert.strictEqual(gatewayInitCalls.length, 0);
+        });
+
+        await test('S-K. paymentGateway service: non-whole-share amount cannot initialize a charge', async () => {
+            resetMocks();
+            stubInvestmentSettings('valid');
+            const args = serviceInitArgs();
+            args.amount = 30000.01;
+            await assert.rejects(() => paymentGatewayService.initializeFunding(args), { code: 'INVALID_INVESTMENT_AMOUNT' });
+            assert.strictEqual(txCreated.length, 0);
+            assert.strictEqual(gatewayInitCalls.length, 0);
+        });
+
+        await test('S-L. paymentGateway service: a capped investor cannot initialize a charge', async () => {
+            resetMocks();
+            stubInvestmentSettings('valid');
+            const args = serviceInitArgs();
+            mockUserShares = 20;
+            await assert.rejects(() => paymentGatewayService.initializeFunding(args), { code: 'INVALID_INVESTMENT_AMOUNT' });
+            assert.strictEqual(txCreated.length, 0);
+            assert.strictEqual(gatewayInitCalls.length, 0);
+        });
+
+        await test('S-M. paymentGateway service: a string-backed share balance cannot initialize a charge', async () => {
+            resetMocks();
+            stubInvestmentSettings('valid');
+            mockUserShares = '0';
+            await assert.rejects(() => paymentGatewayService.initializeFunding(serviceInitArgs()), { code: 'INVALID_INVESTMENT_CONFIGURATION' });
+            assert.strictEqual(txCreated.length, 0);
+            assert.strictEqual(gatewayInitCalls.length, 0);
+        });
+
         // ─── PATH 2: LEGACY Paystack controller /api/paystack/initialize ─────
         await test('P-A. legacy Paystack controller: valid sharePrice snapshots the authoritative value and initializes the gateway', async () => {
             resetMocks();
@@ -449,12 +492,58 @@ async function runInvestmentInitFailClosedTests() {
             assert.strictEqual(txCreated[0].sharePrice, undefined, 'funding records must NOT carry a sharePrice snapshot');
             assert.strictEqual(psInitCalls.length, 1, 'gateway initialization must proceed for funding');
         });
+
+        await test('P-H. legacy Paystack controller: disabled investments cannot initialize a charge', async () => {
+            resetMocks();
+            stubInvestmentSettings('disabled');
+            const calls = {};
+            await paystackController.payment(controllerInitReq(), makeRes(calls));
+            assert.strictEqual(calls.statusCode, 400);
+            assert.strictEqual(txCreated.length, 0);
+            assert.strictEqual(psInitCalls.length, 0);
+        });
+
+        await test('P-I. legacy Paystack controller: non-whole-share amount cannot initialize a charge', async () => {
+            resetMocks();
+            stubInvestmentSettings('valid');
+            const req = controllerInitReq();
+            req.body.amount = 30000.01;
+            const calls = {};
+            await paystackController.payment(req, makeRes(calls));
+            assert.strictEqual(calls.statusCode, 400);
+            assert.strictEqual(txCreated.length, 0);
+            assert.strictEqual(psInitCalls.length, 0);
+        });
+
+        await test('P-J. legacy Paystack controller: a capped investor cannot initialize a charge', async () => {
+            resetMocks();
+            stubInvestmentSettings('valid');
+            const req = controllerInitReq();
+            mockUserShares = 20;
+            const calls = {};
+            await paystackController.payment(req, makeRes(calls));
+            assert.strictEqual(calls.statusCode, 400);
+            assert.strictEqual(txCreated.length, 0);
+            assert.strictEqual(psInitCalls.length, 0);
+        });
+
+        await test('P-K. legacy Paystack controller: a string-backed share balance cannot initialize a charge', async () => {
+            resetMocks();
+            stubInvestmentSettings('valid');
+            mockUserShares = '0';
+            const calls = {};
+            await paystackController.payment(controllerInitReq(), makeRes(calls));
+            assert.strictEqual(calls.statusCode, 400);
+            assert.strictEqual(txCreated.length, 0);
+            assert.strictEqual(psInitCalls.length, 0);
+        });
     } finally {
         // ─── RESTORE ───────────────────────────────────────────────
         investmentService.getInvestmentSettings = origGetInvestmentSettings;
         PaymentGateway.countDocuments = origPgCountDocuments;
         PaymentGateway.findOne = origPgFindOne;
         TransactionStatus.create = origTxCreate;
+        User.collection.findOne = origUserCollectionFindOne;
         axios.post = origAxiosPost;
         paymentGatewayService.adapters.paystack.prototype.initializePayment = origServiceAdapterInit;
     }

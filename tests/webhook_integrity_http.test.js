@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
 const express = require('express');
+const mongoose = require('mongoose');
 
 const paymentGatewayService = require('../services/paymentGateway.service');
 const PaystackAdapter = require('../adapters/payment/paystack.adapter');
@@ -11,6 +12,7 @@ const FlutterwaveAdapter = require('../adapters/payment/flutterwave.adapter');
 const TransactionStatus = require('../models/TransactionStatus');
 const WebhookEvent = require('../models/WebhookEvent');
 const Transaction = require('../models/Transaction');
+const WalletLedger = require('../models/WalletLedger');
 const walletService = require('../services/wallet.service');
 const investmentService = require('../services/investment.service');
 const notificationService = require('../services/notification.service');
@@ -119,10 +121,13 @@ test('webhook integrity HTTP and middleware remediation', async (t) => {
         transactionFindOne: TransactionStatus.findOne,
         transactionCreate: TransactionStatus.create,
         transactionUpdateOne: TransactionStatus.updateOne,
+        startSession: mongoose.startSession,
         eventCreate: WebhookEvent.create,
         eventFindOne: WebhookEvent.findOne,
         eventFindOneAndUpdate: WebhookEvent.findOneAndUpdate,
         transactionCreateLog: Transaction.create,
+        transactionFindOneLog: Transaction.findOne,
+        ledgerFindOne: WalletLedger.findOne,
         walletCredit: walletService.credit,
         fulfillSharePurchase: investmentService.fulfillSharePurchase,
         sendFundingSuccess: notificationService.sendFundingSuccess,
@@ -157,6 +162,7 @@ test('webhook integrity HTTP and middleware remediation', async (t) => {
             status: 'pending',
             amountKobo: 500000,
             amount: 5000,
+            expectedCurrency: 'NGN',
             channels: ['card'],
             provider: 'paystack',
             service: 'Paystack',
@@ -173,9 +179,19 @@ test('webhook integrity HTTP and middleware remediation', async (t) => {
     const verifyFor = async (provider, refId) => {
         providerVerifyCalls.push({ provider, refId });
         const configured = verificationResults.get(`${provider}:${refId}`);
-        if (typeof configured === 'function') return configured();
-        if (configured) return configured;
         const tx = transactions.find(item => item.refId === refId);
+        const configuredResult = typeof configured === 'function' ? await configured() : configured;
+        if (configuredResult) {
+            return {
+                reference: refId,
+                providerTransactionId: `${provider}-${refId}`,
+                amount: (tx?.amountKobo || 500000) / 100,
+                currency: 'NGN',
+                metadata: {},
+                raw: {},
+                ...configuredResult
+            };
+        }
         return {
             success: true,
             status: 'success',
@@ -228,6 +244,12 @@ test('webhook integrity HTTP and middleware remediation', async (t) => {
         applyUpdate(item, update);
         return { matchedCount: 1, modifiedCount: 1 };
     };
+    mongoose.startSession = async () => ({
+        startTransaction() {},
+        async commitTransaction() {},
+        async abortTransaction() {},
+        endSession() {}
+    });
 
     WebhookEvent.create = async (doc) => {
         const duplicate = events.find(item => item.provider === doc.provider && item.eventId === doc.eventId);
@@ -260,7 +282,9 @@ test('webhook integrity HTTP and middleware remediation', async (t) => {
         return item;
     };
 
+    Transaction.findOne = () => queryResult(null);
     Transaction.create = async () => ({ id: 'audit-log' });
+    WalletLedger.findOne = () => queryResult(null);
     walletService.credit = async (userId, amount, reference, source) => {
         walletCredits.push({ userId, amount, reference, source });
         return { balance: amount };
@@ -317,10 +341,13 @@ test('webhook integrity HTTP and middleware remediation', async (t) => {
         TransactionStatus.findOne = originals.transactionFindOne;
         TransactionStatus.create = originals.transactionCreate;
         TransactionStatus.updateOne = originals.transactionUpdateOne;
+        mongoose.startSession = originals.startSession;
         WebhookEvent.create = originals.eventCreate;
         WebhookEvent.findOne = originals.eventFindOne;
         WebhookEvent.findOneAndUpdate = originals.eventFindOneAndUpdate;
         Transaction.create = originals.transactionCreateLog;
+        Transaction.findOne = originals.transactionFindOneLog;
+        WalletLedger.findOne = originals.ledgerFindOne;
         walletService.credit = originals.walletCredit;
         investmentService.fulfillSharePurchase = originals.fulfillSharePurchase;
         notificationService.sendFundingSuccess = originals.sendFundingSuccess;
@@ -550,7 +577,7 @@ test('webhook integrity HTTP and middleware remediation', async (t) => {
         );
         assert.equal(response.status, 500);
         assert.equal(walletCredits.length, 0);
-        assert.equal(tx.status, 'pending');
+        assert.equal(tx.status, 'reconciliation_required');
     });
 
     await t.test('R15 unsupported gatewayCode remains rejected', async () => {
@@ -619,5 +646,24 @@ test('webhook integrity HTTP and middleware remediation', async (t) => {
         assert.equal(investmentFulfillments[0].userId, tx.userId);
         assert.equal(investmentFulfillments[0].qty, 5);
         assert.equal(tx.status, 'success');
+    });
+
+    await t.test('R19 an expired webhook worker cannot overwrite a newer lease owner', async () => {
+        reset();
+        const normalized = { eventId: 'R19-EVENT', eventType: 'charge.success' };
+        const oldClaim = await paymentGatewayService._claimWebhookEvent({ providerCode: 'paystack', normalized, payload: {} });
+        const oldWorker = { ...oldClaim.webhookEvent };
+        events[0].processingExpiresAt = new Date(Date.now() - 1000);
+
+        const newClaim = await paymentGatewayService._claimWebhookEvent({ providerCode: 'paystack', normalized, payload: {} });
+        assert.notStrictEqual(oldWorker.processingToken, newClaim.webhookEvent.processingToken);
+
+        const staleUpdate = await paymentGatewayService._setWebhookEventState(oldWorker, 'failed', 'stale worker');
+        assert.strictEqual(staleUpdate, false);
+        assert.strictEqual(events[0].status, 'pending');
+
+        const currentUpdate = await paymentGatewayService._setWebhookEventState(newClaim.webhookEvent, 'processed');
+        assert.strictEqual(currentUpdate, true);
+        assert.strictEqual(events[0].status, 'processed');
     });
 });

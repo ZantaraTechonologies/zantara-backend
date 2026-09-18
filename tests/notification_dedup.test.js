@@ -62,6 +62,7 @@ async function runNotificationDedupTests() {
         ServiceFindOne: Service.findOne,
         ServiceIdentityFindOne: ServiceIdentity.findOne,
         WalletFindOne: Wallet.findOne,
+        walletCredit: walletService.credit,
         walletDebit: walletService.debit,
         TransactionCreate: Transaction.create,
         ExpenseCreate: Expense.create,
@@ -69,7 +70,9 @@ async function runNotificationDedupTests() {
         calculateServicePrice: pricing.calculateServicePrice,
         logAction: auditController.logAction,
         ShareExitFindById: ShareExitRequest.findById,
+        ShareExitFindOneAndUpdate: ShareExitRequest.findOneAndUpdate,
         InvestmentWithdrawalFindById: InvestmentWithdrawal.findById,
+        InvestmentWithdrawalFindOneAndUpdate: InvestmentWithdrawal.findOneAndUpdate,
     };
 
     // ─────────────────────────────────────────────────────────────
@@ -214,6 +217,14 @@ async function runNotificationDedupTests() {
         status(code) { this._status = code; return this; },
         json(payload) { this._json = payload; return this; },
     });
+
+    const mockPendingProcessingClaim = (doc, calls) => async (filter, update, options = {}) => {
+        calls.push({ filter, update, options });
+        if (String(filter._id) !== String(doc._id) || filter.status !== doc.status) return null;
+        const previous = { ...doc };
+        Object.assign(doc, update.$set || {});
+        return options.new ? doc : previous;
+    };
 
     try {
         // ═════════════════════════════════════════════════════════
@@ -541,35 +552,43 @@ async function runNotificationDedupTests() {
         // Investment admin flows — dispatch must follow a committed transaction.
         const { processShareExit, processDividendWithdrawal } = require('../controllers/investmentController');
         const investmentOrder = [];
+        const walletCredits = [];
         const uid = new mongoose.Types.ObjectId();
         notificationService.sendInApp = async (userId, payload, eventKey) => {
             investmentOrder.push({ committed: sessionCommitted, eventKey, payload });
         };
+        walletService.credit = async (...args) => {
+            walletCredits.push(args);
+            return { balance: 119000 };
+        };
 
         await test('B3. processShareExit (approved) notifies only AFTER commit, with proper eventKey+payload', async () => {
             sessionCommitted = false;
+            sessionAborted = false;
             investmentOrder.length = 0;
+            walletCredits.length = 0;
             const exitId = 'EXTID001';
-
-            ShareExitRequest.findById = () => ({
-                session: () => Promise.resolve({
-                    _id: exitId, userId: uid, sharesRequested: 2, netAmount: 19000,
-                    status: 'pending', refId: 'EXIT-REF-1', save: async () => {},
-                }),
-                then: (cb) => Promise.resolve(cb({
-                    _id: exitId, userId: uid, sharesRequested: 2, netAmount: 19000,
-                    status: 'pending', refId: 'EXIT-REF-1', save: async () => {},
-                })),
-            });
+            const claimCalls = [];
+            const exitRequest = {
+                _id: exitId, userId: uid, sharesRequested: 2, sharePrice: 10000,
+                grossAmount: 20000, exitFeePercent: 5, exitFeeCharged: 1000, netAmount: 19000,
+                reservationVersion: 1, reservedShares: 2,
+                firstPurchasedAt: new Date('2024-01-01T00:00:00.000Z'), lockPeriodMonths: 6,
+                lockExpiresAt: new Date('2024-07-01T00:00:00.000Z'),
+                status: 'pending', refId: 'EXIT-REF-1', save: async () => {},
+            };
+            ShareExitRequest.findOneAndUpdate = mockPendingProcessingClaim(exitRequest, claimCalls);
             const shareUserDoc = { _id: uid, name: 'Ada', sharesOwned: 5, frozenShares: 2, isShareholder: true, save: async () => {} };
             User.findById = () => ({
                 session: () => Promise.resolve(shareUserDoc),
                 then: (cb) => Promise.resolve(cb(shareUserDoc)),
             });
-            Wallet.findOne = () => ({
-                session: () => Promise.resolve({ balance: 100000, save: async () => {} }),
-            });
             Transaction.create = async () => [];
+            let callerSession;
+            mongoose.startSession = async () => {
+                callerSession = baseSession();
+                return callerSession;
+            };
 
             const res = mockRes();
             await processShareExit(
@@ -578,6 +597,14 @@ async function runNotificationDedupTests() {
             );
 
             assert.strictEqual(res._json.success, true, 'share exit approved');
+            assert.strictEqual(claimCalls.length, 1, 'pending exit is claimed exactly once');
+            assert.deepStrictEqual(claimCalls[0].filter, { _id: exitId, status: 'pending' });
+            assert.deepStrictEqual(claimCalls[0].update, { $set: { status: 'processing' } });
+            assert.strictEqual(claimCalls[0].options.new, true, 'claim returns the processing record');
+            assert.strictEqual(claimCalls[0].options.session, callerSession, 'claim uses the caller transaction');
+            assert.strictEqual(walletCredits.length, 1, 'approved exit creates one wallet ledger credit');
+            assert.strictEqual(walletCredits[0][1], 19000, 'wallet credit uses the validated net amount');
+            assert.strictEqual(walletCredits[0][5], callerSession, 'wallet credit uses the caller transaction');
             assert.strictEqual(investmentOrder.length, 1, 'exactly one notification');
             assert.strictEqual(investmentOrder[0].committed, true, 'dispatch happens only AFTER commitTransaction');
             assert.strictEqual(investmentOrder[0].eventKey, `share_exit_approved:${exitId}`, 'eventKey carries the exit request id + action');
@@ -588,11 +615,29 @@ async function runNotificationDedupTests() {
             sessionCommitted = false;
             sessionAborted = false;
             investmentOrder.length = 0;
+            walletCredits.length = 0;
 
-            mongoose.startSession = async () => ({
+            const exitRequest = {
+                _id: 'EXTID001', userId: uid, sharesRequested: 2, sharePrice: 10000,
+                grossAmount: 20000, exitFeePercent: 5, exitFeeCharged: 1000, netAmount: 19000,
+                reservationVersion: 1, reservedShares: 2,
+                firstPurchasedAt: new Date('2024-01-01T00:00:00.000Z'), lockPeriodMonths: 6,
+                lockExpiresAt: new Date('2024-07-01T00:00:00.000Z'),
+                status: 'pending', refId: 'EXIT-REF-ROLLBACK', save: async () => {},
+            };
+            const claimCalls = [];
+            ShareExitRequest.findOneAndUpdate = mockPendingProcessingClaim(exitRequest, claimCalls);
+            const shareUserDoc = { _id: uid, name: 'Ada', sharesOwned: 5, frozenShares: 2, isShareholder: true, save: async () => {} };
+            User.findById = () => ({
+                session: () => Promise.resolve(shareUserDoc),
+                then: (cb) => Promise.resolve(cb(shareUserDoc)),
+            });
+
+            const rollbackSession = {
                 ...baseSession(),
                 commitTransaction: async () => { throw new Error('COMMIT_FAILED'); },
-            });
+            };
+            mongoose.startSession = async () => rollbackSession;
 
             const res = mockRes();
             await processShareExit(
@@ -603,24 +648,35 @@ async function runNotificationDedupTests() {
             mongoose.startSession = async () => baseSession();
 
             assert.strictEqual(investmentOrder.length, 0, 'zero notifications after rollback');
+            assert.strictEqual(sessionAborted, true, 'share exit transaction is aborted on rollback');
+            assert.strictEqual(claimCalls.length, 1, 'rollback path claimed the pending exit');
+            assert.strictEqual(walletCredits.length, 1, 'wallet credit was attempted inside the transaction');
+            assert.strictEqual(walletCredits[0][5], rollbackSession, 'rolled-back credit used the caller transaction');
             assert.strictEqual(res._status, 500, 'admin sees an error, not a false success');
         });
 
         await test('B5. processDividendWithdrawal (approved) notifies only AFTER commit, no superadmin spam under 50k', async () => {
             sessionCommitted = false;
+            sessionAborted = false;
             investmentOrder.length = 0;
             const wId = 'WID001';
+            const claimCalls = [];
             const withdrawalApprovedDoc = {
                 _id: wId, userId: uid, amount: 20000, netAmount: 19700, feeCharged: 300,
-                status: 'pending', refId: 'DIVW-1', bankName: 'GTB', save: async () => {},
+                feePercent: 1.5, source: 'dividend', reservationVersion: 1,
+                reservedAmountKobo: 2000000, reservedSource: 'dividend',
+                status: 'pending', refId: 'DIVW-1', bankName: 'GTB',
+                accountNumber: '0123456789', accountName: 'Ada Test', save: async () => {},
             };
 
-            InvestmentWithdrawal.findById = () => ({
-                session: () => Promise.resolve(withdrawalApprovedDoc),
-                then: (cb) => Promise.resolve(cb(withdrawalApprovedDoc)),
-            });
+            InvestmentWithdrawal.findOneAndUpdate = mockPendingProcessingClaim(withdrawalApprovedDoc, claimCalls);
             User.findById = () => ({ session: () => Promise.resolve({ dividendBalance: 50000, save: async () => {} }) });
             Transaction.create = async () => [];
+            let callerSession;
+            mongoose.startSession = async () => {
+                callerSession = baseSession();
+                return callerSession;
+            };
 
             const res = mockRes();
             await processDividendWithdrawal(
@@ -629,6 +685,11 @@ async function runNotificationDedupTests() {
             );
 
             assert.strictEqual(res._json.success, true, 'withdrawal approved');
+            assert.strictEqual(claimCalls.length, 1, 'pending withdrawal is claimed exactly once');
+            assert.deepStrictEqual(claimCalls[0].filter, { _id: wId, status: 'pending' });
+            assert.deepStrictEqual(claimCalls[0].update, { $set: { status: 'processing' } });
+            assert.strictEqual(claimCalls[0].options.new, true, 'claim returns the processing record');
+            assert.strictEqual(claimCalls[0].options.session, callerSession, 'claim uses the caller transaction');
             assert.strictEqual(investmentOrder.length, 1, 'exactly one notification');
             assert.strictEqual(investmentOrder[0].committed, true, 'dispatch happens only AFTER commitTransaction');
             assert.strictEqual(investmentOrder[0].eventKey, `dividend_withdrawal_approved:${wId}`, 'eventKey carries withdrawal id + action');
@@ -638,18 +699,20 @@ async function runNotificationDedupTests() {
 
         await test('B6. processDividendWithdrawal (rejected) notifies after commit and refunds dividend balance', async () => {
             sessionCommitted = false;
+            sessionAborted = false;
             investmentOrder.length = 0;
             const wId = 'WID002';
             let capturedUser = null;
+            const claimCalls = [];
             const withdrawalRejectedDoc = {
                 _id: wId, userId: uid, amount: 20000, netAmount: 19700, feeCharged: 300,
-                status: 'pending', refId: 'DIVW-2', bankName: 'GTB', save: async () => {},
+                feePercent: 1.5, source: 'dividend', reservationVersion: 1,
+                reservedAmountKobo: 2000000, reservedSource: 'dividend',
+                status: 'pending', refId: 'DIVW-2', bankName: 'GTB',
+                accountNumber: '0123456789', accountName: 'Ada Test', save: async () => {},
             };
 
-            InvestmentWithdrawal.findById = () => ({
-                session: () => Promise.resolve(withdrawalRejectedDoc),
-                then: (cb) => Promise.resolve(cb(withdrawalRejectedDoc)),
-            });
+            InvestmentWithdrawal.findOneAndUpdate = mockPendingProcessingClaim(withdrawalRejectedDoc, claimCalls);
             User.findById = () => {
                 capturedUser = { dividendBalance: 50000, save: async () => {} };
                 return {
@@ -658,6 +721,11 @@ async function runNotificationDedupTests() {
                 };
             };
             Transaction.create = async () => [];
+            let callerSession;
+            mongoose.startSession = async () => {
+                callerSession = baseSession();
+                return callerSession;
+            };
 
             const res = mockRes();
             await processDividendWithdrawal(
@@ -666,6 +734,8 @@ async function runNotificationDedupTests() {
             );
 
             assert.strictEqual(res._json.success, true, 'withdrawal rejected');
+            assert.strictEqual(claimCalls.length, 1, 'pending withdrawal is claimed exactly once');
+            assert.strictEqual(claimCalls[0].options.session, callerSession, 'claim uses the caller transaction');
             assert.strictEqual(capturedUser.dividendBalance, 70000, 'rejected withdrawal amount is refunded to dividend balance');
             assert.strictEqual(investmentOrder.length, 1, 'exactly one notification');
             assert.strictEqual(investmentOrder[0].committed, true, 'dispatch happens only AFTER commitTransaction');
@@ -693,6 +763,7 @@ async function runNotificationDedupTests() {
         Service.findOne = O.ServiceFindOne;
         ServiceIdentity.findOne = O.ServiceIdentityFindOne;
         Wallet.findOne = O.WalletFindOne;
+        walletService.credit = O.walletCredit;
         walletService.debit = O.walletDebit;
         Transaction.create = O.TransactionCreate;
         Expense.create = O.ExpenseCreate;
@@ -700,7 +771,9 @@ async function runNotificationDedupTests() {
         pricing.calculateServicePrice = O.calculateServicePrice;
         auditController.logAction = O.logAction;
         ShareExitRequest.findById = O.ShareExitFindById;
+        ShareExitRequest.findOneAndUpdate = O.ShareExitFindOneAndUpdate;
         InvestmentWithdrawal.findById = O.InvestmentWithdrawalFindById;
+        InvestmentWithdrawal.findOneAndUpdate = O.InvestmentWithdrawalFindOneAndUpdate;
     }
 
     console.log('\n----------------------------------------------------');

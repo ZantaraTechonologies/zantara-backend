@@ -171,7 +171,12 @@ const getSettings = async (req, res) => {
 
 const updateSetting = async (req, res) => {
     try {
-        const { key, value } = req.body;
+        const { key } = req.body;
+        let { value } = req.body;
+        const investmentService = require('../services/investment.service');
+        if (investmentService.INVESTMENT_SETTING_KEYS.includes(key)) {
+            value = investmentService.validateInvestmentSetting(key, value);
+        }
         await require('../models/Setting').findOneAndUpdate(
             { key },
             { key, value },
@@ -182,7 +187,7 @@ const updateSetting = async (req, res) => {
 
         res.json({ success: true, message: 'Setting updated' });
     } catch (e) {
-        res.status(500).json({ message: e.message });
+        res.status(400).json({ message: e.message });
     }
 };
 

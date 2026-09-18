@@ -194,11 +194,11 @@ class MonnifyAdapter extends BasePaymentAdapter {
         const data = payload?.eventData || {};
         const isSuccess = payload.eventType === 'SUCCESSFUL_TRANSACTION';
 
-        let userId = data.metaData?.userId;
         const accountRef = data.accountReference || data.destinationAccountReference;
-        if (!userId && accountRef && accountRef.startsWith('VIRTUAL_')) {
-            userId = accountRef.replace('VIRTUAL_', '');
-        }
+        const virtualAccountReference = accountRef && accountRef.startsWith('VIRTUAL_') ? accountRef : null;
+        const userId = virtualAccountReference
+            ? virtualAccountReference.replace('VIRTUAL_', '')
+            : data.metaData?.userId;
 
         return {
             eventId: String(data.transactionReference || `MNFY_${Date.now()}`),
@@ -209,6 +209,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
             amount: Number(data.amountPaid || 0),
             currency: (data.currencyCode || 'NGN').toUpperCase(),
             userId,
+            virtualAccountReference,
             metadata: data.metaData || {},
             raw: data
         };

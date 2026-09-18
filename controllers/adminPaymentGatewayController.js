@@ -607,8 +607,8 @@ const deleteGateway = async (req, res) => {
         }
 
         const [txCount, whCount] = await Promise.all([
-            TransactionStatus.countDocuments({ gateway: gateway.code }),
-            WebhookEvent.countDocuments({ gatewayCode: gateway.code })
+            TransactionStatus.countDocuments({ provider: gateway.code }),
+            WebhookEvent.countDocuments({ provider: gateway.code })
         ]);
 
         if (txCount > 0 || whCount > 0) {
@@ -639,13 +639,13 @@ const deleteGateway = async (req, res) => {
 
 /**
  * GET /api/admin/payment-gateways/reconciliation
- * Returns funding transactions in 'processing' or 'reconciliation_required' states.
+ * Returns funding transactions in an intermediate or reconciliation-required state.
  * Read-only visibility for operational audits.
  */
 const getReconciliationTransactions = async (req, res) => {
     try {
         const issues = await TransactionStatus.find({
-            status: { $in: ['processing', 'reconciliation_required'] }
+            status: { $in: ['processing', 'settlement_pending', 'reconciliation_required'] }
         })
             .sort({ updatedAt: -1 })
             .limit(100)
@@ -659,8 +659,8 @@ const getReconciliationTransactions = async (req, res) => {
 
             return {
                 _id: tx._id,
-                reference: tx.reference,
-                gateway: tx.gateway || 'unknown',
+                reference: tx.refId,
+                gateway: tx.provider || 'unknown',
                 status: tx.status,
                 user: tx.userId ? {
                     _id: tx.userId._id,
@@ -668,9 +668,9 @@ const getReconciliationTransactions = async (req, res) => {
                     email: tx.userId.email || '',
                     phone: tx.userId.phone || ''
                 } : null,
-                expectedAmount: tx.amount,
+                expectedAmount: Number.isSafeInteger(tx.amountKobo) ? tx.amountKobo / 100 : tx.amount,
                 confirmedAmount: tx.confirmedAmountKobo ? tx.confirmedAmountKobo / 100 : null,
-                expectedCurrency: tx.currency || 'NGN',
+                expectedCurrency: tx.expectedCurrency || null,
                 confirmedCurrency: tx.confirmedCurrency || null,
                 confirmedProviderRef: tx.confirmedProviderRef || null,
                 reconciliationReason: tx.reconciliationReason || null,

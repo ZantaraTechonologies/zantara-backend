@@ -47,6 +47,8 @@ async function runPaymentGatewayTests() {
     let mockTransactions = [];
     let mockWebhookEvents = [];
     let walletCredits = [];
+    let mockLedgerRows = [];
+    let mockAudits = [];
 
     // Save originals
     const origFind = PaymentGateway.find;
@@ -56,21 +58,66 @@ async function runPaymentGatewayTests() {
     const origTxFindOne = TransactionStatus.findOne;
     const origTxCreate = TransactionStatus.create;
     const origTxUpdateOne = TransactionStatus.updateOne;
+    const origStartSession = mongoose.startSession;
     const origWhFindOne = WebhookEvent.findOne;
+    const origWhFindOneAndUpdate = WebhookEvent.findOneAndUpdate;
     const origWhCreate = WebhookEvent.create;
+    const origLedgerFindOne = WalletLedger.findOne;
+    const origTxModelFindOne = Transaction.findOne;
     const origTxModelCreate = Transaction.create;
     const origWalletCredit = walletService.credit;
     const origNotifySendInApp = notificationService.sendInApp;
+    const origNotifyFundingSuccess = notificationService.sendFundingSuccess;
 
-    Transaction.create = async () => ({ _id: new mongoose.Types.ObjectId() });
+    const matchesValue = (actual, expected) => {
+        if (expected && typeof expected === 'object' && !Array.isArray(expected)) {
+            if (expected.$in) return expected.$in.includes(actual);
+        }
+        return actual === expected;
+    };
+    const transactionMatches = (item, filter = {}) => Object.entries(filter).every(([key, value]) => matchesValue(item[key], value));
+    const applyUpdate = (item, update = {}) => {
+        if (update.$set) Object.assign(item, update.$set);
+        if (update.$unset) Object.keys(update.$unset).forEach(key => delete item[key]);
+    };
 
     // Helper to mock mongoose query chains
-    const mockQuery = (data) => ({
+    const mockQuery = (data, sessionReader = null) => ({
         sort: () => mockQuery(data),
         limit: () => mockQuery(data),
-        session: () => mockQuery(data),
+        session: session => Promise.resolve(sessionReader ? sessionReader(session) : data),
         then: (resolve) => Promise.resolve(resolve(data)),
         catch: (reject) => Promise.reject(reject)
+    });
+
+    mongoose.startSession = async () => ({
+        stagedTransactions: new Map(),
+        stagedCredits: [],
+        stagedLedger: [],
+        stagedAudits: [],
+        startTransaction() {},
+        readTransaction(refId) {
+            if (this.stagedTransactions.has(refId)) return this.stagedTransactions.get(refId);
+            const current = mockTransactions.find(item => item.refId === refId);
+            if (!current) return null;
+            const copy = { ...current };
+            this.stagedTransactions.set(refId, copy);
+            return copy;
+        },
+        async commitTransaction() {
+            for (const [refId, staged] of this.stagedTransactions) {
+                const current = mockTransactions.find(item => item.refId === refId);
+                if (current) {
+                    Object.keys(current).forEach(key => delete current[key]);
+                    Object.assign(current, staged);
+                }
+            }
+            walletCredits.push(...this.stagedCredits);
+            mockLedgerRows.push(...this.stagedLedger);
+            mockAudits.push(...this.stagedAudits);
+        },
+        async abortTransaction() {},
+        endSession() {}
     });
 
     // Mock PaymentGateway model queries
@@ -104,11 +151,13 @@ async function runPaymentGatewayTests() {
 
     // Mock TransactionStatus queries
     TransactionStatus.findOne = (filter = {}) => {
-        let found = null;
-        if (filter.refId) {
-            found = mockTransactions.find(t => t.refId === filter.refId);
-        }
-        return mockQuery(found || null);
+        const found = mockTransactions.find(t => transactionMatches(t, filter)) || null;
+        return mockQuery(found, session => {
+            const candidate = filter.refId
+                ? session.readTransaction(filter.refId)
+                : mockTransactions.map(item => session.readTransaction(item.refId)).find(item => transactionMatches(item, filter));
+            return candidate && transactionMatches(candidate, filter) ? candidate : null;
+        });
     };
 
     TransactionStatus.create = (doc) => {
@@ -123,15 +172,14 @@ async function runPaymentGatewayTests() {
         return Promise.resolve(item);
     };
 
-    TransactionStatus.updateOne = (filter, update) => {
-        const item = mockTransactions.find(t => {
-            if (filter.refId && t.refId !== filter.refId) return false;
-            if (filter.status && t.status !== filter.status) return false;
-            return true;
-        });
+    TransactionStatus.updateOne = (filter, update, options = {}) => {
+        const source = options.session
+            ? mockTransactions.map(item => options.session.readTransaction(item.refId))
+            : mockTransactions;
+        const item = source.find(t => transactionMatches(t, filter));
 
         if (item) {
-            if (update.$set) Object.assign(item, update.$set);
+            applyUpdate(item, update);
             return Promise.resolve({ modifiedCount: 1, matchedCount: 1 });
         }
         return Promise.resolve({ modifiedCount: 0, matchedCount: 0 });
@@ -139,8 +187,15 @@ async function runPaymentGatewayTests() {
 
     // Mock WebhookEvent queries
     WebhookEvent.findOne = (filter = {}) => {
-        const found = mockWebhookEvents.find(w => w.eventId === filter.eventId);
+        const found = mockWebhookEvents.find(w => transactionMatches(w, filter));
         return mockQuery(found || null);
+    };
+
+    WebhookEvent.findOneAndUpdate = (filter = {}, update = {}) => {
+        const item = mockWebhookEvents.find(event => transactionMatches(event, filter));
+        if (!item) return Promise.resolve(null);
+        applyUpdate(item, update);
+        return Promise.resolve(item);
     };
 
     WebhookEvent.create = (doc) => {
@@ -149,13 +204,58 @@ async function runPaymentGatewayTests() {
         return Promise.resolve(item);
     };
 
+    WalletLedger.findOne = (filter = {}) => {
+        const found = mockLedgerRows.find(item => transactionMatches(item, filter)) || null;
+        return mockQuery(found, session => [...mockLedgerRows, ...session.stagedLedger].find(item => transactionMatches(item, filter)) || null);
+    };
+
+    Transaction.findOne = (filter = {}) => {
+        const found = mockAudits.find(item => transactionMatches(item, filter)) || null;
+        return mockQuery(found, session => [...mockAudits, ...session.stagedAudits].find(item => transactionMatches(item, filter)) || null);
+    };
+
+    Transaction.create = async (docs, options = {}) => {
+        assert.ok(options.session, 'Transaction audit must participate in the settlement session');
+        const rows = (Array.isArray(docs) ? docs : [docs]).map(doc => ({ ...doc, _id: new mongoose.Types.ObjectId() }));
+        options.session.stagedAudits.push(...rows);
+        return Array.isArray(docs) ? rows : rows[0];
+    };
+
     // Mock Wallet credit
-    walletService.credit = async (userId, amount, ref, source) => {
-        walletCredits.push({ userId, amount, ref, source, time: Date.now() });
+    walletService.credit = async (userId, amount, ref, source, transactionId, session, options = {}) => {
+        assert.ok(session, 'Wallet credit must participate in the settlement session');
+        assert.ok(options.settlementKey && options.settlementKey.endsWith(`:${ref}`), 'Settlement key must bind provider and reference');
+        session.stagedCredits.push({ userId, amount, ref, reference: ref, source, time: Date.now() });
+        session.stagedLedger.push({ userId, amount, reference: ref, source, entryType: 'credit', settlementKey: options.settlementKey });
         return { balance: 50000 + amount };
     };
 
     notificationService.sendInApp = async () => ({ success: true });
+    notificationService.sendFundingSuccess = async () => ({ success: true });
+
+    const fundingRecord = (refId, overrides = {}) => ({
+        refId,
+        userId: 'u-test',
+        type: 'funding',
+        status: 'pending',
+        amountKobo: 100000,
+        amount: 1000,
+        expectedCurrency: 'NGN',
+        channels: ['card'],
+        provider: 'paystack',
+        service: 'Paystack',
+        ...overrides
+    });
+
+    const successfulPayment = (reference, amount, gateway = 'paystack', overrides = {}) => ({
+        status: 'success',
+        reference,
+        gateway,
+        amount,
+        currency: 'NGN',
+        providerTransactionId: `${gateway}-${reference}`,
+        ...overrides
+    });
 
     try {
         // ─────────────────────────────────────────────────────────────────────
@@ -402,24 +502,11 @@ async function runPaymentGatewayTests() {
 
         await test('14. Paystack verification occurs before wallet credit', async () => {
             walletCredits = [];
-            const tx = {
-                refId: 'PS-VERIFY-ORDER',
-                userId: 'u-vo',
-                status: 'pending',
-                amountKobo: 100000, // ₦1000
-                amount: 1000,
-                provider: 'paystack'
-            };
+            const tx = fundingRecord('PS-VERIFY-ORDER', { userId: 'u-vo' });
             mockTransactions.push(tx);
 
             let providerVerifyCalled = false;
-            const gatewayResult = {
-                status: 'success',
-                reference: 'PS-VERIFY-ORDER',
-                gateway: 'paystack',
-                amount: 1000,
-                currency: 'NGN'
-            };
+            const gatewayResult = successfulPayment('PS-VERIFY-ORDER', 1000);
 
             await paymentGatewayService.finalizeFundingCredit({
                 transactionStatus: tx,
@@ -496,14 +583,10 @@ async function runPaymentGatewayTests() {
         });
 
         await test('18. Paystack cannot verify Monnify transaction', async () => {
-            const tx = {
-                refId: 'MNFY-CROSS-TEST',
-                userId: 'u-cross',
-                status: 'pending',
-                amountKobo: 200000,
-                amount: 2000,
-                provider: 'monnify'
-            };
+            walletCredits = [];
+            const tx = fundingRecord('MNFY-CROSS-TEST', {
+                userId: 'u-cross', amountKobo: 200000, amount: 2000, provider: 'monnify', service: 'Monnify'
+            });
             mockTransactions.push(tx);
 
             // Attempt to finalize using Paystack gateway result
@@ -511,50 +594,36 @@ async function runPaymentGatewayTests() {
             try {
                 await paymentGatewayService.finalizeFundingCredit({
                     transactionStatus: tx,
-                    gatewayPaymentResult: {
-                        status: 'success',
-                        reference: 'MNFY-CROSS-TEST',
-                        gateway: 'paystack', // mismatch!
-                        amount: 2000,
-                        currency: 'NGN'
-                    }
+                    gatewayPaymentResult: successfulPayment('MNFY-CROSS-TEST', 2000, 'paystack')
                 });
             } catch (e) {
                 threw = true;
                 assert.strictEqual(e.code, 'PAYMENT_GATEWAY_MISMATCH');
             }
             assert.strictEqual(threw, true, 'Must reject when Paystack attempts to finalize Monnify transaction');
-            assert.strictEqual(tx.status, 'pending', 'Status must not become success');
+            assert.strictEqual(tx.status, 'reconciliation_required', 'Gateway mismatch evidence must require reconciliation');
+            assert.ok(tx.reconciliationReason, 'Gateway mismatch reason must be preserved');
+            assert.strictEqual(walletCredits.length, 0, 'Gateway mismatch must not credit');
         });
 
         await test('19. Monnify cannot verify Paystack transaction', async () => {
-            const tx = {
-                refId: 'PS-CROSS-TEST',
-                userId: 'u-cross2',
-                status: 'pending',
-                amountKobo: 300000,
-                amount: 3000,
-                provider: 'paystack'
-            };
+            walletCredits = [];
+            const tx = fundingRecord('PS-CROSS-TEST', { userId: 'u-cross2', amountKobo: 300000, amount: 3000 });
             mockTransactions.push(tx);
 
             let threw = false;
             try {
                 await paymentGatewayService.finalizeFundingCredit({
                     transactionStatus: tx,
-                    gatewayPaymentResult: {
-                        status: 'success',
-                        reference: 'PS-CROSS-TEST',
-                        gateway: 'monnify', // mismatch!
-                        amount: 3000,
-                        currency: 'NGN'
-                    }
+                    gatewayPaymentResult: successfulPayment('PS-CROSS-TEST', 3000, 'monnify')
                 });
             } catch (e) {
                 threw = true;
                 assert.strictEqual(e.code, 'PAYMENT_GATEWAY_MISMATCH');
             }
             assert.strictEqual(threw, true, 'Must reject when Monnify attempts to finalize Paystack transaction');
+            assert.strictEqual(tx.status, 'reconciliation_required');
+            assert.strictEqual(walletCredits.length, 0, 'Gateway mismatch must not credit');
         });
 
         // ─────────────────────────────────────────────────────────────────────
@@ -613,23 +682,12 @@ async function runPaymentGatewayTests() {
 
         await test('22. Replayed Flutterwave webhook cannot double-credit', async () => {
             walletCredits = [];
-            const tx = {
-                refId: 'FLW-REPLAY-TX',
-                userId: 'u-flw-replay',
-                status: 'pending',
-                amountKobo: 500000,
-                amount: 5000,
-                provider: 'flutterwave'
-            };
+            const tx = fundingRecord('FLW-REPLAY-TX', {
+                userId: 'u-flw-replay', amountKobo: 500000, amount: 5000, provider: 'flutterwave', service: 'Flutterwave'
+            });
             mockTransactions.push(tx);
 
-            const gatewayResult = {
-                status: 'success',
-                reference: 'FLW-REPLAY-TX',
-                gateway: 'flutterwave',
-                amount: 5000,
-                currency: 'NGN'
-            };
+            const gatewayResult = successfulPayment('FLW-REPLAY-TX', 5000, 'flutterwave');
 
             // First delivery: credits wallet
             const first = await paymentGatewayService.finalizeFundingCredit({
@@ -656,25 +714,15 @@ async function runPaymentGatewayTests() {
             // if (upd.modifiedCount === 1 || (await TransactionStatus.findOne({ refId, status: 'success' }))) { credit... }
             // With our atomic finalizeFundingCredit, if modifiedCount !== 1, no credit occurs.
             walletCredits = [];
-            const alreadySuccessTx = {
-                refId: 'FLW-ALREADY-SUCCESS',
-                userId: 'u-flw-succ',
-                status: 'success',
-                amountKobo: 200000,
-                amount: 2000,
-                provider: 'flutterwave'
-            };
+            const alreadySuccessTx = fundingRecord('FLW-ALREADY-SUCCESS', {
+                userId: 'u-flw-succ', status: 'success', amountKobo: 200000, amount: 2000,
+                provider: 'flutterwave', service: 'Flutterwave'
+            });
             mockTransactions.push(alreadySuccessTx);
 
             const res = await paymentGatewayService.finalizeFundingCredit({
                 transactionStatus: alreadySuccessTx,
-                gatewayPaymentResult: {
-                    status: 'success',
-                    reference: 'FLW-ALREADY-SUCCESS',
-                    gateway: 'flutterwave',
-                    amount: 2000,
-                    currency: 'NGN'
-                }
+                gatewayPaymentResult: successfulPayment('FLW-ALREADY-SUCCESS', 2000, 'flutterwave')
             });
 
             assert.strictEqual(res.credited, false, 'Must NOT credit already success transaction');
@@ -687,17 +735,10 @@ async function runPaymentGatewayTests() {
 
         await test('24. Duplicate webhook cannot double-credit', async () => {
             walletCredits = [];
-            const tx = {
-                refId: 'DUP-WH-TEST',
-                userId: 'u-dup-wh',
-                status: 'pending',
-                amountKobo: 100000,
-                amount: 1000,
-                provider: 'paystack'
-            };
+            const tx = fundingRecord('DUP-WH-TEST', { userId: 'u-dup-wh' });
             mockTransactions.push(tx);
 
-            const gwRes = { status: 'success', reference: 'DUP-WH-TEST', gateway: 'paystack', amount: 1000, currency: 'NGN' };
+            const gwRes = successfulPayment('DUP-WH-TEST', 1000);
 
             await paymentGatewayService.finalizeFundingCredit({ transactionStatus: tx, gatewayPaymentResult: gwRes });
             await paymentGatewayService.finalizeFundingCredit({ transactionStatus: tx, gatewayPaymentResult: gwRes });
@@ -708,17 +749,10 @@ async function runPaymentGatewayTests() {
 
         await test('25. Callback + Webhook race cannot double-credit', async () => {
             walletCredits = [];
-            const tx = {
-                refId: 'RACE-WH-CB',
-                userId: 'u-race',
-                status: 'pending',
-                amountKobo: 400000,
-                amount: 4000,
-                provider: 'paystack'
-            };
+            const tx = fundingRecord('RACE-WH-CB', { userId: 'u-race', amountKobo: 400000, amount: 4000 });
             mockTransactions.push(tx);
 
-            const gwRes = { status: 'success', reference: 'RACE-WH-CB', gateway: 'paystack', amount: 4000, currency: 'NGN' };
+            const gwRes = successfulPayment('RACE-WH-CB', 4000);
 
             // Simulate concurrent arrival
             const [p1, p2] = await Promise.all([
@@ -733,17 +767,10 @@ async function runPaymentGatewayTests() {
 
         await test('26. Repeated manual verification cannot double-credit', async () => {
             walletCredits = [];
-            const tx = {
-                refId: 'MAN-VERIFY-REP',
-                userId: 'u-man',
-                status: 'pending',
-                amountKobo: 800000,
-                amount: 8000,
-                provider: 'paystack'
-            };
+            const tx = fundingRecord('MAN-VERIFY-REP', { userId: 'u-man', amountKobo: 800000, amount: 8000 });
             mockTransactions.push(tx);
 
-            const gwRes = { status: 'success', reference: 'MAN-VERIFY-REP', gateway: 'paystack', amount: 8000, currency: 'NGN' };
+            const gwRes = successfulPayment('MAN-VERIFY-REP', 8000);
 
             await paymentGatewayService.finalizeFundingCredit({ transactionStatus: tx, gatewayPaymentResult: gwRes, source: 'manual' });
             await paymentGatewayService.finalizeFundingCredit({ transactionStatus: tx, gatewayPaymentResult: gwRes, source: 'manual' });
@@ -753,24 +780,13 @@ async function runPaymentGatewayTests() {
 
         await test('27. Amount mismatch cannot credit wallet', async () => {
             walletCredits = [];
-            const tx = {
-                refId: 'AMT-MISMATCH-TX',
-                userId: 'u-amt-mismatch',
-                status: 'pending',
-                amountKobo: 1000000, // Expected: ₦10,000
-                amount: 10000,
-                provider: 'paystack'
-            };
+            const tx = fundingRecord('AMT-MISMATCH-TX', {
+                userId: 'u-amt-mismatch', amountKobo: 1000000, amount: 10000
+            });
             mockTransactions.push(tx);
 
             // Provider confirms only ₦1,000 (attacker tampered with gateway amount)
-            const gwRes = {
-                status: 'success',
-                reference: 'AMT-MISMATCH-TX',
-                gateway: 'paystack',
-                amount: 1000, // ₦1,000 instead of ₦10,000
-                currency: 'NGN'
-            };
+            const gwRes = successfulPayment('AMT-MISMATCH-TX', 1000);
 
             let threw = false;
             try {
@@ -794,23 +810,10 @@ async function runPaymentGatewayTests() {
 
         await test('28. Currency mismatch cannot credit wallet', async () => {
             walletCredits = [];
-            const tx = {
-                refId: 'CURR-MISMATCH-TX',
-                userId: 'u-curr',
-                status: 'pending',
-                amountKobo: 500000,
-                amount: 5000,
-                provider: 'paystack'
-            };
+            const tx = fundingRecord('CURR-MISMATCH-TX', { userId: 'u-curr', amountKobo: 500000, amount: 5000 });
             mockTransactions.push(tx);
 
-            const gwRes = {
-                status: 'success',
-                reference: 'CURR-MISMATCH-TX',
-                gateway: 'paystack',
-                amount: 5000,
-                currency: 'USD' // Mismatch!
-            };
+            const gwRes = successfulPayment('CURR-MISMATCH-TX', 5000, 'paystack', { currency: 'USD' });
 
             let threw = false;
             try {
@@ -829,23 +832,10 @@ async function runPaymentGatewayTests() {
 
         await test('29. Reference mismatch cannot credit wallet', async () => {
             walletCredits = [];
-            const tx = {
-                refId: 'REF-EXPECTED-123',
-                userId: 'u-ref',
-                status: 'pending',
-                amountKobo: 50000,
-                amount: 500,
-                provider: 'paystack'
-            };
+            const tx = fundingRecord('REF-EXPECTED-123', { userId: 'u-ref', amountKobo: 50000, amount: 500 });
             mockTransactions.push(tx);
 
-            const gwRes = {
-                status: 'success',
-                reference: 'REF-DIFFERENT-456', // Mismatch!
-                gateway: 'paystack',
-                amount: 500,
-                currency: 'NGN'
-            };
+            const gwRes = successfulPayment('REF-DIFFERENT-456', 500);
 
             let threw = false;
             try {
@@ -864,27 +854,14 @@ async function runPaymentGatewayTests() {
 
         await test('30. Wrong gateway cannot verify transaction', async () => {
             walletCredits = [];
-            const tx = {
-                refId: 'WRONG-GW-TX',
-                userId: 'u-wrong',
-                status: 'pending',
-                amountKobo: 100000,
-                amount: 1000,
-                provider: 'monnify' // Monnify transaction
-            };
+            const tx = fundingRecord('WRONG-GW-TX', { userId: 'u-wrong', provider: 'monnify', service: 'Monnify' });
             mockTransactions.push(tx);
 
             let threw = false;
             try {
                 await paymentGatewayService.finalizeFundingCredit({
                     transactionStatus: tx,
-                    gatewayPaymentResult: {
-                        status: 'success',
-                        reference: 'WRONG-GW-TX',
-                        gateway: 'paystack', // Paystack trying to finalize
-                        amount: 1000,
-                        currency: 'NGN'
-                    }
+                    gatewayPaymentResult: successfulPayment('WRONG-GW-TX', 1000, 'paystack')
                 });
             } catch (e) {
                 threw = true;
@@ -897,25 +874,12 @@ async function runPaymentGatewayTests() {
 
         await test('31. Already-successful transaction is not credited again', async () => {
             walletCredits = [];
-            const tx = {
-                refId: 'ALREADY-CREDITED-TX',
-                userId: 'u-done',
-                status: 'success', // Already credited
-                amountKobo: 100000,
-                amount: 1000,
-                provider: 'paystack'
-            };
+            const tx = fundingRecord('ALREADY-CREDITED-TX', { userId: 'u-done', status: 'success' });
             mockTransactions.push(tx);
 
             const res = await paymentGatewayService.finalizeFundingCredit({
                 transactionStatus: tx,
-                gatewayPaymentResult: {
-                    status: 'success',
-                    reference: 'ALREADY-CREDITED-TX',
-                    gateway: 'paystack',
-                    amount: 1000,
-                    currency: 'NGN'
-                }
+                gatewayPaymentResult: successfulPayment('ALREADY-CREDITED-TX', 1000)
             });
 
             assert.strictEqual(res.credited, false);
@@ -924,14 +888,7 @@ async function runPaymentGatewayTests() {
 
         await test('32. Failed payment cannot credit wallet', async () => {
             walletCredits = [];
-            const tx = {
-                refId: 'FAILED-PAY-TX',
-                userId: 'u-fail',
-                status: 'pending',
-                amountKobo: 100000,
-                amount: 1000,
-                provider: 'paystack'
-            };
+            const tx = fundingRecord('FAILED-PAY-TX', { userId: 'u-fail' });
             mockTransactions.push(tx);
 
             const res = await paymentGatewayService.finalizeFundingCredit({
@@ -1064,9 +1021,9 @@ async function runPaymentGatewayTests() {
         });
 
         await test('41. Transactions remain permanently bound to their initializing gateway', async () => {
-            const tx1 = { refId: 'PERM-PS', provider: 'paystack', status: 'pending', amountKobo: 100000, amount: 1000, userId: 'u1' };
-            const tx2 = { refId: 'PERM-MNFY', provider: 'monnify', status: 'pending', amountKobo: 200000, amount: 2000, userId: 'u2' };
-            const tx3 = { refId: 'PERM-FLW', provider: 'flutterwave', status: 'pending', amountKobo: 300000, amount: 3000, userId: 'u3' };
+            const tx1 = fundingRecord('PERM-PS', { userId: 'u1' });
+            const tx2 = fundingRecord('PERM-MNFY', { userId: 'u2', provider: 'monnify', service: 'Monnify', amountKobo: 200000, amount: 2000 });
+            const tx3 = fundingRecord('PERM-FLW', { userId: 'u3', provider: 'flutterwave', service: 'Flutterwave', amountKobo: 300000, amount: 3000 });
             mockTransactions.push(tx1, tx2, tx3);
 
             assert.strictEqual(mockTransactions.find(t => t.refId === 'PERM-PS').provider, 'paystack');
@@ -1076,8 +1033,10 @@ async function runPaymentGatewayTests() {
 
         await test('42. One gateway failure does not corrupt another gateway\'s transaction', async () => {
             walletCredits = [];
-            const txPs = { refId: 'PS-SUCCESS-TX', provider: 'paystack', status: 'pending', amountKobo: 100000, amount: 1000, userId: 'u1' };
-            const txFlw = { refId: 'FLW-FAIL-TX', provider: 'flutterwave', status: 'pending', amountKobo: 200000, amount: 2000, userId: 'u2' };
+            const txPs = fundingRecord('PS-SUCCESS-TX', { userId: 'u1' });
+            const txFlw = fundingRecord('FLW-FAIL-TX', {
+                userId: 'u2', provider: 'flutterwave', service: 'Flutterwave', amountKobo: 200000, amount: 2000
+            });
             mockTransactions.push(txPs, txFlw);
 
             // Fail Flutterwave
@@ -1089,7 +1048,7 @@ async function runPaymentGatewayTests() {
             // Succeed Paystack
             await paymentGatewayService.finalizeFundingCredit({
                 transactionStatus: txPs,
-                gatewayPaymentResult: { status: 'success', reference: 'PS-SUCCESS-TX', gateway: 'paystack', amount: 1000, currency: 'NGN' }
+                gatewayPaymentResult: successfulPayment('PS-SUCCESS-TX', 1000)
             });
 
             assert.strictEqual(txFlw.status, 'failed', 'Flutterwave transaction is marked failed');
@@ -1102,52 +1061,45 @@ async function runPaymentGatewayTests() {
         // 8. NOTIFICATION NON-BLOCKING RESILIENCE TESTS
         // ─────────────────────────────────────────────────────────────────────
 
-        await test('43. Slow SMS does not delay wallet funding', async () => {
-            let smsFinished = false;
-            notificationService.sendInApp = async () => ({ _id: 'notif-fast' });
-
-            // Simulate slow SMS in background
-            const origSendSMS = notificationService.sendSMS;
-            notificationService.sendSMS = async () => {
+        await test('43. Slow funding notification does not delay wallet funding', async () => {
+            const currentSendFundingSuccess = notificationService.sendFundingSuccess;
+            notificationService.sendFundingSuccess = async () => {
                 await new Promise(r => setTimeout(r, 2000));
-                smsFinished = true;
             };
 
-            const tx = { refId: 'SLOW-SMS-TX', provider: 'paystack', status: 'pending', amountKobo: 100000, amount: 1000, userId: 'u-sms' };
+            const tx = fundingRecord('SLOW-SMS-TX', { userId: 'u-sms' });
             mockTransactions.push(tx);
 
             const start = Date.now();
             await paymentGatewayService.finalizeFundingCredit({
                 transactionStatus: tx,
-                gatewayPaymentResult: { status: 'success', reference: 'SLOW-SMS-TX', gateway: 'paystack', amount: 1000, currency: 'NGN' }
+                gatewayPaymentResult: successfulPayment('SLOW-SMS-TX', 1000)
             });
             const duration = Date.now() - start;
 
-            notificationService.sendSMS = origSendSMS;
+            notificationService.sendFundingSuccess = currentSendFundingSuccess;
 
             assert.ok(duration < 200, `Wallet funding response took ${duration}ms, must be <200ms`);
             assert.strictEqual(tx.status, 'success');
         });
 
-        await test('44. Slow email does not delay wallet funding', async () => {
-            let emailFinished = false;
-            const origSendEmail = notificationService.sendEmail;
-            notificationService.sendEmail = async () => {
+        await test('44. A second slow funding notification remains non-blocking', async () => {
+            const currentSendFundingSuccess = notificationService.sendFundingSuccess;
+            notificationService.sendFundingSuccess = async () => {
                 await new Promise(r => setTimeout(r, 2000));
-                emailFinished = true;
             };
 
-            const tx = { refId: 'SLOW-EMAIL-TX', provider: 'paystack', status: 'pending', amountKobo: 100000, amount: 1000, userId: 'u-email' };
+            const tx = fundingRecord('SLOW-EMAIL-TX', { userId: 'u-email' });
             mockTransactions.push(tx);
 
             const start = Date.now();
             await paymentGatewayService.finalizeFundingCredit({
                 transactionStatus: tx,
-                gatewayPaymentResult: { status: 'success', reference: 'SLOW-EMAIL-TX', gateway: 'paystack', amount: 1000, currency: 'NGN' }
+                gatewayPaymentResult: successfulPayment('SLOW-EMAIL-TX', 1000)
             });
             const duration = Date.now() - start;
 
-            notificationService.sendEmail = origSendEmail;
+            notificationService.sendFundingSuccess = currentSendFundingSuccess;
 
             assert.ok(duration < 200, `Wallet funding response took ${duration}ms, must be <200ms`);
             assert.strictEqual(tx.status, 'success');
@@ -1155,17 +1107,17 @@ async function runPaymentGatewayTests() {
 
         await test('45. Notification failure does not change successful payment status', async () => {
             walletCredits = [];
-            notificationService.sendInApp = async () => {
+            notificationService.sendFundingSuccess = async () => {
                 throw new Error('Push service 503 unavailable');
             };
 
-            const tx = { refId: 'NOTIF-FAIL-TX', provider: 'paystack', status: 'pending', amountKobo: 300000, amount: 3000, userId: 'u-notif-fail' };
+            const tx = fundingRecord('NOTIF-FAIL-TX', { userId: 'u-notif-fail', amountKobo: 300000, amount: 3000 });
             mockTransactions.push(tx);
 
             // Should complete successfully without throwing
             const res = await paymentGatewayService.finalizeFundingCredit({
                 transactionStatus: tx,
-                gatewayPaymentResult: { status: 'success', reference: 'NOTIF-FAIL-TX', gateway: 'paystack', amount: 3000, currency: 'NGN' }
+                gatewayPaymentResult: successfulPayment('NOTIF-FAIL-TX', 3000)
             });
 
             assert.strictEqual(res.success, true);
@@ -1264,14 +1216,19 @@ async function runPaymentGatewayTests() {
         PaymentGateway.findOne = origFindOne;
         PaymentGateway.countDocuments = origCountDocuments;
         PaymentGateway.updateMany = origUpdateMany;
+        mongoose.startSession = origStartSession;
         TransactionStatus.findOne = origTxFindOne;
         TransactionStatus.create = origTxCreate;
         TransactionStatus.updateOne = origTxUpdateOne;
         WebhookEvent.findOne = origWhFindOne;
+        WebhookEvent.findOneAndUpdate = origWhFindOneAndUpdate;
         WebhookEvent.create = origWhCreate;
+        WalletLedger.findOne = origLedgerFindOne;
+        Transaction.findOne = origTxModelFindOne;
         Transaction.create = origTxModelCreate;
         walletService.credit = origWalletCredit;
         notificationService.sendInApp = origNotifySendInApp;
+        notificationService.sendFundingSuccess = origNotifyFundingSuccess;
     }
 
     console.log('\n----------------------------------------------------');

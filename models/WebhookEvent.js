@@ -11,6 +11,7 @@ const webhookEventSchema = new mongoose.Schema({
     attemptCount: { type: Number, default: 1 },
     lastAttemptAt: { type: Date, default: Date.now },
     processingExpiresAt: { type: Date, default: null },
+    processingToken: { type: String },
     linkedTransactionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Transaction' },
     errorMessage: { type: String }
 }, { timestamps: true });
