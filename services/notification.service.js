@@ -12,6 +12,7 @@ const {
     safeTransactionReference,
 } = require('../utils/notificationFormatter');
 const https = require('https');
+const { maskSecret, sanitizeText } = require('../utils/logSanitizer');
 
 class NotificationService {
     /**
@@ -19,7 +20,7 @@ class NotificationService {
      */
     async sendPush(pushToken, { title, body, data = {}, priority = 'default' }) {
         if (!pushToken || !pushToken.startsWith('ExponentPushToken')) {
-            console.warn(`[Push] Invalid or missing token: ${pushToken}`);
+            console.warn(`[Push] Invalid or missing token: ${maskSecret(pushToken)}`);
             return;
         }
 
@@ -32,7 +33,7 @@ class NotificationService {
             priority,
         });
 
-        console.log(`[Push] Attempting send to ${pushToken} (Title: ${title})`);
+        console.log(`[Push] Attempting send to ${maskSecret(pushToken)} (Title: ${title})`);
 
         return new Promise((resolve) => {
             const req = https.request({
@@ -51,13 +52,13 @@ class NotificationService {
                     try {
                         const response = JSON.parse(chunks);
                         if (response.errors) {
-                            console.error(`[Push Error] Expo API returned errors:`, JSON.stringify(response.errors));
+                            console.error('[Push Error] Expo API returned errors:', sanitizeText(JSON.stringify(response.errors), [pushToken]));
                         } else {
-                            console.log(`[Push Success] Expo Response:`, JSON.stringify(response.data));
+                            console.log('[Push Success] Expo Response:', sanitizeText(JSON.stringify(response.data), [pushToken]));
                         }
                         resolve(response);
                     } catch (e) {
-                        console.log(`[Push] Raw Response: ${chunks}`);
+                        console.log(`[Push] Raw Response: ${sanitizeText(chunks, [pushToken])}`);
                         resolve(chunks);
                     }
                 });
@@ -130,13 +131,8 @@ class NotificationService {
      */
     async sendInApp(userId, { title, message, type, metadata }, eventKey = null) {
         try {
-            // PROMINENT LOG FOR DEVELOPMENT (Handy for OTPs when SMS/Push is restricted)
             if (type === 'security') {
-                console.log('-------------------------------------------');
-                console.log(`[SECURITY NOTIFICATION] User: ${userId}`);
-                console.log(`[TITLE]: ${title}`);
-                console.log(`[MESSAGE]: ${message}`);
-                console.log('-------------------------------------------');
+                console.log(`[SECURITY NOTIFICATION] User: ${userId}, Title: ${title}, Message: [REDACTED]`);
             }
 
             const notification = await this._createEventDeduped({

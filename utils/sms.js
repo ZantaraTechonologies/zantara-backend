@@ -56,13 +56,15 @@ const sendSMS = async (phone, message, activityType = null) => {
 
     } catch (error) {
         const errorData = error.response?.data || error.message;
+        const errorCode = error.response?.status || error.response?.data?.code || error.code || 'unknown';
         
         if (errorData.code === 404 && errorData.message?.includes('ApplicationSenderId')) {
             console.error('[SMS Error] YOUR SENDER ID IS NOT APPROVED YET.');
-            console.error(`[SMS Error] Termii says: "${errorData.message}"`);
             console.error('[SMS Error] ACTION: Register "Zantara" in your Termii dashboard or use "Termii" in your .env for testing.');
         } else {
-            console.error('[SMS Error] Termii:', errorData);
+            // Provider error bodies can echo request content. Never log them
+            // because SMS bodies may contain OTPs or other authentication data.
+            console.error(`[SMS Error] Termii request failed (code: ${errorCode}, activity: ${activityType || 'general'}).`);
         }
         
         return { success: false, error: errorData };
@@ -70,5 +72,4 @@ const sendSMS = async (phone, message, activityType = null) => {
 };
 
 module.exports = { sendSMS };
-
 

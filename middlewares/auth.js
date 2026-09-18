@@ -1,56 +1,61 @@
-const jwt = require('jsonwebtoken')
 const User = require('../models/User')
+const { verifyAccessToken } = require('../utils/authTokens')
 
-const verifyJWT = async (req, res, next) => {
-    let token = req.cookies?.token
-    
-    // Support Authorization header (Bearer <token>)
-    if (!token && req.headers.authorization) {
-        if (req.headers.authorization.startsWith('Bearer ')) {
-            token = req.headers.authorization.split(' ')[1];
-        } else {
-            token = req.headers.authorization;
-        }
+const tokenVersion = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
+
+const requestToken = req => {
+    if (req.cookies?.token) return req.cookies.token;
+    const authorization = req.headers?.authorization;
+    if (!authorization) return null;
+    return authorization.startsWith('Bearer ') ? authorization.slice(7) : authorization;
+};
+
+const loadAccessIdentity = async decoded => {
+    const user = await User.findById(decoded.id).select('status role roles name phone perms authVersion');
+    if (!user) return { reason: 'missing' };
+    if (!user.status) return { reason: 'inactive' };
+    if (tokenVersion(decoded.authVersion) !== tokenVersion(user.authVersion)) {
+        return { reason: 'revoked' };
     }
 
-    if (!token) return res.status(401).json({ message: 'Not authenticated' })
-
-    try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET)
-
-        // Enforce account status (CRIT 2): a disabled or deleted user must not
-        // be able to use any previously-issued token.
-        const user = await User.findById(decoded.id).select('status role roles name phone perms');
-        if (!user) {
-            return res.status(401).json({ message: 'Account no longer exists' });
-        }
-        if (!user.status) {
-            return res.status(403).json({ message: 'Account is disabled' });
-        }
-
-        // SECURITY INVARIANT: once the current User document is loaded,
-        // authorization fields come EXCLUSIVELY from the live DB state.
-        // JWT establishes identity; DB establishes current authorization.
-        // Never restore role/roles/perms from a stale JWT after DB lookup.
-        const hydratedRoles = Array.isArray(user.roles)
-            ? user.roles
-            : (Array.isArray(user.role) ? user.role : []);
-        const hydratedPerms = Array.isArray(user.perms) && user.perms.length > 0
-            ? user.perms
-            : [];
-
-        req.user = {
+    const roles = Array.isArray(user.roles)
+        ? user.roles
+        : (Array.isArray(user.role) ? user.role : []);
+    const perms = Array.isArray(user.perms) && user.perms.length > 0 ? user.perms : [];
+    return {
+        identity: {
             ...decoded,
             role: user.role || null,
-            roles: hydratedRoles,
-            perms: hydratedPerms,
+            roles,
+            perms,
             status: user.status,
             ...(user.name ? { name: user.name } : {}),
             ...(user.phone ? { phone: user.phone } : {})
         }
+    };
+};
+
+const verifyJWT = async (req, res, next) => {
+    const token = requestToken(req)
+
+    if (!token) return res.status(401).json({ message: 'Not authenticated' })
+
+    try {
+        const decoded = verifyAccessToken(token)
+        const resolved = await loadAccessIdentity(decoded);
+        if (resolved.reason === 'missing') {
+            return res.status(401).json({ message: 'Account no longer exists' });
+        }
+        if (resolved.reason === 'inactive') {
+            return res.status(403).json({ message: 'Account is disabled' });
+        }
+        if (resolved.reason === 'revoked') {
+            return res.status(401).json({ message: 'Session has been revoked' });
+        }
+        req.user = resolved.identity;
         next()
     } catch (err) {
-        if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
+        if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError' || err.code === 'TOKEN_PURPOSE_MISMATCH') {
             return res.status(403).json({ message: 'Invalid or expired token' })
         }
         return res.status(500).json({ message: 'Internal server error' })
@@ -71,23 +76,17 @@ const checkRoles = (...allowed) => (req, res, next) => {
 // requirements). Populates req.user when a valid token is present; anonymous
 // and expired/invalid-token callers fall through as anonymous. It never
 // rejects and never returns 401/403.
-const verifyJWTOptional = (req, res, next) => {
-    let token = req.cookies?.token;
-
-    if (!token && req.headers.authorization) {
-        if (req.headers.authorization.startsWith('Bearer ')) {
-            token = req.headers.authorization.split(' ')[1];
-        } else {
-            token = req.headers.authorization;
-        }
-    }
+const verifyJWTOptional = async (req, res, next) => {
+    const token = requestToken(req);
 
     if (!token) return next();
 
     try {
-        req.user = jwt.verify(token, process.env.JWT_SECRET);
+        const decoded = verifyAccessToken(token);
+        const resolved = await loadAccessIdentity(decoded);
+        if (resolved.identity) req.user = resolved.identity;
     } catch (_) {
-        // Invalid/expired token -> treat as anonymous (legal reads never blocked).
+        // Invalid, revoked, inactive, and deleted identities are anonymous here.
     }
     next();
 };

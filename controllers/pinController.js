@@ -1,6 +1,7 @@
 const pinService = require('../services/pin.service');
 const { sendResponse } = require('../utils/response');
 const notificationService = require('../services/notification.service');
+const ActivityLog = require('../models/ActivityLog');
 
 const setPin = async (req, res) => {
     try {
@@ -12,6 +13,13 @@ const setPin = async (req, res) => {
         }
 
         const result = await pinService.setPin(userId, pin);
+
+        ActivityLog.create({
+            userId,
+            action: 'SET_TRANSACTION_PIN',
+            ipAddress: req.ip,
+            device: req.headers['user-agent']
+        }).catch(error => console.error('[Security Audit] SET_TRANSACTION_PIN log failed:', error.message));
  
         // Notify User
         await notificationService.sendInApp(userId, {
@@ -22,7 +30,7 @@ const setPin = async (req, res) => {
  
         return sendResponse(res, { message: result.message });
     } catch (err) {
-        return sendResponse(res, { status: 500, success: false, message: err.message });
+        return sendResponse(res, { status: err.statusCode || 400, success: false, message: err.message });
     }
 };
 
@@ -36,6 +44,13 @@ const changePin = async (req, res) => {
         }
 
         const result = await pinService.changePin(userId, oldPin, newPin);
+
+        ActivityLog.create({
+            userId,
+            action: 'CHANGE_TRANSACTION_PIN',
+            ipAddress: req.ip,
+            device: req.headers['user-agent']
+        }).catch(error => console.error('[Security Audit] CHANGE_TRANSACTION_PIN log failed:', error.message));
  
         // Notify User
         await notificationService.sendInApp(userId, {
@@ -46,7 +61,7 @@ const changePin = async (req, res) => {
  
         return sendResponse(res, { message: result.message });
     } catch (err) {
-        return sendResponse(res, { status: 500, success: false, message: err.message });
+        return sendResponse(res, { status: err.statusCode || 400, success: false, message: err.message });
     }
 };
 

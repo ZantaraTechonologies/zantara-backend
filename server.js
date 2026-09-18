@@ -2,6 +2,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const morgan = require('morgan');
+const { sanitizeUrl } = require('./utils/logSanitizer');
 const cors = require('cors');
 require('dotenv').config();
 
@@ -52,6 +53,10 @@ app.post('/webhooks/flutterwave', flutterwaveWebhook);
 
 // Logging, caching headers, etc.
 const isProduction = process.env.NODE_ENV === 'production';
+morgan.token('url', req => {
+    const url = req.originalUrl || req.url || '';
+    return sanitizeUrl(url);
+});
 app.use(morgan(isProduction ? 'combined' : 'dev'));
 
 // ---- MAINTENANCE MODE MIDDLEWARE ----

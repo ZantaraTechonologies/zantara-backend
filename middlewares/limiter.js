@@ -24,10 +24,37 @@ const kycLimiter = rateLimit({
     legacyHeaders: false
 })
 
+const resetRequestLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    message: 'Too many password reset requests. Please try again later.',
+    standardHeaders: true,
+    legacyHeaders: false
+})
+
+const resetVerifyLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    message: 'Too many password reset verification attempts. Please try again later.',
+    standardHeaders: true,
+    legacyHeaders: false
+})
+
+const resetCompleteLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    message: 'Too many password reset attempts. Please try again later.',
+    standardHeaders: true,
+    legacyHeaders: false
+})
+
 module.exports = {
     loginLimiter,
     pinLimiter,
-    kycLimiter
+    kycLimiter,
+    resetRequestLimiter,
+    resetVerifyLimiter,
+    resetCompleteLimiter
 }
 // const rateLimit = require("express-rate-limit");
 

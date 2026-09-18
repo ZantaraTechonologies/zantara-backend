@@ -9,6 +9,7 @@ const userSchema = new mongoose.Schema({
     phone: { type: String, unique: true, required: true }, // Primary identifier
     password: { type: String, select: false },
     passwordHistory: { type: [String], select: false }, // Store last 5 hashed passwords
+    authVersion: { type: Number, default: 0, min: 0 },
     roles: {
         type: [String],
         enum: ALLOWED_ROLES,
@@ -39,6 +40,14 @@ const userSchema = new mongoose.Schema({
     kycLevel: { type: Number, default: 1 }, // Tier 1, 2, 3
     otp: { type: String, select: false },
     otpExpires: Date,
+    passwordResetChallengeId: { type: String, select: false },
+    passwordResetOtpDigest: { type: String, select: false },
+    passwordResetExpiresAt: { type: Date, select: false },
+    passwordResetAttempts: { type: Number, select: false, min: 0 },
+    passwordResetRequestedAt: { type: Date, select: false },
+    passwordResetConsumedAt: { type: Date, select: false },
+    passwordResetTokenDigest: { type: String, select: false },
+    passwordResetTokenExpiresAt: { type: Date, select: false },
     isPhoneVerified: { type: Boolean, default: false },
     isEmailVerified: { type: Boolean, default: false },
     emailOtp: { type: String, select: false },

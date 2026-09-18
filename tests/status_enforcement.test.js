@@ -25,6 +25,7 @@ const jwt = require('jsonwebtoken');
 
 const User = require('../models/User');
 const { verifyJWT } = require('../middlewares/auth');
+const { generateAccessToken } = require('../utils/authTokens');
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'status-enforcement-test-secret';
 
@@ -73,7 +74,12 @@ async function runStatusEnforcementTests() {
 
     resetMocks();
 
-    const signToken = (id, role) => jwt.sign({ id, role, roles: [role] }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    const signToken = (id, role) => generateAccessToken({
+        _id: id,
+        role,
+        roles: [role],
+        authVersion: 0
+    }, '1h');
     const cookies = (token) => ({ token });
 
     // ─── SECTION A: verifyJWT must enforce user.status from the DB ──

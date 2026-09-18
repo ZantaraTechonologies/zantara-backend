@@ -9,12 +9,13 @@
  */
 const assert = require('assert');
 const mongoose = require('mongoose');
-const jwt = require('jsonwebtoken');
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-legal-jwt-secret';
 
 const LegalDocument = require('../models/LegalDocument');
 const LegalAcceptance = require('../models/LegalAcceptance');
+const User = require('../models/User');
+const { generateAccessToken } = require('../utils/authTokens');
 const { computeHash } = require('../utils/legalHtml');
 const legalService = require('../services/legalDocument.service');
 const legalController = require('../controllers/legalDocumentController');
@@ -591,23 +592,33 @@ function test(name, fn) {
 
     resetStore();
     await publishBaseline();
-    const signedToken = jwt.sign({ id: 'U_OPT', email: 'u@x.com', roles: ['user'] }, process.env.JWT_SECRET);
+    const signedToken = generateAccessToken({
+        _id: 'U_OPT',
+        email: 'u@x.com',
+        role: 'user',
+        roles: ['user'],
+        authVersion: 0
+    });
 
     // ------------------------------------------------------------
     // H. Optional auth for requirements — per-user vs anonymous
     // ------------------------------------------------------------
     console.log('\n--- H. verifyJWTOptional + per-user requirements ---');
     {
+        const originalFindById = User.findById;
+        User.findById = () => ({
+            select: async () => ({ _id: 'U_OPT', status: true, role: 'user', roles: ['user'], authVersion: 0 })
+        });
         const userReq = { headers: { authorization: `Bearer ${signedToken}` } };
         const userNext = () => { userReq.__next = true; };
-        verifyJWTOptional(userReq, makeRes(), userNext);
+        await verifyJWTOptional(userReq, makeRes(), userNext);
         test('H1. valid token -> req.user.id matches payload id', () => {
             assert.strictEqual(userReq.user.id, 'U_OPT');
             assert.ok(userReq.__next);
         });
 
         const anonReq = { headers: {} };
-        verifyJWTOptional(anonReq, makeRes(), () => {});
+        await verifyJWTOptional(anonReq, makeRes(), () => {});
         test('H2. no token -> anonymous, next() still called (never blocked)', () => {
             assert.strictEqual(anonReq.user, undefined);
         });
@@ -615,12 +626,13 @@ function test(name, fn) {
         const badReq = { headers: { authorization: 'Bearer not.a.jwt' } };
         const badRes = makeRes();
         let badNext = false;
-        verifyJWTOptional(badReq, badRes, () => { badNext = true; });
+        await verifyJWTOptional(badReq, badRes, () => { badNext = true; });
         test('H3. invalid token -> anonymous fallback, no error response', () => {
             assert.strictEqual(badReq.user, undefined);
             assert.strictEqual(badRes.statusCode, null);
             assert.strictEqual(badNext, true);
         });
+        User.findById = originalFindById;
 
         // Controller-level per-user state: authenticated -> cleared after acceptance;
         // anonymous -> always shows the full signup-required set.

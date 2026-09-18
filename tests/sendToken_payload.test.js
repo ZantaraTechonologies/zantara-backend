@@ -49,7 +49,16 @@ const SENSITIVE_FIELDS = [
     'otp',
     'otpExpires',
     'emailOtp',
-    'emailOtpExpires'
+    'emailOtpExpires',
+    'authVersion',
+    'passwordResetChallengeId',
+    'passwordResetOtpDigest',
+    'passwordResetExpiresAt',
+    'passwordResetAttempts',
+    'passwordResetRequestedAt',
+    'passwordResetConsumedAt',
+    'passwordResetTokenDigest',
+    'passwordResetTokenExpiresAt'
 ];
 
 function assertPayloadSafe(payload) {
@@ -146,7 +155,16 @@ console.log('====================================================\n');
         otp: '123456',
         otpExpires: new Date(),
         emailOtp: '654321',
-        emailOtpExpires: new Date()
+        emailOtpExpires: new Date(),
+        authVersion: 7,
+        passwordResetChallengeId: 'challenge-id',
+        passwordResetOtpDigest: 'otp-digest',
+        passwordResetExpiresAt: new Date(),
+        passwordResetAttempts: 3,
+        passwordResetRequestedAt: new Date(),
+        passwordResetConsumedAt: new Date(),
+        passwordResetTokenDigest: 'token-digest',
+        passwordResetTokenExpiresAt: new Date()
     }, res);
 
     test('G. password/passwordHistory/transactionPin/pinHistory/otp/emailOtp all stripped', () => {

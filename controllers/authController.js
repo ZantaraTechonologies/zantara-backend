@@ -3,8 +3,9 @@ const Wallet = require('../models/Wallet')
 const mongoose = require('mongoose')
 const bcrypt = require('bcryptjs')
 const crypto = require('crypto')
-const jwt = require('jsonwebtoken')
-const { generateToken, sendToken, cookieOpts, clearAuthCookie } = require('../utils/authUtils')
+const { sendToken, clearAuthCookie } = require('../utils/authUtils')
+const { TOKEN_PURPOSES, authVersionFilter, verifyPurposeToken } = require('../utils/authTokens')
+const passwordResetService = require('../services/passwordReset.service')
 const { sendEmail } = require('../utils/mailer')
 const { sendSMS } = require('../utils/sms')
 const notificationService = require('../services/notification.service')
@@ -12,6 +13,20 @@ const ActivityLog = require('../models/ActivityLog')
 const { createReservedAccount } = require('../utils/monnify')
 const LegalAcceptance = require('../models/LegalAcceptance')
 const legalService = require('../services/legalDocument.service')
+const { maskSecret } = require('../utils/logSanitizer')
+
+const PASSWORD_RESET_RESPONSE = Object.freeze({
+    success: true,
+    message: 'If an account matches those details, password reset instructions will be sent.'
+});
+
+const logSecurityEvent = async event => {
+    try {
+        await ActivityLog.create(event);
+    } catch (error) {
+        console.error(`[Security Audit] ${event.action} log failed:`, error.message);
+    }
+};
 
 const register = async (req, res) => {
     let { name, email, phone, password, referrerCode, referralCode } = req.body
@@ -183,9 +198,20 @@ const register = async (req, res) => {
 
 const verifyEmail = async (req, res) => {
     try {
-        const decoded = jwt.verify(req.params.token, process.env.JWT_SECRET)
-        console.log(decoded)
-        await User.findByIdAndUpdate(decoded.id, { status: true })
+        const decoded = verifyPurposeToken(req.params.token, TOKEN_PURPOSES.EMAIL_VERIFICATION);
+        const user = await User.findOneAndUpdate(
+            { _id: decoded.sub, email: decoded.email, status: true },
+            { $set: { isEmailVerified: true } },
+            { new: true }
+        );
+        if (!user) return res.status(400).json({ message: 'Invalid or expired verification link' });
+
+        await logSecurityEvent({
+            userId: user._id,
+            action: 'VERIFY_EMAIL',
+            ipAddress: req.ip,
+            device: req.headers['user-agent']
+        });
         res.json({ message: 'Email verified successfully' })
     } catch (err) {
         res.status(400).json({ message: 'Invalid or expired verification link' })
@@ -323,20 +349,18 @@ const updateUser = async (req, res) => {
 }
 
 const forgotPassword = async (req, res) => {
+    const genericResetResponse = PASSWORD_RESET_RESPONSE;
     try {
         const { phone } = req.body;
         if (!phone) return res.status(400).json({ message: 'Phone number is required' });
 
-        const user = await User.findOne({ phone });
-        if (!user) return res.status(404).json({ message: 'User with this phone number not found' });
+        const challenge = await passwordResetService.issueResetChallenge(phone);
+        if (!challenge) return res.json(genericResetResponse);
 
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-
-        await User.findByIdAndUpdate(user._id, { otp, otpExpires });
-
-        await sendSMS(user.phone, `Your Zantara password reset code is: ${otp}. Valid for 10 minutes.`, 'password_reset');
-
+        const { user, otp } = challenge;
+        const deliveries = [
+            sendSMS(user.phone, `Your Zantara password reset code is: ${otp}. Valid for 10 minutes.`, 'password_reset')
+        ];
         if (user.email) {
             const html = `
                 <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
@@ -349,19 +373,25 @@ const forgotPassword = async (req, res) => {
                     <p>Regards,<br>The Zantara Team</p>
                 </div>
             `;
-            await sendEmail(user.email, 'Your Zantara Password Reset Code', html, 'password_reset');
+            deliveries.push(sendEmail(user.email, 'Your Zantara Password Reset Code', html, 'password_reset'));
         }
 
-        // Also send as in-app notification (security fallback)
-        await notificationService.sendInApp(user._id, {
-            title: 'Password Reset OTP',
-            message: `Your password reset code is: ${otp}. Valid for 10 minutes.`,
-            type: 'security'
+        Promise.allSettled(deliveries).then(deliveryResults => {
+            if (deliveryResults.some(result => result.status === 'rejected' ||
+                result.value === null || result.value?.success === false)) {
+                console.error('[Password Reset] One or more delivery channels failed');
+            }
         });
-
-        res.json({ success: true, message: 'OTP sent successfully' });
+        logSecurityEvent({
+            userId: user._id,
+            action: 'PASSWORD_RESET_REQUESTED',
+            ipAddress: req.ip,
+            device: req.headers['user-agent']
+        });
+        res.json(genericResetResponse);
     } catch (error) {
-        res.status(500).json({ message: 'Error initiating password reset', error: error.message });
+        console.error('[Password Reset] Request processing failed');
+        res.json(genericResetResponse);
     }
 }
 
@@ -370,66 +400,36 @@ const verifyResetOTP = async (req, res) => {
         const { phone, otp } = req.body;
         if (!phone || !otp) return res.status(400).json({ message: 'Phone and OTP are required' });
 
-        const user = await User.findOne({ phone }).select('+otp +otpExpires');
-        if (!user) return res.status(404).json({ message: 'User not found' });
-
-        if (user.otp !== otp || user.otpExpires < Date.now()) {
-            return res.status(400).json({ message: 'Invalid or expired OTP' });
-        }
-
-        // Clear OTP and return a reset token
-        await User.findByIdAndUpdate(user._id, { otp: null, otpExpires: null });
-        
-        const token = generateToken(user, '15m');
-        res.json({ success: true, token, message: 'OTP verified' });
+        const { resetToken } = await passwordResetService.verifyResetChallenge(phone, otp);
+        res.json({ success: true, token: resetToken, message: 'Reset code verified' });
     } catch (error) {
-        res.status(500).json({ message: 'Error verifying OTP', error: error.message });
+        res.status(error.statusCode || 400).json({ message: 'Invalid or expired reset code' });
     }
 }
 
 const resetPassword = async (req, res) => {
     try {
         const { password } = req.body;
-        const decoded = jwt.verify(req.params.token, process.env.JWT_SECRET);
-        
-        const user = await User.findById(decoded.id).select('+password +passwordHistory');
-        if (!user) return res.status(404).json({ message: 'User not found' });
-
-        // Check against current and history
-        if (user.password) {
-            const isMatch = await bcrypt.compare(password, user.password);
-            if (isMatch) return res.status(400).json({ message: "New password cannot be your current password." });
-        }
-
-        if (user.passwordHistory) {
-            for (const oldHash of user.passwordHistory) {
-                const isMatch = await bcrypt.compare(password, oldHash);
-                if (isMatch) return res.status(400).json({ message: "You cannot reuse any of your last 5 passwords." });
-            }
-        }
-
-        // Update history
-        let newHistory = user.passwordHistory || [];
-        if (user.password) {
-            newHistory.unshift(user.password);
-            if (newHistory.length > 5) newHistory = newHistory.slice(0, 5);
-        }
-
-        const hashed = await bcrypt.hash(password, 12);
-        user.password = hashed;
-        user.passwordHistory = newHistory;
-        await user.save();
-
-        res.json({ success: true, message: 'Password reset successful' });
- 
-        // Notify User
+        const user = await passwordResetService.completePasswordReset(req.params.token, password);
+        await logSecurityEvent({
+            userId: user._id,
+            action: 'PASSWORD_RESET_COMPLETED',
+            ipAddress: req.ip,
+            device: req.headers['user-agent']
+        });
         await notificationService.sendInApp(user._id, {
             title: 'Password Restored',
             message: 'Your Zantara account password has been successfully reset.',
             type: 'security'
+        }).catch(error => console.error('[Password Reset] Notification failed:', error.message));
+
+        res.json({
+            success: true,
+            message: 'Password reset successful. Please sign in with your new password.',
+            reauthenticationRequired: true
         });
     } catch (err) {
-        res.status(400).json({ message: 'Invalid or expired reset session' });
+        res.status(err.statusCode || 400).json({ message: err.message || 'Invalid or expired reset authorization' });
     }
 }
 
@@ -485,16 +485,25 @@ const sendOTP = async (req, res) => {
 
 const changePassword = async (req, res) => {
     try {
-        const { newPassword } = req.body;
+        const { newPassword, oldPassword } = req.body;
+        const currentPassword = req.body.currentPassword || oldPassword;
         const userId = req.user.id;
 
+        if (!currentPassword) {
+            return res.status(400).json({ message: "Current password is required." });
+        }
         if (!newPassword) {
             return res.status(400).json({ message: "New password is required." });
         }
 
         // Fetch user with password and history
-        const user = await User.findById(userId).select('+password +passwordHistory');
+        const user = await User.findById(userId).select('+password +passwordHistory authVersion');
         if (!user) return res.status(404).json({ message: "User not found." });
+
+        const currentPasswordMatches = await bcrypt.compare(currentPassword, user.password);
+        if (!currentPasswordMatches) {
+            return res.status(400).json({ message: "Current password is incorrect." });
+        }
 
         // Check if new password matches current password
         if (user.password) {
@@ -524,9 +533,23 @@ const changePassword = async (req, res) => {
         }
 
         const hashed = await bcrypt.hash(newPassword, 12);
-        user.password = hashed;
-        user.passwordHistory = newHistory;
-        await user.save();
+        const currentAuthVersion = Number.isSafeInteger(user.authVersion) ? user.authVersion : 0;
+        const updated = await User.findOneAndUpdate(
+            {
+                _id: userId,
+                status: true,
+                password: user.password,
+                ...authVersionFilter(currentAuthVersion)
+            },
+            {
+                $set: { password: hashed, passwordHistory: newHistory },
+                $inc: { authVersion: 1 }
+            },
+            { new: true }
+        );
+        if (!updated) {
+            return res.status(409).json({ message: 'Password changed concurrently. Please sign in and try again.' });
+        }
 
         await ActivityLog.create({ 
             userId, 
@@ -535,7 +558,11 @@ const changePassword = async (req, res) => {
             device: req.headers['user-agent'] 
         });
 
-        res.json({ success: true, message: "Password updated successfully." });
+        res.json({
+            success: true,
+            message: "Password updated successfully. Please sign in again.",
+            reauthenticationRequired: true
+        });
  
         // Notify User
         await notificationService.sendInApp(userId, {
@@ -553,19 +580,20 @@ const verifyOTP = async (req, res) => {
         const { otp } = req.body;
         if (!otp) return res.status(400).json({ message: 'OTP is required' });
 
-        const user = await User.findById(req.user.id).select('+otp');
-        if (!user) return res.status(404).json({ message: 'User not found' });
-
-        if (user.otp !== otp || user.otpExpires < Date.now()) {
-            return res.status(400).json({ message: 'Invalid or expired OTP' });
-        }
-
-        await User.findByIdAndUpdate(user._id, {
-            isPhoneVerified: true,
-            otp: null,
-            otpExpires: null,
-            status: true // Auto-verify account status on phone success
-        });
+        const user = await User.findOneAndUpdate(
+            {
+                _id: req.user.id,
+                status: true,
+                otp: String(otp),
+                otpExpires: { $gt: new Date() }
+            },
+            {
+                $set: { isPhoneVerified: true },
+                $unset: { otp: 1, otpExpires: 1 }
+            },
+            { new: true }
+        );
+        if (!user) return res.status(400).json({ message: 'Invalid or expired OTP' });
 
         res.json({ success: true, message: 'Phone verified successfully' });
     } catch (error) {
@@ -667,7 +695,7 @@ const getReferralStats = async (req, res) => {
 const savePushToken = async (req, res) => {
     try {
         const { pushToken } = req.body;
-        console.log(`[Push Token Registration] User: ${req.user.id}, Token: ${pushToken}`);
+        console.log(`[Push Token Registration] User: ${req.user.id}, Token: ${maskSecret(pushToken)}`);
         
         if (!pushToken) {
             return res.status(400).json({ success: false, message: 'Push token is required' });

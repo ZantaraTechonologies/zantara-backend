@@ -1,22 +1,8 @@
 // utils/authUtils.js
-const jwt = require('jsonwebtoken');
+const { generateAccessToken } = require('./authTokens');
 
 const generateToken = (user, expiresIn = '7d') => {
-    // Collect roles from both legacy string and new array
-    const userRoleString = user.role ? [user.role] : [];
-    const userRolesArray = Array.isArray(user.roles) ? user.roles : [];
-    let roles = [...new Set([...userRoleString, ...userRolesArray])]; // Combine & remove duplicates
-    
-    if (roles.length === 0) roles = ['user'];
-
-    // OPTIONAL: pull perms from user if you add later
-    const perms = user.perms ?? undefined;
-
-    return jwt.sign(
-        { id: String(user._id), email: user.email, roles, ...(perms ? { perms } : {}) },
-        process.env.JWT_SECRET,
-        { expiresIn }
-    );
+    return generateAccessToken(user, expiresIn);
 };
 
 const cookieOpts = () => {

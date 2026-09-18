@@ -20,7 +20,7 @@ const {
 } = require('../controllers/authController')
 const { setPin, changePin, verifyPin } = require('../controllers/pinController')
 const { verifyJWT } = require('../middlewares/auth')
-const { loginLimiter, pinLimiter } = require('../middlewares/limiter')
+const { loginLimiter, pinLimiter, resetRequestLimiter, resetVerifyLimiter, resetCompleteLimiter } = require('../middlewares/limiter')
 const multer = require('multer')
 
 const upload = multer() // Multer for form-data without files
@@ -33,10 +33,12 @@ router.put('/update-profile', verifyJWT, (req, res) => {
     updateUser(req, res);
 });
 router.put('/users/:id', verifyJWT, updateUser)
+// Legacy link endpoint remains fail-closed. The active in-repo verification
+// workflow uses /email/send-otp and /email/verify-otp; no link issuer exists.
 router.get('/verify-email/:token', verifyEmail)
-router.post('/forgot-password', forgotPassword)
-router.post('/verify-reset-otp', verifyResetOTP)
-router.put('/reset-password/:token', resetPassword)
+router.post('/forgot-password', resetRequestLimiter, forgotPassword)
+router.post('/verify-reset-otp', resetVerifyLimiter, verifyResetOTP)
+router.put('/reset-password/:token', resetCompleteLimiter, resetPassword)
 router.post('/change-password', verifyJWT, changePassword)
 router.post('/logout', logout)
 router.post('/set-pin', verifyJWT, pinLimiter, setPin)
