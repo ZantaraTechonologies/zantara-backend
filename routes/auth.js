@@ -23,9 +23,30 @@ const { verifyJWT } = require('../middlewares/auth')
 const { loginLimiter, pinLimiter, resetRequestLimiter, resetVerifyLimiter, resetCompleteLimiter } = require('../middlewares/limiter')
 const multer = require('multer')
 
-const upload = multer() // Multer for form-data without files
+const registrationUpload = multer({
+    limits: {
+        fields: 32,
+        files: 0,
+        parts: 32,
+        fieldNameSize: 100,
+        fieldSize: 64 * 1024,
+        fieldNestingDepth: 4,
+        fieldArrayIndexLimit: 16
+    }
+})
 
-router.post('/register', upload.none(), register)
+const parseRegistrationForm = (req, res, next) => {
+    registrationUpload.none()(req, res, (err) => {
+        if (!err || err instanceof multer.MulterError) return next(err)
+
+        const multipartError = new Error('Invalid multipart request')
+        multipartError.code = 'INVALID_MULTIPART'
+        multipartError.status = 400
+        return next(multipartError)
+    })
+}
+
+router.post('/register', parseRegistrationForm, register)
 router.post('/login', loginLimiter, login)
 router.get('/me', verifyJWT, profile)
 router.put('/update-profile', verifyJWT, (req, res) => {

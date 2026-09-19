@@ -6,7 +6,11 @@ const kycSchema = new mongoose.Schema({
     documentType: { type: String }, // Flexible for various ID/Bill types
     documentNumber: String,
     address: String, // For Tier 3 verification
-    documentImage: String, // URL/Path to uploaded image
+    documentImage: { type: String, select: false }, // Legacy public URL; never expose from new reads.
+    documentPublicId: { type: String, select: false },
+    documentResourceType: { type: String, select: false },
+    documentDeliveryType: { type: String, select: false },
+    documentFormat: { type: String, select: false },
     status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
     rejectionReason: String,
     verifiedAt: Date,
