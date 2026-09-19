@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { verifyJWT, checkRoles } = require('../middlewares/auth');
 const requireLegalCompliance = require('../middlewares/requireLegalCompliance');
+const requireTransactionPin = require('../middlewares/requireTransactionPin');
 const {
     getInvestmentSummary,
     buyShares,
@@ -24,11 +25,11 @@ const {
 // ─── User Routes (any logged-in user) ───────────────────────
 router.get('/summary',  verifyJWT, getInvestmentSummary);
 router.get('/history',  verifyJWT, getDividendHistory);
-router.post('/buy',     verifyJWT, requireLegalCompliance, buyShares);
-router.post('/exit',    verifyJWT, requireLegalCompliance, requestShareExit);
-router.post('/reinvest',verifyJWT, requireLegalCompliance, reinvestDividends);
-router.post('/redeem',  verifyJWT, requireLegalCompliance, redeemToMainWallet);
-router.post('/withdraw',verifyJWT, requireLegalCompliance, requestDividendWithdrawal);
+router.post('/buy',     verifyJWT, requireLegalCompliance, requireTransactionPin, buyShares);
+router.post('/exit',    verifyJWT, requireLegalCompliance, requireTransactionPin, requestShareExit);
+router.post('/reinvest',verifyJWT, requireLegalCompliance, requireTransactionPin, reinvestDividends);
+router.post('/redeem',  verifyJWT, requireLegalCompliance, requireTransactionPin, redeemToMainWallet);
+router.post('/withdraw',verifyJWT, requireLegalCompliance, requireTransactionPin, requestDividendWithdrawal);
 
 // ─── Admin Routes (superAdmin only) ─────────────────────────
 router.get('/admin/overview',     verifyJWT, checkRoles('superAdmin'), getShareholderOverview);
