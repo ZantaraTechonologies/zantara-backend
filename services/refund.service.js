@@ -28,19 +28,40 @@ class RefundService {
      * debit exists, the claim is rolled back too — a transaction that never took
      * money is not marked as a loss, and a later retry can still re-check.
      */
-    static async processRefund(transactionId, reason) {
+    static async processRefund(transactionId, reason, { mode } = {}) {
         const session = await mongoose.startSession();
         session.startTransaction();
 
         try {
             const transaction = await Transaction.findById(transactionId).session(session);
             if (!transaction) throw new Error('Transaction not found');
+            if (transaction.isLoss) {
+                await session.abortTransaction();
+                return { success: true, alreadyRefunded: true };
+            }
+
+            const providerFailureEligible = mode === 'provider_failure'
+                && transaction.status === 'pending'
+                && transaction.providerOutcome === 'definitive_failure'
+                && transaction.dispatchState === 'dispatched';
+            const preDispatchEligible = mode === 'pre_dispatch'
+                && transaction.status === 'pending'
+                && transaction.dispatchState === 'not_dispatched';
+            if (!providerFailureEligible && !preDispatchEligible) {
+                throw new Error('Refund not permitted without eligible definitive failure or pre-dispatch cancellation evidence');
+            }
 
             // Concurrency-safe idempotency: atomic claim via updateOne inside the session.
             // Only one concurrent caller will see isLoss=false and succeed;
             // all others get modifiedCount=0 and skip.
+            const eligibility = mode === 'provider_failure'
+                ? {
+                    providerOutcome: 'definitive_failure',
+                    dispatchState: 'dispatched'
+                }
+                : { dispatchState: 'not_dispatched' };
             const claimResult = await Transaction.updateOne(
-                { _id: transaction._id, isLoss: false },
+                { _id: transaction._id, status: 'pending', isLoss: false, ...eligibility },
                 { $set: { isLoss: true } },
                 { session }
             );

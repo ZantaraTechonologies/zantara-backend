@@ -37,6 +37,9 @@ const ORIG = {
     UserFindById: User.findById,
     WalletFindOne: Wallet.findOne,
     TransactionCreate: Transaction.create,
+    TransactionFindById: Transaction.findById,
+    TransactionFindOneAndUpdate: Transaction.findOneAndUpdate,
+    TransactionUpdateOne: Transaction.updateOne,
     ExpenseCreate: Expense.create,
     startSession: mongoose.startSession,
     verifyPin: pinService.verifyPin,
@@ -72,6 +75,7 @@ const PIN_OFFER = {
     serviceId: PIN_SERVICE._id,
     providerId: { _id: OID(), name: 'VTPass' },
     providerCode: 'waec',
+    providerServiceCode: 'waec-registration',
     costPrice: 900, // per-card cost
 };
 
@@ -99,15 +103,44 @@ Service.findOne = async () => PIN_SERVICE;
 ServiceIdentity.findOne = async () => null;
 User.findById = () => ({
     select: () => MOCK_USER,
+    session: async () => MOCK_USER,
     then: (cb) => Promise.resolve(cb(MOCK_USER)),
 });
 Wallet.findOne = async () => ({ balance: 100000 });
-Transaction.create = async (doc) => ({
-    ...doc,
-    _id: OID(),
-    transactionId: 'TXN-MP-1',
-    save: async () => {},
+const mockTransactions = [];
+const makeTx = (doc, transactionId) => {
+    const tx = {
+        ...doc,
+        _id: OID(),
+        transactionId,
+        isLoss: Boolean(doc.isLoss),
+        resolutionState: doc.resolutionState || 'unresolved',
+        save: async function () { return this; },
+    };
+    mockTransactions.push(tx);
+    return tx;
+};
+Transaction.create = async (doc) => makeTx(doc, 'TXN-MP-1');
+Transaction.findById = id => ({
+    session: async () => mockTransactions.find(tx => String(tx._id) === String(id)) || null,
+    then: (resolve, reject) => Promise.resolve(mockTransactions.find(tx => String(tx._id) === String(id)) || null).then(resolve, reject),
 });
+Transaction.updateOne = async (filter, update) => {
+    const tx = mockTransactions.find(item => String(item._id) === String(filter._id));
+    if (!tx) return { modifiedCount: 0 };
+    if (update.$set) Object.assign(tx, update.$set);
+    return { modifiedCount: 1 };
+};
+Transaction.findOneAndUpdate = async (filter, update) => {
+    const tx = mockTransactions.find(item => String(item._id) === String(filter._id)
+        && item.status === filter.status
+        && item.isLoss === filter.isLoss
+        && item.providerOutcome === filter.providerOutcome
+        && item.resolutionState !== 'finalizing');
+    if (!tx) return null;
+    if (update.$set) Object.assign(tx, update.$set);
+    return tx;
+};
 Expense.create = async () => [];
 mongoose.startSession = async () => ({
     startTransaction: () => {},
@@ -160,11 +193,12 @@ async function test(name, fn) {
         const captured = [];
         walletService.debit = async (userId, amount, ref, type) => { captured.push({ amount }); };
         let savedTx = null;
-        Transaction.create = async (doc) => { savedTx = { ...doc, _id: OID(), transactionId: 'TXN-MP-3', save: async () => {} }; return savedTx; };
+        Transaction.create = async (doc) => { savedTx = makeTx(doc, 'TXN-MP-3'); return savedTx; };
 
         await purchaseService.processPurchase(MOCK_USER._id, {
             type: 'pin',
             serviceId: 'WAEC_REG_500',
+            canonicalService: PIN_SERVICE,
             amount: 1000,            // unit amount
             quantity: 2,
             pin: '1234',
@@ -182,11 +216,12 @@ async function test(name, fn) {
     await test('P4. providerCall receives TOTAL provider cost 1800 for qty=2', async () => {
         let providerAmount = null;
         walletService.debit = async () => {};
-        Transaction.create = async (doc) => ({ ...doc, _id: OID(), transactionId: 'TXN-MP-4', save: async () => {} });
+        Transaction.create = async (doc) => makeTx(doc, 'TXN-MP-4');
 
         await purchaseService.processPurchase(MOCK_USER._id, {
             type: 'pin',
             serviceId: 'WAEC_REG_500',
+            canonicalService: PIN_SERVICE,
             amount: 1000,
             quantity: 2,
             pin: '1234',
@@ -202,11 +237,12 @@ async function test(name, fn) {
     await test('P5. expectedPrice=2000 is NOT reduced when client sends a total of 2*1000 (already true)', async () => {
         let captured = null;
         walletService.debit = async (userId, amount) => { captured = amount; };
-        Transaction.create = async (doc) => ({ ...doc, _id: OID(), transactionId: 'TXN-MP-5', save: async () => {} });
+        Transaction.create = async (doc) => makeTx(doc, 'TXN-MP-5');
 
         await purchaseService.processPurchase(MOCK_USER._id, {
             type: 'pin',
             serviceId: 'WAEC_REG_500',
+            canonicalService: PIN_SERVICE,
             amount: 1000,
             quantity: 2,
             pin: '1234',
@@ -340,6 +376,9 @@ async function test(name, fn) {
     User.findById = ORIG.UserFindById;
     Wallet.findOne = ORIG.WalletFindOne;
     Transaction.create = ORIG.TransactionCreate;
+    Transaction.findById = ORIG.TransactionFindById;
+    Transaction.findOneAndUpdate = ORIG.TransactionFindOneAndUpdate;
+    Transaction.updateOne = ORIG.TransactionUpdateOne;
     Expense.create = ORIG.ExpenseCreate;
     mongoose.startSession = ORIG.startSession;
     pinService.verifyPin = ORIG.verifyPin;

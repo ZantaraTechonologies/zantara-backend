@@ -16,6 +16,10 @@ const providerOfferSchema = new mongoose.Schema({
         required: true,
         trim: true
     },
+    providerServiceCode: {
+        type: String,
+        trim: true
+    },
     providerRetailPrice: {
         type: Number,
         default: 0

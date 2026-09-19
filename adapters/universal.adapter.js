@@ -1,5 +1,6 @@
 const axios = require('axios');
 const BaseAdapter = require('./base.adapter');
+const { PROVIDER_OUTCOMES } = require('../utils/providerOutcome');
 
 /**
  * Safely extracts a value from an object using a dot-separated path (e.g. 'data.user.balance').
@@ -127,7 +128,8 @@ class UniversalAdapter extends BaseAdapter {
         } catch (err) {
             return { 
                 success: false, 
-                status: 'failed', 
+                status: 'unknown',
+                outcome: PROVIDER_OUTCOMES.UNKNOWN,
                 message: err.response?.data?.message || err.message,
                 raw: err.response?.data 
             };
@@ -172,6 +174,14 @@ class UniversalAdapter extends BaseAdapter {
     }
 
     async queryTransaction(request_id) {
+        if (!this.metadata.queryUrl) {
+            return {
+                success: false,
+                status: 'unknown',
+                outcome: PROVIDER_OUTCOMES.UNKNOWN,
+                message: 'Provider requery is not configured',
+            };
+        }
         try {
             const url = this._resolveUrl('queryUrl', '/requery', { request_id });
             const method = this._resolveMethod('queryMethod', null, 'POST');
@@ -195,7 +205,13 @@ class UniversalAdapter extends BaseAdapter {
             const res = await axios(options);
             return this.mapResponse(res.data);
         } catch (err) {
-            return { success: false, status: 'failed', message: err.response?.data?.message || err.message };
+            return {
+                success: false,
+                status: 'unknown',
+                outcome: PROVIDER_OUTCOMES.UNKNOWN,
+                message: err.response?.data?.message || err.message,
+                raw: err.response?.data,
+            };
         }
     }
 
@@ -285,7 +301,8 @@ class UniversalAdapter extends BaseAdapter {
         } catch (err) {
             return {
                 success: false,
-                status: 'failed',
+                status: 'unknown',
+                outcome: PROVIDER_OUTCOMES.UNKNOWN,
                 message: err.response?.data?.message || err.message,
                 raw: err.response?.data
             };
@@ -319,14 +336,36 @@ class UniversalAdapter extends BaseAdapter {
             isSuccess = String(actualSuccess).toLowerCase() === expectedSuccessValue;
         }
 
-        // Status
-        let status = isSuccess ? 'success' : 'failed';
+        // Status and explicit non-success mappings.
+        let status = isSuccess ? 'success' : 'unknown';
         if (this.metadata.statusPath) {
             const extractedStatus = getByDotPath(data, this.metadata.statusPath);
             if (extractedStatus !== undefined && extractedStatus !== null) {
                 status = String(extractedStatus);
             }
         }
+
+        const normalizedStatus = String(status).toLowerCase();
+        const pendingPath = this.metadata.pendingPath || this.metadata.statusPath;
+        const pendingValue = this.metadata.pendingValue;
+        const failurePath = this.metadata.failurePath || this.metadata.statusPath;
+        const failureValue = this.metadata.failureValue;
+        const pendingActual = pendingPath ? getByDotPath(data, pendingPath) : undefined;
+        const failureActual = failurePath ? getByDotPath(data, failurePath) : undefined;
+        const isPending = pendingValue !== undefined
+            ? String(pendingActual).toLowerCase() === String(pendingValue).toLowerCase()
+            : ['pending', 'processing', 'queued', 'in_progress'].includes(normalizedStatus);
+        const isDefinitiveFailure = failureValue !== undefined
+            && String(failureActual).toLowerCase() === String(failureValue).toLowerCase();
+
+        const matchingOutcomes = [isSuccess, isPending, isDefinitiveFailure].filter(Boolean).length;
+        const outcome = matchingOutcomes !== 1
+            ? PROVIDER_OUTCOMES.UNKNOWN
+            : isSuccess
+                ? PROVIDER_OUTCOMES.SUCCESS
+                : isPending
+                    ? PROVIDER_OUTCOMES.PENDING
+                    : PROVIDER_OUTCOMES.DEFINITIVE_FAILURE;
 
         // Message
         let message;
@@ -356,8 +395,9 @@ class UniversalAdapter extends BaseAdapter {
         const token = data.token || data.purchased_code || data.pin || data.token_code || data.data?.token || data.data?.pin;
 
         return {
-            success: isSuccess,
-            status,
+            success: outcome === PROVIDER_OUTCOMES.SUCCESS,
+            status: outcome === PROVIDER_OUTCOMES.UNKNOWN ? 'unknown' : status,
+            outcome,
             message: String(message),
             transactionId: transactionId ? String(transactionId) : undefined,
             token: token ? String(token) : undefined,

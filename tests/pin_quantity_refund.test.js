@@ -54,6 +54,9 @@ const ORIG = {
     selectBestOffer: procurementService.selectBestOffer,
     commission: referral.processLifetimeCommission,
 };
+const actualProcessRefund = refundService.processRefund.bind(refundService);
+refundService.processRefund = (transactionId, reason, options = { mode: 'provider_failure' }) =>
+    actualProcessRefund(transactionId, reason, options);
 
 const OID = () => new mongoose.Types.ObjectId();
 
@@ -82,6 +85,7 @@ const PIN_OFFER = {
     serviceId: PIN_SERVICE._id,
     providerId: { _id: OID(), name: 'VTPass' },
     providerCode: 'waec',
+    providerServiceCode: 'waec-registration',
     costPrice: 900,
 };
 
@@ -120,14 +124,18 @@ const reset = () => {
         return Promise.resolve(tx);
     };
     Transaction.create = TxCreate;
-    TxFindById = (id) => ({
-        session: async () => {
+    TxFindById = (id) => {
+        const load = async () => {
             const found = mockTxs.find(t => String(t._id) === String(id));
             if (!found) return null;
             found.save = async function () { return this; };
             return found;
-        },
-    });
+        };
+        return {
+            session: load,
+            then(resolve, reject) { return load().then(resolve, reject); },
+        };
+    };
     Transaction.findById = TxFindById;
     TxUpdateOne = (filter, update) => {
         const found = mockTxs.find(t => {
@@ -204,11 +212,17 @@ async function test(name, fn) {
         reset();
 
         // Provider fails for every call.
-        const providerCall = async () => ({ success: false, message: 'VTPass timeout while processing 2 pins' });
+        const providerCall = async () => ({
+            success: false,
+            status: 'failed',
+            outcome: 'definitive_failure',
+            message: 'Provider explicitly rejected 2 pins',
+        });
 
         const result = await purchaseService.processPurchase(MOCK_USER._id, {
             type: 'pin',
             serviceId: 'WAEC_REG_500',
+            canonicalService: PIN_SERVICE,
             amount: 1000,
             pin: '1234',
             expectedPrice: 2000,
@@ -245,11 +259,12 @@ async function test(name, fn) {
     await test('R2. replay of the refund for the SAME failed purchase credits 0 additional', async () => {
         reset();
 
-        const providerCall = async () => ({ success: false, message: 'Provider failed' });
+        const providerCall = async () => ({ success: false, status: 'failed', outcome: 'definitive_failure', message: 'Provider failed' });
 
         await purchaseService.processPurchase(MOCK_USER._id, {
             type: 'pin',
             serviceId: 'WAEC_REG_500',
+            canonicalService: PIN_SERVICE,
             amount: 1000,
             pin: '1234',
             expectedPrice: 2000,
@@ -274,11 +289,12 @@ async function test(name, fn) {
     await test('R3. concurrent replay through the atomic isLoss claim still credits once', async () => {
         reset();
 
-        const providerCall = async () => ({ success: false, message: 'Provider failed' });
+        const providerCall = async () => ({ success: false, status: 'failed', outcome: 'definitive_failure', message: 'Provider failed' });
 
         await purchaseService.processPurchase(MOCK_USER._id, {
             type: 'pin',
             serviceId: 'WAEC_REG_500',
+            canonicalService: PIN_SERVICE,
             amount: 1000,
             pin: '1234',
             expectedPrice: 2000,
@@ -302,10 +318,11 @@ async function test(name, fn) {
 
         // Even if the provider response carries a smaller internal amount, the
         // refund is bound to the persisted transaction.amount.
-        const providerCall = async () => ({ success: false, message: 'fail' });
+        const providerCall = async () => ({ success: false, status: 'failed', outcome: 'definitive_failure', message: 'fail' });
         await purchaseService.processPurchase(MOCK_USER._id, {
             type: 'pin',
             serviceId: 'WAEC_REG_500',
+            canonicalService: PIN_SERVICE,
             amount: 1000,
             pin: '1234',
             expectedPrice: 2000,

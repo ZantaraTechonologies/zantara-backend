@@ -6,6 +6,26 @@ const ProviderOffer = require('../models/ProviderOffer');
  * In Batch 2, this implements the 'manual_priority' strategy.
  */
 class ProcurementService {
+    resolveProviderServiceCode(service, offer) {
+        const configuredCode = String(offer?.providerServiceCode || '').trim();
+        if (configuredCode) return configuredCode;
+
+        const category = String(service?.category || '').toLowerCase();
+        if (category === 'airtime' || category === 'electricity') {
+            const offerCode = String(offer?.providerCode || '').trim();
+            if (offerCode) return offerCode;
+        }
+
+        const selectedProvider = String(offer?.providerId?.name || '').trim().toLowerCase();
+        const legacyProvider = String(service?.provider || '').trim().toLowerCase();
+        const legacyIdentityCode = String(service?.identityId?.providerCode || '').trim();
+        if (selectedProvider && selectedProvider === legacyProvider && legacyIdentityCode) {
+            return legacyIdentityCode;
+        }
+
+        throw new Error('Selected provider offer has no provider service code for this service');
+    }
+
     /**
      * Selects the highest priority active ProviderOffer for a given Service.
      * @param {string|ObjectId} serviceId - The ID of the normalized service.

@@ -31,18 +31,21 @@ async function runRequeryRoutingTests() {
         'vtpass': {
             name: 'VTPass',
             adapterType: 'vtpass',
+            status: 'active',
             baseUrl: 'https://api.vtpass.com',
             apiKey: 'vt_key_123'
         },
         'vas2nets': {
             name: 'Vas2Nets',
             adapterType: 'vas2nets',
+            status: 'active',
             baseUrl: 'https://api.vas2nets.com',
             apiKey: 'vas_key_456'
         },
         'mele': {
             name: 'MELE',
             adapterType: 'universal',
+            status: 'active',
             baseUrl: 'https://api.meledata.ng/v1',
             apiKey: 'mele_key_789',
             metadata: {

@@ -137,7 +137,7 @@ class AdminHierarchyController {
     async updateProviderOffer(req, res) {
         try {
             const { id } = req.params;
-            const { priority, status, costPrice, costMode, providerRetailPrice, providerCode } = req.body;
+            const { priority, status, costPrice, costMode, providerRetailPrice, providerCode, providerServiceCode } = req.body;
 
             const updatedOffer = await ProviderOffer.findByIdAndUpdate(id, {
                 priority,
@@ -145,7 +145,8 @@ class AdminHierarchyController {
                 costPrice,
                 costMode,
                 providerRetailPrice,
-                providerCode
+                providerCode,
+                providerServiceCode
             }, { new: true, omitUndefined: true });
 
             if (!updatedOffer) return sendResponse(res, { status: 404, success: false, message: 'Offer not found' });

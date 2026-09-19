@@ -62,6 +62,9 @@ async function test(name, fn) {
     const origTxUpdateOne = Transaction.updateOne;
     const origLedgerFindOne = WalletLedger.findOne;
     const origStartSession = mongoose.startSession;
+    const actualProcessRefund = RefundService.processRefund.bind(RefundService);
+    RefundService.processRefund = (transactionId, reason, options = { mode: 'provider_failure' }) =>
+        actualProcessRefund(transactionId, reason, options);
 
     function makeSession() {
         return {
@@ -92,6 +95,8 @@ async function test(name, fn) {
             session: async () => {
                 const found = mockTransactions.find(t => String(t._id) === String(id));
                 if (!found) return null;
+                found.providerOutcome = found.providerOutcome || 'definitive_failure';
+                found.dispatchState = found.dispatchState || 'dispatched';
                 found.save = async function () { return this; };
                 return found;
             }

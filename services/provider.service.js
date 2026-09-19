@@ -21,19 +21,27 @@ class ProviderService {
      * @param {string} providerName 
      */
     async getAdapterInstance(providerName) {
-        const name = (providerName || 'vtpass').toLowerCase();
+        if (!providerName || typeof providerName !== 'string' || !providerName.trim()) {
+            throw new Error('Provider is required');
+        }
+        const name = providerName.trim().toLowerCase();
+        const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         
         // 1. Fetch config from Database
-        const providerConfig = await Provider.findOne({ name: { $regex: new RegExp(`^${name}$`, 'i') } });
+        const providerConfig = await Provider.findOne({ name: { $regex: new RegExp(`^${escapedName}$`, 'i') } });
         
         if (!providerConfig) {
-            console.error(`Provider config not found for: ${name}. Falling back to VTPass class with process.env.`);
-            // Fallback for safety (though deprecated)
-            return new VTPassAdapter({ baseUrl: process.env.VTU_API_URI, apiKey: process.env.VTPASS_API_KEY });
+            throw new Error(`Provider configuration not found for: ${providerName}`);
+        }
+        if (providerConfig.status !== 'active') {
+            throw new Error(`Provider is unavailable: ${providerName}`);
         }
 
         // 2. Resolve Class
-        const AdapterClass = this.adapterClasses[providerConfig.adapterType] || VTPassAdapter;
+        const AdapterClass = this.adapterClasses[providerConfig.adapterType];
+        if (!AdapterClass) {
+            throw new Error(`Unsupported provider adapter: ${providerConfig.adapterType}`);
+        }
         
         // 3. Decrypt credentials in memory for adapter instantiation
         const decryptedApiKey = decryptSecret(providerConfig.apiKey);

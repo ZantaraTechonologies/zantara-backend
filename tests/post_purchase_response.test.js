@@ -13,6 +13,8 @@ const pinService = require('../services/pin.service');
 const walletService = require('../services/wallet.service');
 const notificationService = require('../services/notification.service');
 const purchaseService = require('../services/purchase.service');
+const pricingService = require('../services/pricing.service');
+const procurementService = require('../services/procurement.service');
 const referral = require('../utils/referral');
 const pricing = require('../utils/pricing');
 const { sendResponse } = require('../utils/response');
@@ -47,10 +49,15 @@ async function runPostPurchaseResponseTests() {
     const origSettingFind = Setting.find;
     const origWalletDebit = walletService.debit;
     const origTxCreate = Transaction.create;
+    const origTxFindById = Transaction.findById;
+    const origTxFindOneAndUpdate = Transaction.findOneAndUpdate;
+    const origTxUpdateOne = Transaction.updateOne;
     const origExpenseCreate = Expense.create;
     const origCommission = referral.processLifetimeCommission;
     const origGetProviderCost = pricing.getProviderCost;
     const origCalculatePrice = pricing.calculateServicePrice;
+    const origResolvePricing = pricingService.resolvePricing;
+    const origSelectBestOffer = procurementService.selectBestOffer;
     const origStartSession = mongoose.startSession;
     const origNotify = notificationService.notify.bind(notificationService);
     const origSendInApp = notificationService.sendInApp.bind(notificationService);
@@ -66,10 +73,24 @@ async function runPostPurchaseResponseTests() {
         role: 'user',
         kycLevel: 2
     };
+    const mockService = {
+        _id: new mongoose.Types.ObjectId(),
+        code: 'TEST_AIRTIME',
+        category: 'airtime',
+        provider: 'VTPass',
+    };
+    const mockOffer = {
+        _id: new mongoose.Types.ObjectId(),
+        serviceId: mockService._id,
+        providerId: { _id: new mongoose.Types.ObjectId(), name: 'VTPass' },
+        providerCode: 'test-airtime',
+        costPrice: 0,
+    };
 
     pinService.verifyPin = async () => true;
     User.findById = () => ({
         select: () => mockUser,
+        session: async () => mockUser,
         ...mockUser,
         then: (cb) => Promise.resolve(cb(mockUser))
     });
@@ -89,6 +110,12 @@ async function runPostPurchaseResponseTests() {
     referral.processLifetimeCommission = async () => 0;
     pricing.getProviderCost = async (serviceId, amount) => amount * 0.98;
     pricing.calculateServicePrice = async (user, amount) => amount;
+    pricingService.resolvePricing = async (user, service, offer, amount) => ({
+        baseCostPrice: Number(amount) * 0.98,
+        salePrice: Number(amount),
+        quantity: 1,
+    });
+    procurementService.selectBestOffer = async () => mockOffer;
 
     // Mock mongoose session transaction
     mongoose.startSession = async () => ({
@@ -98,12 +125,40 @@ async function runPostPurchaseResponseTests() {
         endSession: () => {}
     });
 
-    const createMockTx = (doc) => ({
-        ...doc,
-        save: async () => {},
-        _id: new mongoose.Types.ObjectId(),
-        transactionId: 'TXN-TEST-123456'
+    const mockTransactions = [];
+    const createMockTx = (doc) => {
+        const tx = {
+            ...doc,
+            isLoss: Boolean(doc.isLoss),
+            resolutionState: doc.resolutionState || 'unresolved',
+            save: async function () { return this; },
+            _id: new mongoose.Types.ObjectId(),
+            transactionId: 'TXN-TEST-123456'
+        };
+        mockTransactions.push(tx);
+        return tx;
+    };
+
+    Transaction.findById = id => ({
+        session: async () => mockTransactions.find(tx => String(tx._id) === String(id)) || null,
+        then: (resolve, reject) => Promise.resolve(mockTransactions.find(tx => String(tx._id) === String(id)) || null).then(resolve, reject),
     });
+    Transaction.updateOne = async (filter, update) => {
+        const tx = mockTransactions.find(item => String(item._id) === String(filter._id));
+        if (!tx) return { modifiedCount: 0 };
+        if (update.$set) Object.assign(tx, update.$set);
+        return { modifiedCount: 1 };
+    };
+    Transaction.findOneAndUpdate = async (filter, update) => {
+        const tx = mockTransactions.find(item => String(item._id) === String(filter._id)
+            && item.status === filter.status
+            && item.isLoss === filter.isLoss
+            && item.providerOutcome === filter.providerOutcome
+            && item.resolutionState !== 'finalizing');
+        if (!tx) return null;
+        if (update.$set) Object.assign(tx, update.$set);
+        return tx;
+    };
 
     Transaction.create = async (doc) => createMockTx(doc);
 
@@ -123,6 +178,7 @@ async function runPostPurchaseResponseTests() {
             const result = await purchaseService.processPurchase(mockUser._id, {
                 type: 'airtime',
                 serviceId: 'mtn',
+                canonicalService: mockService,
                 amount: 1000,
                 pin: '1234',
                 details: { phone: '08012345678' },
@@ -155,6 +211,7 @@ async function runPostPurchaseResponseTests() {
             const result = await purchaseService.processPurchase(mockUser._id, {
                 type: 'airtime',
                 serviceId: 'glo',
+                canonicalService: mockService,
                 amount: 500,
                 pin: '1234',
                 details: { phone: '08055555555' },
@@ -187,6 +244,7 @@ async function runPostPurchaseResponseTests() {
             const result = await purchaseService.processPurchase(mockUser._id, {
                 type: 'data',
                 serviceId: 'mtn-data-1gb',
+                canonicalService: mockService,
                 amount: 300,
                 pin: '1234',
                 details: { phone: '08012345678' },
@@ -211,6 +269,7 @@ async function runPostPurchaseResponseTests() {
             const result = await purchaseService.processPurchase(mockUser._id, {
                 type: 'electricity',
                 serviceId: 'ikeja-electric',
+                canonicalService: mockService,
                 amount: 2000,
                 pin: '1234',
                 details: { meter_number: '11223344556' },
@@ -235,6 +294,7 @@ async function runPostPurchaseResponseTests() {
             const result = await purchaseService.processPurchase(mockUser._id, {
                 type: 'cable',
                 serviceId: 'dstv-padi',
+                canonicalService: mockService,
                 amount: 3500,
                 pin: '1234',
                 details: { billersCode: '1029384756' },
@@ -258,6 +318,7 @@ async function runPostPurchaseResponseTests() {
             const result = await purchaseService.processPurchase(mockUser._id, {
                 type: 'pin',
                 serviceId: 'waec-pin',
+                canonicalService: mockService,
                 amount: 4000,
                 pin: '1234',
                 details: { phone: '08012345678', quantity: 1 },
@@ -327,6 +388,7 @@ async function runPostPurchaseResponseTests() {
             const result = await purchaseService.processPurchase(mockUser._id, {
                 type: 'airtime',
                 serviceId: 'airtel',
+                canonicalService: mockService,
                 amount: 200,
                 pin: '1234',
                 details: { phone: '08099999999' },
@@ -358,6 +420,7 @@ async function runPostPurchaseResponseTests() {
             const result = await purchaseService.processPurchase(mockUser._id, {
                 type: 'airtime',
                 serviceId: 'mtn',
+                canonicalService: mockService,
                 amount: 100,
                 pin: '1234',
                 details: { phone: '08011111111' },
@@ -394,6 +457,7 @@ async function runPostPurchaseResponseTests() {
             const result = await purchaseService.processPurchase(mockUser._id, {
                 type: 'airtime',
                 serviceId: 'mtn',
+                canonicalService: mockService,
                 amount: 1000,
                 pin: '1234',
                 details: { phone: '08033333333' },
@@ -418,6 +482,7 @@ async function runPostPurchaseResponseTests() {
             const result = await purchaseService.processPurchase(mockUser._id, {
                 type: 'airtime',
                 serviceId: 'mtn',
+                canonicalService: mockService,
                 amount: 500,
                 pin: '1234',
                 details: { phone: '08044444444' },
@@ -445,6 +510,7 @@ async function runPostPurchaseResponseTests() {
             const result = await purchaseService.processPurchase(mockUser._id, {
                 type: 'airtime',
                 serviceId: 'glo',
+                canonicalService: mockService,
                 amount: 200,
                 pin: '1234',
                 details: { phone: '08055555555' },
@@ -476,6 +542,7 @@ async function runPostPurchaseResponseTests() {
             const result = await purchaseService.processPurchase(mockUser._id, {
                 type: 'airtime',
                 serviceId: 'mtn',
+                canonicalService: mockService,
                 amount: 5000,
                 pin: '1234',
                 details: { phone: '08066666666' },
@@ -576,10 +643,15 @@ async function runPostPurchaseResponseTests() {
         Setting.find = origSettingFind;
         walletService.debit = origWalletDebit;
         Transaction.create = origTxCreate;
+        Transaction.findById = origTxFindById;
+        Transaction.findOneAndUpdate = origTxFindOneAndUpdate;
+        Transaction.updateOne = origTxUpdateOne;
         Expense.create = origExpenseCreate;
         referral.processLifetimeCommission = origCommission;
         pricing.getProviderCost = origGetProviderCost;
         pricing.calculateServicePrice = origCalculatePrice;
+        pricingService.resolvePricing = origResolvePricing;
+        procurementService.selectBestOffer = origSelectBestOffer;
         mongoose.startSession = origStartSession;
         notificationService.notify = origNotify;
         notificationService.sendInApp = origSendInApp;

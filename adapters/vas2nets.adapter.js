@@ -1,5 +1,21 @@
 const axios = require('axios');
 const BaseAdapter = require('./base.adapter');
+const { PROVIDER_OUTCOMES } = require('../utils/providerOutcome');
+
+const SUCCESS_CODES = new Set(['000', '200']);
+const PENDING_CODES = new Set(['099']);
+const FAILURE_CODES = new Set(['400', '401', '403', '404', '409', '422']);
+const SUCCESS_STATUSES = new Set(['success', 'successful', 'delivered', 'completed']);
+const PENDING_STATUSES = new Set(['pending', 'processing', 'queued', 'in_progress', 'in-progress']);
+const FAILURE_STATUSES = new Set(['failed', 'rejected', 'cancelled', 'canceled']);
+
+const transportError = err => ({
+    success: false,
+    status: 'unknown',
+    outcome: PROVIDER_OUTCOMES.UNKNOWN,
+    message: err.message,
+    raw: err.response?.data,
+});
 
 class Vas2NetsAdapter extends BaseAdapter {
     constructor(config) {
@@ -19,7 +35,7 @@ class Vas2NetsAdapter extends BaseAdapter {
             }, { timeout: 30000 });
             return this.mapResponse(res.data);
         } catch (err) {
-            return { success: false, status: 'failed', message: err.message };
+            return transportError(err);
         }
     }
 
@@ -31,7 +47,7 @@ class Vas2NetsAdapter extends BaseAdapter {
             }, { timeout: 30000 });
             return this.mapResponse(res.data);
         } catch (err) {
-            return { success: false, status: 'failed', message: err.message };
+            return transportError(err);
         }
     }
 
@@ -43,7 +59,7 @@ class Vas2NetsAdapter extends BaseAdapter {
             }, { timeout: 30000 });
             return this.mapResponse(res.data);
         } catch (err) {
-            return { success: false, status: 'failed', message: err.message };
+            return transportError(err);
         }
     }
 
@@ -55,19 +71,19 @@ class Vas2NetsAdapter extends BaseAdapter {
             }, { timeout: 30000 });
             return this.mapResponse(res.data);
         } catch (err) {
-            return { success: false, status: 'failed', message: err.message };
+            return transportError(err);
         }
     }
 
-    async purchaseExamPin({ request_id, variation_code, amount, quantity, phone }) {
+    async purchaseExamPin({ request_id, serviceID, variation_code, amount, quantity, phone }) {
         try {
             const res = await axios.post(`${this.baseUrl}/pay`, { 
                 auth: this.auth,
-                request_id, variation_code, amount, quantity, phone
+                request_id, serviceID, variation_code, amount, quantity, phone
             }, { timeout: 30000 });
             return this.mapResponse(res.data);
         } catch (err) {
-            return { success: false, status: 'failed', message: err.message };
+            return transportError(err);
         }
     }
 
@@ -79,7 +95,7 @@ class Vas2NetsAdapter extends BaseAdapter {
             }, { timeout: 15000 });
             return this.mapResponse(res.data);
         } catch (err) {
-            return { success: false, status: 'failed', message: err.message };
+            return transportError(err);
         }
     }
 
@@ -97,10 +113,36 @@ class Vas2NetsAdapter extends BaseAdapter {
     }
 
     mapResponse(data) {
-        const isSuccess = data.status === 'success' || data.code === '000';
+        if (!data || typeof data !== 'object') {
+            return {
+                success: false,
+                status: 'unknown',
+                outcome: PROVIDER_OUTCOMES.UNKNOWN,
+                message: 'Invalid response from provider',
+                raw: data,
+            };
+        }
+        const providerStatus = typeof data.status === 'string' ? data.status.toLowerCase().trim() : '';
+        const providerCode = data.code === undefined || data.code === null ? '' : String(data.code).trim();
+        const signals = new Set();
+
+        if (SUCCESS_STATUSES.has(providerStatus)) signals.add(PROVIDER_OUTCOMES.SUCCESS);
+        if (PENDING_STATUSES.has(providerStatus)) signals.add(PROVIDER_OUTCOMES.PENDING);
+        if (FAILURE_STATUSES.has(providerStatus)) signals.add(PROVIDER_OUTCOMES.DEFINITIVE_FAILURE);
+        if (SUCCESS_CODES.has(providerCode)) signals.add(PROVIDER_OUTCOMES.SUCCESS);
+        if (PENDING_CODES.has(providerCode)) signals.add(PROVIDER_OUTCOMES.PENDING);
+        if (FAILURE_CODES.has(providerCode)) signals.add(PROVIDER_OUTCOMES.DEFINITIVE_FAILURE);
+
+        const outcome = signals.size === 1
+            ? [...signals][0]
+            : PROVIDER_OUTCOMES.UNKNOWN;
+        const isSuccess = outcome === PROVIDER_OUTCOMES.SUCCESS;
+        const isPending = outcome === PROVIDER_OUTCOMES.PENDING;
+        const isDefinitiveFailure = outcome === PROVIDER_OUTCOMES.DEFINITIVE_FAILURE;
         return {
             success: isSuccess,
-            status: isSuccess ? 'success' : 'failed',
+            status: isSuccess ? 'success' : isPending ? 'pending' : isDefinitiveFailure ? 'failed' : 'unknown',
+            outcome,
             message: data.message || (isSuccess ? 'Success' : 'Request failed'),
             transactionId: data.transactionId || data.requestId,
             token: data.token || data.purchased_code,

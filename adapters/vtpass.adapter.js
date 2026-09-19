@@ -1,5 +1,6 @@
 const axios = require('axios');
 const BaseAdapter = require('./base.adapter');
+const { PROVIDER_OUTCOMES } = require('../utils/providerOutcome');
 
 /**
  * VTPass Adapter
@@ -247,7 +248,12 @@ class VTPassAdapter extends BaseAdapter {
         const code = String(data?.code || '');
         const isSuccess = code === '000';
         const isPending = code === '099';
-        const status = isSuccess ? 'success' : isPending ? 'pending' : 'failed';
+        const outcome = isSuccess
+            ? PROVIDER_OUTCOMES.SUCCESS
+            : isPending
+                ? PROVIDER_OUTCOMES.PENDING
+                : PROVIDER_OUTCOMES.UNKNOWN;
+        const status = isSuccess ? 'success' : isPending ? 'pending' : 'unknown';
 
         const rawToken = data?.purchased_code || data?.token || data?.Pin || (data?.tokens?.[0]);
         const cleanToken = typeof rawToken === 'string' ? rawToken.replace(/^(Token|Pin)\s*:\s*/i, '') : rawToken;
@@ -277,6 +283,7 @@ class VTPassAdapter extends BaseAdapter {
         return {
             success: isSuccess,
             status,
+            outcome,
             message: data?.response_description || data?.content?.errors?.error || 'Transaction processed',
             transactionId: data?.content?.transactions?.transactionId || data?.requestId,
             token: cleanToken,
@@ -295,7 +302,13 @@ class VTPassAdapter extends BaseAdapter {
     _errorResponse(err) {
         const body = err?.response?.data;
         const message = body?.response_description || body?.content?.errors?.error || body?.message || err?.message || 'VTPass request failed';
-        return { success: false, status: 'failed', message, raw: body || {} };
+        return {
+            success: false,
+            status: 'unknown',
+            outcome: PROVIDER_OUTCOMES.UNKNOWN,
+            message,
+            raw: body || {},
+        };
     }
 }
 

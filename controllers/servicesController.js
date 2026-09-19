@@ -1,16 +1,40 @@
 const purchaseService = require('../services/purchase.service')
 const providerService = require('../services/provider.service')
-const Wallet = require('../models/Wallet')
 const Pin = require('../models/Pin')
 const Service = require('../models/Service')
 const Transaction = require('../models/Transaction')
 const { generateVTPassRequestId } = require('../utils/generateID')
-const { fetchPlans, verifyMeterWithProvider } = require('../utils/vtuService')
+const { verifyMeterWithProvider } = require('../utils/vtuService')
 const { sendResponse } = require('../utils/response')
-const notificationService = require('../services/notification.service')
 const pricingService = require('../services/pricing.service')
+const procurementService = require('../services/procurement.service')
 const mongoose = require('mongoose')
-const { serializePurchaseResult } = require('../utils/customerResponseSerializer')
+
+const sendPurchaseOutcome = (res, result, successMessage, failureMessage) => {
+    if (result.status === 'pending') {
+        return sendResponse(res, {
+            status: 202,
+            success: false,
+            message: result.message || 'Transaction is awaiting provider confirmation.',
+            data: result.data || {
+                status: 'pending',
+                providerOutcome: result.providerOutcome,
+                reference: result.reference,
+                transactionId: result.transactionId,
+            },
+        });
+    }
+    if (!result.success) {
+        return sendResponse(res, {
+            status: 400,
+            success: false,
+            message: result.message || failureMessage,
+            error: result.error,
+            data: result.data,
+        });
+    }
+    return sendResponse(res, { message: successMessage, data: result.data });
+};
 
 const purchaseAirtime = async (req, res) => {
 
@@ -25,7 +49,6 @@ const purchaseAirtime = async (req, res) => {
     }
 
     try {
-        const ProviderOffer = require('../models/ProviderOffer');
         const ServiceIdentity = require('../models/ServiceIdentity');
 
         // Find the service/identity by code (case-insensitive)
@@ -46,39 +69,28 @@ const purchaseAirtime = async (req, res) => {
                 service = await Service.findOne({ identityId: identity._id }).populate('identityId');
             }
         }
-
-        let vendorCode = finalNetwork;
-        if (service) {
-            // Find active fulfillment mapping
-            const activeMapping = await ProviderOffer.findOne({ 
-                serviceId: service._id, 
-                status: true 
-            }).sort({ priority: 1 });
-
-            vendorCode = activeMapping?.providerCode || service.identityId?.providerCode || service.providerCode || finalNetwork;
-        }
-
-        const provider = service?.provider || 'VTPass';
+        if (!service) throw new Error('Service provider configuration not found');
 
         const result = await purchaseService.processPurchase(userId, {
             type: 'airtime',
             serviceId: finalNetwork,
+            canonicalService: service,
             amount,
             pin,
-            provider,
             details: { phone: finalPhone, network: finalNetwork, roles: req.user.roles },
             expectedPrice,
-            providerCall: (refId) => {
-                return providerService.purchaseAirtime({ request_id: refId, serviceID: vendorCode, phone: finalPhone, amount }, provider)
+            providerPreflight: selection => providerService.getAdapterInstance(selection.provider),
+            providerCall: (refId, resolvedCost, selection) => {
+                return selection.adapter.purchaseAirtime({
+                    request_id: refId,
+                    serviceID: selection.providerServiceCode,
+                    phone: finalPhone,
+                    amount: resolvedCost || amount,
+                })
             }
         })
 
-        if (!result.success) {
-
-            return sendResponse(res, { status: 400, success: false, message: result.message, error: result.error })
-        }
-
-        return sendResponse(res, { message: 'Airtime sent successfully', data: result.data })
+        return sendPurchaseOutcome(res, result, 'Airtime sent successfully', 'Service provider currently unavailable')
     } catch (err) {
 
         return sendResponse(res, { status: 500, success: false, message: err?.message || 'Server error', error: err })
@@ -111,49 +123,31 @@ const purchaseData = async (req, res) => {
 
     try {
         // Find the service variant by its internal code (SKU) - Case-insensitive lookup
-        const ProviderOffer = require('../models/ProviderOffer');
         const service = await Service.findOne({ 
             code: { $regex: new RegExp(`^${variation_code}$`, 'i') } 
         }).populate('identityId');
-
-        let variationProviderCode = variation_code;
-
-        if (service) {
-            // Find the active fulfillment mapping for this service
-            const activeMapping = await ProviderOffer.findOne({ 
-                serviceId: service._id, 
-                status: true 
-            }).sort({ priority: 1 });
-
-            // Use mapped provider code, or fallback to service's own providerCode, or finally the variation_code
-            variationProviderCode = activeMapping?.providerCode || service.providerCode || variation_code;
-        }
-
-        const provider = service?.provider || 'VTPass';
-        const vendorServiceID = service?.identityId?.providerCode || finalServiceID;
+        if (!service) throw new Error('Service provider configuration not found');
 
         const result = await purchaseService.processPurchase(userId, {
             type: 'data',
             serviceId: variation_code,
+            canonicalService: service,
             amount,
             pin,
-            provider,
             expectedPrice,
             details: { phone: finalPhone, serviceID: finalServiceID, variation_code, roles: req.user.roles },
-            providerCall: (refId, resolvedCost) => providerService.purchaseData({
+            providerPreflight: selection => providerService.getAdapterInstance(selection.provider),
+            providerCall: (refId, resolvedCost, selection) => selection.adapter.purchaseData({
                 request_id: refId,
-                serviceID: vendorServiceID,
+                serviceID: selection.providerServiceCode,
                 billersCode: finalBillersCode,
-                variation_code: variationProviderCode,
+                variation_code: selection.providerCode,
                 phone: finalPhone,
                 amount: resolvedCost || service?.costPrice || service?.price || amount
-            }, provider)
+            })
         })
 
-        if (!result.success) {
-            return sendResponse(res, { status: 400, success: false, message: result.message || 'Service provider currently unavailable', error: result.error })
-        }
-        return sendResponse(res, { message: 'Data purchase successful', data: result.data })
+        return sendPurchaseOutcome(res, result, 'Data purchase successful', 'Service provider currently unavailable')
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: err.message || 'Server error', error: err })
     }
@@ -297,8 +291,11 @@ const verifyMeter = async (req, res) => {
             }
         }
 
-        const provider = service?.provider || 'VTPass';
-        const vendorServiceID = service?.identityId?.providerCode || service?.providerCode || serviceID;
+        if (!service) throw new Error('Service provider configuration not found');
+        const offer = await procurementService.selectBestOffer(service._id);
+        if (!offer?.providerId?.name) throw new Error('No active provider offer is configured for this service');
+        const provider = offer.providerId.name;
+        const vendorServiceID = procurementService.resolveProviderServiceCode(service, offer);
 
         const result = await verifyMeterWithProvider({ billersCode, serviceID: vendorServiceID, type }, provider);
         return sendResponse(res, { data: result });
@@ -310,7 +307,7 @@ const verifyMeter = async (req, res) => {
 const verifySmartcard = async (req, res) => {
     try {
         const { billersCode, serviceID, type } = req.body;
-        let service = await Service.findOne({ code: serviceID });
+        let service = await Service.findOne({ code: serviceID }).populate('identityId');
 
         // Fallback
         if (!service) {
@@ -321,8 +318,11 @@ const verifySmartcard = async (req, res) => {
             }
         }
 
-        const provider = service?.provider || 'VTPass';
-        const vendorServiceID = service?.identityId?.providerCode || service?.providerCode || serviceID;
+        if (!service) throw new Error('Service provider configuration not found');
+        const offer = await procurementService.selectBestOffer(service._id);
+        if (!offer?.providerId?.name) throw new Error('No active provider offer is configured for this service');
+        const provider = offer.providerId.name;
+        const vendorServiceID = procurementService.resolveProviderServiceCode(service, offer);
 
         const result = await verifyMeterWithProvider({ billersCode, serviceID: vendorServiceID, type }, provider);
         return sendResponse(res, { data: result });
@@ -334,7 +334,7 @@ const verifySmartcard = async (req, res) => {
 const verifyExamProfile = async (req, res) => {
     try {
         const { billersCode, serviceID, type } = req.body;
-        let service = await Service.findOne({ code: serviceID });
+        let service = await Service.findOne({ code: serviceID }).populate('identityId');
 
         // Fallback
         if (!service) {
@@ -345,8 +345,11 @@ const verifyExamProfile = async (req, res) => {
             }
         }
 
-        const provider = service?.provider || 'VTPass';
-        const vendorServiceID = service?.identityId?.providerCode || service?.providerCode || serviceID;
+        if (!service) throw new Error('Service provider configuration not found');
+        const offer = await procurementService.selectBestOffer(service._id);
+        if (!offer?.providerId?.name) throw new Error('No active provider offer is configured for this service');
+        const provider = offer.providerId.name;
+        const vendorServiceID = procurementService.resolveProviderServiceCode(service, offer);
 
         const result = await verifyMeterWithProvider({ billersCode, serviceID: vendorServiceID, type }, provider);
         return sendResponse(res, { data: result });
@@ -369,7 +372,6 @@ const payElectricityBill = async (req, res) => {
     }
 
     try {
-        const ProviderOffer = require('../models/ProviderOffer');
         const ServiceIdentity = require('../models/ServiceIdentity');
 
         // Lookup the service (case-insensitive)
@@ -385,40 +387,28 @@ const payElectricityBill = async (req, res) => {
                 service = await Service.findOne({ identityId: identity._id }).populate('identityId');
             }
         }
-
-        let vendorServiceID = finalServiceID;
-        if (service) {
-            // Find mapping
-            const activeMapping = await ProviderOffer.findOne({ serviceId: service._id, status: true }).sort({ priority: 1 });
-            vendorServiceID = activeMapping?.providerCode || service.identityId?.providerCode || service.providerCode || finalServiceID;
-        }
-
-        const provider = service?.provider || 'VTPass';
+        if (!service) throw new Error('Service provider configuration not found');
 
         const result = await purchaseService.processPurchase(userId, {
             type: 'electricity',
             serviceId: finalServiceID,
+            canonicalService: service,
             amount,
             pin,
-            provider,
             expectedPrice,
             details: { request_id: generateVTPassRequestId(), meter_number: finalMeterNumber, meter_type: finalMeterType, phone: finalPhone, roles: req.user.roles },
-            providerCall: (refId, resolvedCost) => providerService.purchaseElectricity({
+            providerPreflight: selection => providerService.getAdapterInstance(selection.provider),
+            providerCall: (refId, resolvedCost, selection) => selection.adapter.purchaseElectricity({
                 request_id: refId,
-                serviceID: vendorServiceID,
+                serviceID: selection.providerServiceCode,
                 billersCode: finalMeterNumber,
                 variation_code: finalMeterType,
                 amount: resolvedCost || amount,
                 phone: finalPhone
-            }, provider)
+            })
         })
 
-        if (!result.success) {
-            return sendResponse(res, { status: 400, success: false, message: result.message || 'Service provider currently unavailable', error: result.error })
-        }
-        const token = result.data?.token || result.data?.mainToken || '';
-
-        return sendResponse(res, { message: 'Electricity bill paid successfully', data: result.data })
+        return sendPurchaseOutcome(res, result, 'Electricity bill paid successfully', 'Service provider currently unavailable')
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: err.message || 'Server error', error: err })
     }
@@ -437,7 +427,6 @@ const rechargeCable = async (req, res) => {
     }
 
     try {
-        const ProviderOffer = require('../models/ProviderOffer');
         const ServiceIdentity = require('../models/ServiceIdentity');
 
         // Lookup the package (variation_code) case-insensitively
@@ -453,41 +442,28 @@ const rechargeCable = async (req, res) => {
                 service = await Service.findOne({ identityId: identity._id }).populate('identityId');
             }
         }
-
-        let vendorServiceID = finalServiceID;
-        let variationProviderCode = variation_code;
-
-        if (service) {
-            // Check mapping
-            const activeMapping = await ProviderOffer.findOne({ serviceId: service._id, status: true }).sort({ priority: 1 });
-            variationProviderCode = activeMapping?.providerCode || service.providerCode || variation_code;
-            vendorServiceID = service.identityId?.providerCode || finalServiceID;
-        }
-
-        const provider = service?.provider || 'VTPass';
+        if (!service) throw new Error('Service provider configuration not found');
 
         const result = await purchaseService.processPurchase(userId, {
             type: 'cable',
             serviceId: variation_code, // Use the package code for exact pricing lookup
+            canonicalService: service,
             amount,
             pin,
-            provider,
             expectedPrice,
             details: { request_id: generateVTPassRequestId(), serviceID: finalServiceID, billersCode: finalBillersCode, variation_code, roles: req.user.roles },
-            providerCall: (refId, resolvedCost) => providerService.purchaseCable({
+            providerPreflight: selection => providerService.getAdapterInstance(selection.provider),
+            providerCall: (refId, resolvedCost, selection) => selection.adapter.purchaseCable({
                 request_id: refId,
-                serviceID: vendorServiceID,
+                serviceID: selection.providerServiceCode,
                 billersCode: finalBillersCode,
-                variation_code: variationProviderCode,
+                variation_code: selection.providerCode,
                 amount: resolvedCost || service?.costPrice || service?.price || amount,
                 phone: finalPhone
-            }, provider)
+            })
         })
 
-        if (!result.success) {
-            return sendResponse(res, { status: 400, success: false, message: result.message || 'Service provider currently unavailable', error: result.error })
-        }
-        return sendResponse(res, { message: 'Cable subscription successful', data: result.data })
+        return sendPurchaseOutcome(res, result, 'Cable subscription successful', 'Service provider currently unavailable')
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: err.message || 'Server error', error: err })
     }
@@ -502,7 +478,6 @@ const purchaseExamPin = async (req, res) => {
     }
 
     try {
-        const ProviderOffer = require('../models/ProviderOffer');
         const ServiceIdentity = require('../models/ServiceIdentity');
 
         // Lookup (case-insensitive)
@@ -518,17 +493,7 @@ const purchaseExamPin = async (req, res) => {
                 service = await Service.findOne({ identityId: identity._id }).populate('identityId');
             }
         }
-
-        let vendorServiceID = serviceID;
-        let variationProviderCode = variation_code;
-
-        if (service) {
-            const activeMapping = await ProviderOffer.findOne({ serviceId: service._id, status: true }).sort({ priority: 1 });
-            variationProviderCode = activeMapping?.providerCode || service.providerCode || variation_code;
-            vendorServiceID = service.identityId?.providerCode || serviceID;
-        }
-
-        const provider = service?.provider || 'VTPass';
+        if (!service) throw new Error('Service provider configuration not found');
 
         const { validatePinQuantity } = require('../utils/pinQuantity');
         const quantityValidation = validatePinQuantity(quantity);
@@ -540,34 +505,51 @@ const purchaseExamPin = async (req, res) => {
         const result = await purchaseService.processPurchase(userId, {
             type: 'pin',
             serviceId: variation_code || serviceID,
+            canonicalService: service,
             amount, // UNIT face value per card; the engine scales pins by quantity
             pin,
-            provider,
             expectedPrice,
             details: { request_id: generateVTPassRequestId(), serviceID, variation_code, quantity: purchasedQuantity, phone, billersCode, roles: req.user.roles },
-            providerCall: (refId, resolvedCost) => providerService.purchaseExamPin({
+            providerPreflight: selection => providerService.getAdapterInstance(selection.provider),
+            providerCall: (refId, resolvedCost, selection) => selection.adapter.purchaseExamPin({
                 request_id: refId,
-                serviceID: vendorServiceID,
-                variation_code: service?.providerCode || variation_code,
+                serviceID: selection.providerServiceCode,
+                variation_code: selection.providerCode,
                 amount: resolvedCost || (service?.costPrice || service?.price || amount) * purchasedQuantity,
                 quantity: purchasedQuantity,
                 phone,
                 billersCode
-            }, provider)
+            })
         })
 
-        if (!result.success) {
-            return sendResponse(res, { status: 400, success: false, message: result.message || 'Service provider currently unavailable', error: result.error })
-        }
+        if (!result.success) return sendPurchaseOutcome(res, result, '', 'Service provider currently unavailable')
 
         // Special handling for PIN storage
-        await Pin.create({
-            userId,
-            service: variation_code,
-            code: result.data.token,
-            refId: result.data.transactionId,
-            status: 'delivered'
-        })
+        try {
+            await Pin.create({
+                userId,
+                service: variation_code,
+                code: result.data.token,
+                refId: result.data.transactionId,
+                status: 'delivered'
+            })
+        } catch (error) {
+            await Transaction.updateOne(
+                { _id: result.transactionId, status: 'success' },
+                { $set: { resolutionError: 'PIN_INVENTORY_PERSISTENCE_FAILED' } }
+            ).catch(() => {});
+            return sendResponse(res, {
+                status: 202,
+                success: false,
+                message: 'Provider confirmed the purchase; PIN delivery is pending reconciliation.',
+                data: {
+                    status: 'pending',
+                    providerOutcome: 'success',
+                    reference: result.reference,
+                    transactionId: result.transactionId,
+                },
+            });
+        }
 
         return sendResponse(res, {
             message: 'PIN purchased successfully',
@@ -603,14 +585,22 @@ const checkTransaction = async (req, res) => {
             return sendResponse(res, { status: 404, success: false, message: 'Transaction record not found in local database' })
         }
 
-        let provider = localTx.provider;
-
-        // Narrowly-scoped legacy fallback: Only for transactions with VTPass response signatures or legacy VTPass refId formats
-        if (!provider && (localTx.response?.content?.transactions || (localTx.refId && /^\d{14,}/.test(localTx.refId)))) {
-            provider = 'VTPass';
+        if (localTx.status === 'success' || localTx.status === 'failed' || localTx.isLoss) {
+            const result = await purchaseService.resolveExistingTransaction(localTx._id, localTx.providerEvidence || {});
+            return sendResponse(res, {
+                success: result.success,
+                message: result.message,
+                data: result.data || {
+                    status: result.status,
+                    providerOutcome: result.providerOutcome,
+                    reference: result.reference,
+                    transactionId: result.transactionId,
+                    refunded: result.refunded,
+                },
+            });
         }
 
-        if (!provider) {
+        if (!localTx.provider) {
             return sendResponse(res, { 
                 status: 400, 
                 success: false, 
@@ -618,8 +608,34 @@ const checkTransaction = async (req, res) => {
             });
         }
 
-        const result = await providerService.queryTransaction(localTx.refId || refId, provider)
-        return sendResponse(res, { success: true, data: serializePurchaseResult(result) })
+        let providerResult;
+        try {
+            providerResult = await providerService.queryTransaction(localTx.refId, localTx.provider)
+        } catch (error) {
+            providerResult = {
+                success: false,
+                status: 'unknown',
+                outcome: 'unknown',
+                message: 'Provider requery is currently unavailable',
+                raw: {},
+            };
+        }
+
+        const result = await purchaseService.resolveExistingTransaction(localTx._id, providerResult, { isRequery: true });
+        if (result.status === 'pending') {
+            return sendResponse(res, { status: 202, success: false, message: result.message, data: result.data });
+        }
+        return sendResponse(res, {
+            success: result.success,
+            message: result.message,
+            data: result.data || {
+                status: result.status,
+                providerOutcome: result.providerOutcome,
+                reference: result.reference,
+                transactionId: result.transactionId,
+                refunded: result.refunded,
+            }
+        })
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: 'Error checking transaction status', error: err.message })
     }

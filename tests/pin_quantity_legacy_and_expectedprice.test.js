@@ -52,6 +52,9 @@ const ORIG = {
     UserFindById: User.findById,
     WalletFindOne: Wallet.findOne,
     TransactionCreate: Transaction.create,
+    TransactionFindById: Transaction.findById,
+    TransactionFindOneAndUpdate: Transaction.findOneAndUpdate,
+    TransactionUpdateOne: Transaction.updateOne,
     ExpenseCreate: Expense.create,
     startSession: mongoose.startSession,
     verifyPin: pinService.verifyPin,
@@ -87,6 +90,7 @@ const PIN_OFFER = {
     serviceId: PIN_SERVICE._id,
     providerId: { _id: OID(), name: 'VTPass' },
     providerCode: 'waec',
+    providerServiceCode: 'waec-registration',
     costPrice: 900, // per-card cost
 };
 
@@ -112,6 +116,7 @@ Service.findOne = async () => PIN_SERVICE;
 ServiceIdentity.findOne = async () => null;
 User.findById = () => ({
     select: () => MOCK_USER,
+    session: async () => MOCK_USER,
     then: (cb) => Promise.resolve(cb(MOCK_USER)),
 });
 Wallet.findOne = async () => ({ balance: 100000 });
@@ -128,9 +133,43 @@ notificationService.notifyPurchaseSuccess = async () => {};
 notificationService.notifyPurchaseFailure = async () => {};
 procurementService.selectBestOffer = async () => PIN_OFFER;
 
+const mockTransactions = [];
+const makeTx = doc => {
+    const tx = {
+        ...doc,
+        _id: OID(),
+        transactionId: 'TXN-Q-1',
+        isLoss: Boolean(doc.isLoss),
+        resolutionState: doc.resolutionState || 'unresolved',
+        save: async function () { return this; },
+    };
+    mockTransactions.push(tx);
+    return tx;
+};
+Transaction.findById = id => ({
+    session: async () => mockTransactions.find(tx => String(tx._id) === String(id)) || null,
+    then: (resolve, reject) => Promise.resolve(mockTransactions.find(tx => String(tx._id) === String(id)) || null).then(resolve, reject),
+});
+Transaction.updateOne = async (filter, update) => {
+    const tx = mockTransactions.find(item => String(item._id) === String(filter._id));
+    if (!tx) return { modifiedCount: 0 };
+    if (update.$set) Object.assign(tx, update.$set);
+    return { modifiedCount: 1 };
+};
+Transaction.findOneAndUpdate = async (filter, update) => {
+    const tx = mockTransactions.find(item => String(item._id) === String(filter._id)
+        && item.status === filter.status
+        && item.isLoss === filter.isLoss
+        && item.providerOutcome === filter.providerOutcome
+        && item.resolutionState !== 'finalizing');
+    if (!tx) return null;
+    if (update.$set) Object.assign(tx, update.$set);
+    return tx;
+};
+
 // Reset helpers used per test case.
 const resetTransactionCreate = () => {
-    Transaction.create = (doc) => Promise.resolve({ ...doc, _id: OID(), transactionId: 'TXN-Q-1', save: async () => {} });
+    Transaction.create = (doc) => Promise.resolve(makeTx(doc));
 };
 resetTransactionCreate();
 
@@ -234,6 +273,7 @@ async function test(name, fn) {
         const result = await purchaseService.processPurchase(MOCK_USER._id, {
             type: 'pin',
             serviceId: 'WAEC_REG_500',
+            canonicalService: PIN_SERVICE,
             amount: 1000,
             pin: '1234',
             details: { request_id: 'REF-Q11', serviceID: 'waec-registration', variation_code: 'WAEC_REG_500', phone: '08012345678' },
@@ -275,6 +315,7 @@ async function test(name, fn) {
         const result = await purchaseService.processPurchase(MOCK_USER._id, {
             type: 'pin',
             serviceId: 'WAEC_REG_500',
+            canonicalService: PIN_SERVICE,
             amount: 1000,
             pin: '1234',
             expectedPrice: 1000,
@@ -301,6 +342,7 @@ async function test(name, fn) {
         let buy = async () => purchaseService.processPurchase(MOCK_USER._id, {
             type: 'pin',
             serviceId: 'WAEC_REG_500',
+            canonicalService: PIN_SERVICE,
             amount: 1000,
             quantity,
             pin: '1234',
@@ -375,6 +417,9 @@ async function test(name, fn) {
     User.findById = ORIG.UserFindById;
     Wallet.findOne = ORIG.WalletFindOne;
     Transaction.create = ORIG.TransactionCreate;
+    Transaction.findById = ORIG.TransactionFindById;
+    Transaction.findOneAndUpdate = ORIG.TransactionFindOneAndUpdate;
+    Transaction.updateOne = ORIG.TransactionUpdateOne;
     Expense.create = ORIG.ExpenseCreate;
     mongoose.startSession = ORIG.startSession;
     pinService.verifyPin = ORIG.verifyPin;

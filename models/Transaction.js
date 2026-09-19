@@ -21,6 +21,27 @@ const transactionSchema = new mongoose.Schema({
     accountingSource: { type: String, enum: ['estimated', 'actual'], default: 'estimated' },
     provider: { type: String },
     providerRef: { type: String },
+    providerOfferId: { type: mongoose.Schema.Types.ObjectId, ref: 'ProviderOffer' },
+    providerOutcome: {
+        type: String,
+        enum: ['success', 'definitive_failure', 'pending', 'unknown'],
+        default: 'unknown'
+    },
+    dispatchState: {
+        type: String,
+        enum: ['not_dispatched', 'dispatching', 'dispatched'],
+        default: 'not_dispatched'
+    },
+    providerEvidence: { type: mongoose.Schema.Types.Mixed },
+    lastProviderResponseAt: { type: Date },
+    lastRequeryAt: { type: Date },
+    resolutionState: {
+        type: String,
+        enum: ['unresolved', 'finalizing', 'resolved'],
+        default: 'unresolved'
+    },
+    resolutionError: { type: String },
+    resolvedAt: { type: Date },
     isLoss: { type: Boolean, default: false },
     details: { type: Object },
     response: { type: Object },

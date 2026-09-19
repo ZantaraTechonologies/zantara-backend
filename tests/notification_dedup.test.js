@@ -17,6 +17,8 @@ const pinService = require('../services/pin.service');
 const walletService = require('../services/wallet.service');
 const notificationService = require('../services/notification.service');
 const purchaseService = require('../services/purchase.service');
+const pricingService = require('../services/pricing.service');
+const procurementService = require('../services/procurement.service');
 const referral = require('../utils/referral');
 const pricing = require('../utils/pricing');
 const auditController = require('../controllers/auditController');
@@ -65,9 +67,14 @@ async function runNotificationDedupTests() {
         walletCredit: walletService.credit,
         walletDebit: walletService.debit,
         TransactionCreate: Transaction.create,
+        TransactionFindById: Transaction.findById,
+        TransactionFindOneAndUpdate: Transaction.findOneAndUpdate,
+        TransactionUpdateOne: Transaction.updateOne,
         ExpenseCreate: Expense.create,
         getProviderCost: pricing.getProviderCost,
         calculateServicePrice: pricing.calculateServicePrice,
+        resolvePricing: pricingService.resolvePricing,
+        selectBestOffer: procurementService.selectBestOffer,
         logAction: auditController.logAction,
         ShareExitFindById: ShareExitRequest.findById,
         ShareExitFindOneAndUpdate: ShareExitRequest.findOneAndUpdate,
@@ -131,6 +138,19 @@ async function runNotificationDedupTests() {
         kycLevel: 2,
         pushToken: 'ExponentPushToken-11111111-aaaa-bbbb-cccc-222222222222',
     };
+    const PURCHASE_SERVICE = {
+        _id: new mongoose.Types.ObjectId(),
+        code: 'TEST_AIRTIME',
+        category: 'airtime',
+        provider: 'VTPass',
+    };
+    const PURCHASE_OFFER = {
+        _id: new mongoose.Types.ObjectId(),
+        serviceId: PURCHASE_SERVICE._id,
+        providerId: { _id: new mongoose.Types.ObjectId(), name: 'VTPass' },
+        providerCode: 'test-airtime',
+        costPrice: 0,
+    };
     User.findById = function () {
         const helper = (fields) => ({
             lean: async () => {
@@ -143,6 +163,7 @@ async function runNotificationDedupTests() {
         });
         return {
             select: (fields) => helper(fields),
+            session: async () => FULL_USER,
             lean: async () => FULL_USER,
             then: (cb) => Promise.resolve(cb(FULL_USER)),
             catch: () => Promise.resolve(FULL_USER),
@@ -209,7 +230,35 @@ async function runNotificationDedupTests() {
     Expense.create = async () => [];
     pricing.getProviderCost = async (serviceId, amount) => Math.round(amount * 0.98);
     pricing.calculateServicePrice = async (user, amount) => amount;
+    pricingService.resolvePricing = async (user, service, offer, amount) => ({
+        baseCostPrice: Math.round(Number(amount) * 0.98),
+        salePrice: Number(amount),
+        quantity: 1,
+    });
+    procurementService.selectBestOffer = async () => PURCHASE_OFFER;
     auditController.logAction = async () => {};
+
+    const purchaseTransactions = [];
+    Transaction.findById = id => ({
+        session: async () => purchaseTransactions.find(tx => String(tx._id) === String(id)) || null,
+        then: (resolve, reject) => Promise.resolve(purchaseTransactions.find(tx => String(tx._id) === String(id)) || null).then(resolve, reject),
+    });
+    Transaction.updateOne = async (filter, update) => {
+        const tx = purchaseTransactions.find(item => String(item._id) === String(filter._id));
+        if (!tx) return { modifiedCount: 0 };
+        if (update.$set) Object.assign(tx, update.$set);
+        return { modifiedCount: 1 };
+    };
+    Transaction.findOneAndUpdate = async (filter, update) => {
+        const tx = purchaseTransactions.find(item => String(item._id) === String(filter._id)
+            && item.status === filter.status
+            && item.isLoss === filter.isLoss
+            && item.providerOutcome === filter.providerOutcome
+            && item.resolutionState !== 'finalizing');
+        if (!tx) return null;
+        if (update.$set) Object.assign(tx, update.$set);
+        return tx;
+    };
 
     const mockRes = () => ({
         _status: null,
@@ -464,7 +513,15 @@ async function runNotificationDedupTests() {
             let savedTx = null;
 
             Transaction.create = async (doc) => {
-                savedTx = { ...doc, _id: new mongoose.Types.ObjectId(), transactionId: 'TXN-REF-1', save: async () => {} };
+                savedTx = {
+                    ...doc,
+                    _id: new mongoose.Types.ObjectId(),
+                    transactionId: 'TXN-REF-1',
+                    isLoss: Boolean(doc.isLoss),
+                    resolutionState: doc.resolutionState || 'unresolved',
+                    save: async function () { return this; },
+                };
+                purchaseTransactions.push(savedTx);
                 return savedTx;
             };
 
@@ -485,6 +542,7 @@ async function runNotificationDedupTests() {
             const result = await purchaseService.processPurchase(FULL_USER._id, {
                 type: 'airtime',
                 serviceId: 'mtn',
+                canonicalService: PURCHASE_SERVICE,
                 amount: 5000,
                 pin: '1234',
                 details: { request_id: 'ZNT-REF-ORDER-1', phone: '08012345678' },
@@ -524,26 +582,22 @@ async function runNotificationDedupTests() {
                 commitTransaction: async () => { throw new Error('COMMIT_FAILED'); },
             });
 
-            let rejected = false;
-            try {
-                await purchaseService.processPurchase(FULL_USER._id, {
-                    type: 'airtime',
-                    serviceId: 'mtn',
-                    amount: 5000,
-                    pin: '1234',
-                    details: { request_id: 'ZNT-REF-ROLLBACK-1', phone: '08012345678' },
-                    providerCall: async () => ({
-                        success: true, status: 'success',
-                        message: 'Airtime delivered', transactionId: 'VTP-AIR-RB1',
-                    }),
-                });
-            } catch (e) {
-                rejected = true;
-            }
+            const result = await purchaseService.processPurchase(FULL_USER._id, {
+                type: 'airtime',
+                serviceId: 'mtn',
+                canonicalService: PURCHASE_SERVICE,
+                amount: 5000,
+                pin: '1234',
+                details: { request_id: 'ZNT-REF-ROLLBACK-1', phone: '08012345678' },
+                providerCall: async () => ({
+                    success: true, status: 'success',
+                    message: 'Airtime delivered', transactionId: 'VTP-AIR-RB1',
+                }),
+            });
 
             mongoose.startSession = async () => baseSession();
 
-            assert.strictEqual(rejected, true, 'purchase rejects on failed commit');
+            assert.strictEqual(result.status, 'pending', 'provider success remains unresolved when local commit fails');
             assert.strictEqual(sessionAborted, true, 'transaction is aborted on rollback');
             assert.strictEqual(referralNotifies.length, 0, 'zero referral notifications after rollback');
             assert.strictEqual(purchaseSuccessNotifies.length, 0, 'zero success notifications after rollback');
@@ -766,9 +820,14 @@ async function runNotificationDedupTests() {
         walletService.credit = O.walletCredit;
         walletService.debit = O.walletDebit;
         Transaction.create = O.TransactionCreate;
+        Transaction.findById = O.TransactionFindById;
+        Transaction.findOneAndUpdate = O.TransactionFindOneAndUpdate;
+        Transaction.updateOne = O.TransactionUpdateOne;
         Expense.create = O.ExpenseCreate;
         pricing.getProviderCost = O.getProviderCost;
         pricing.calculateServicePrice = O.calculateServicePrice;
+        pricingService.resolvePricing = O.resolvePricing;
+        procurementService.selectBestOffer = O.selectBestOffer;
         auditController.logAction = O.logAction;
         ShareExitRequest.findById = O.ShareExitFindById;
         ShareExitRequest.findOneAndUpdate = O.ShareExitFindOneAndUpdate;

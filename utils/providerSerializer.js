@@ -59,6 +59,10 @@ const ALLOWED_METADATA_KEYS = new Set([
     'successPath',
     'successValue',
     'statusPath',
+    'pendingPath',
+    'pendingValue',
+    'failurePath',
+    'failureValue',
     'transactionIdPath',
     'messagePath',
     'balancePath',
@@ -186,7 +190,7 @@ function validateMetadata(metadataObj) {
         }
 
         // 6. Success Value
-        if (key === 'successValue') {
+        if (key === 'successValue' || key === 'pendingValue' || key === 'failureValue') {
             validated[key] = typeof val === 'string' ? val.trim() : String(val);
             continue;
         }

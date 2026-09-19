@@ -4,105 +4,385 @@ const User = require('../models/User');
 const Wallet = require('../models/Wallet');
 const walletService = require('./wallet.service');
 const refundService = require('./refund.service');
-const providerService = require('./provider.service');
 const pinService = require('./pin.service');
-const { generateTransactionId, generateReference, generateVTPassRequestId } = require('../utils/generateID');
-const { processReferralBonus } = require('../utils/referral');
-const { calculateServicePrice, getProviderCost } = require('../utils/pricing');
+const { generateTransactionId, generateReference } = require('../utils/generateID');
 const notificationService = require('./notification.service');
 const Expense = require('../models/Expense');
 const { serializePurchaseResult } = require('../utils/customerResponseSerializer');
 
-const Service = require('../models/Service');
 const pricingEngine = require('./pricing.service');
 const procurementEngine = require('./procurement.service');
 const {
     logPriceMismatch,
-    logPreviewFailure,
     logMissingExpectedPrice,
-    logLegacyPricingFallback,
 } = require('../utils/pricingLogger');
 const { resolvePinQuantity } = require('../utils/pinQuantity');
+const { PROVIDER_OUTCOMES, normalizeProviderOutcome } = require('../utils/providerOutcome');
 
 class PurchaseService {
-    /**
-     * Generic execution flow for all utility purchases
-     */
-    async processPurchase(userId, { type, serviceId, amount, details, providerCall, referralAmount, pin, provider = 'VTPass', expectedPrice }) {
-        let transaction;
-        let referralNotificationIntent = null;
-        try {
-            // 0. Verify Transaction PIN first
-            await pinService.verifyPin(userId, pin);
+    _pendingResult(transaction, outcome, message) {
+        return {
+            success: false,
+            status: 'pending',
+            providerOutcome: outcome,
+            message: message || 'Transaction is awaiting provider confirmation.',
+            transactionId: transaction._id,
+            reference: transaction.refId,
+            data: {
+                status: 'pending',
+                providerOutcome: outcome,
+                reference: transaction.refId,
+                transactionId: transaction.transactionId,
+            },
+        };
+    }
 
-            const user = await User.findById(userId);
+    async _recordProviderEvidence(transaction, response, isRequery = false) {
+        const normalized = normalizeProviderOutcome(response);
+        const now = new Date();
+        const update = {
+            providerOutcome: normalized.outcome,
+            dispatchState: 'dispatched',
+            providerEvidence: normalized,
+            response: normalized.raw,
+            lastProviderResponseAt: now,
+            resolutionError: null,
+        };
+        if (normalized.transactionId) update.providerRef = normalized.transactionId;
+        if (isRequery) update.lastRequeryAt = now;
+
+        const replaceableOutcomes = {
+            [PROVIDER_OUTCOMES.SUCCESS]: [
+                null,
+                PROVIDER_OUTCOMES.UNKNOWN,
+                PROVIDER_OUTCOMES.PENDING,
+                PROVIDER_OUTCOMES.DEFINITIVE_FAILURE,
+                PROVIDER_OUTCOMES.SUCCESS,
+            ],
+            [PROVIDER_OUTCOMES.DEFINITIVE_FAILURE]: [
+                null,
+                PROVIDER_OUTCOMES.UNKNOWN,
+                PROVIDER_OUTCOMES.PENDING,
+                PROVIDER_OUTCOMES.DEFINITIVE_FAILURE,
+            ],
+            [PROVIDER_OUTCOMES.PENDING]: [null, PROVIDER_OUTCOMES.UNKNOWN, PROVIDER_OUTCOMES.PENDING],
+            [PROVIDER_OUTCOMES.UNKNOWN]: [null, PROVIDER_OUTCOMES.UNKNOWN],
+        };
+
+        const recorded = await Transaction.updateOne(
+            {
+                _id: transaction._id,
+                status: 'pending',
+                isLoss: false,
+                providerOutcome: { $in: replaceableOutcomes[normalized.outcome] },
+            },
+            { $set: update }
+        );
+        if (recorded.modifiedCount > 0) {
+            Object.assign(transaction, update);
+            return normalized;
+        }
+
+        const latest = await Transaction.findById(transaction._id);
+        if (!latest) throw new Error('Transaction not found after provider response');
+        Object.assign(transaction, latest.toObject ? latest.toObject() : latest);
+        return normalizeProviderOutcome(latest.providerEvidence);
+    }
+
+    async _finalizeSuccessfulPurchase(transactionId) {
+        const session = await mongoose.startSession();
+        session.startTransaction();
+        let referralNotificationIntent = null;
+        let transaction;
+        let user;
+
+        try {
+            transaction = await Transaction.findOneAndUpdate(
+                {
+                    _id: transactionId,
+                    status: 'pending',
+                    isLoss: false,
+                    providerOutcome: PROVIDER_OUTCOMES.SUCCESS,
+                    resolutionState: { $ne: 'finalizing' },
+                },
+                { $set: { resolutionState: 'finalizing', resolutionError: null } },
+                { new: true, session }
+            );
+
+            if (!transaction) {
+                await session.abortTransaction();
+                const existing = await Transaction.findById(transactionId);
+                if (existing?.status === 'success') {
+                    return {
+                        success: true,
+                        status: 'success',
+                        providerOutcome: PROVIDER_OUTCOMES.SUCCESS,
+                        transactionId: existing._id,
+                        reference: existing.refId,
+                        data: serializePurchaseResult(existing.providerEvidence || {}, {
+                            reference: existing.refId,
+                            transactionId: existing.transactionId,
+                        }),
+                    };
+                }
+                return this._pendingResult(existing || { _id: transactionId }, existing?.providerOutcome || PROVIDER_OUTCOMES.SUCCESS);
+            }
+
+            user = await User.findById(transaction.userId).session(session);
+            if (!user) throw new Error('User not found during purchase finalization');
+
+            const response = normalizeProviderOutcome(transaction.providerEvidence);
+            let finalProviderCost = transaction.costPrice;
+            if (response.financials?.source === 'actual') {
+                const { vendorCost, vendorCommission, providerUnitPrice, convenienceFee } = response.financials;
+                transaction.actualCostPrice = vendorCost;
+                transaction.vendorCommission = vendorCommission;
+                transaction.providerUnitPrice = providerUnitPrice;
+                transaction.convenienceFee = convenienceFee;
+                transaction.accountingSource = 'actual';
+                finalProviderCost = vendorCost;
+                transaction.costPrice = vendorCost;
+                transaction.actualProfit = transaction.amount - vendorCost;
+                transaction.profit = transaction.actualProfit;
+            }
+
+            transaction.status = 'success';
+            transaction.response = response.raw;
+            transaction.providerRef = response.transactionId || transaction.providerRef;
+            await transaction.save({ session });
+
+            const { processLifetimeCommission } = require('../utils/referral');
+            const referralResult = await processLifetimeCommission(
+                transaction.userId,
+                transaction.amount,
+                transaction._id,
+                transaction.transactionId,
+                session
+            );
+            const finalCommission = referralResult && typeof referralResult === 'object'
+                ? Number(referralResult.commission) || 0
+                : Number(referralResult) || 0;
+            referralNotificationIntent = referralResult && typeof referralResult === 'object'
+                ? referralResult.notificationIntent
+                : null;
+
+            transaction.netProfitAfterCommission = transaction.profit - finalCommission;
+            transaction.resolutionState = 'resolved';
+            transaction.resolvedAt = new Date();
+            transaction.resolutionError = null;
+            await transaction.save({ session });
+
+            await Expense.create([{
+                category: 'API_COST',
+                title: `${transaction.provider} Cost: ${transaction.service}`,
+                amount: finalProviderCost,
+                vendor: transaction.provider,
+                date: new Date(),
+                paymentSource: 'Business Float',
+                notes: `Transaction ID: ${transaction.transactionId} | Source: ${transaction.accountingSource}`,
+                createdBy: transaction.userId,
+            }], { session });
+
+            await session.commitTransaction();
+
+            if (referralNotificationIntent) {
+                notificationService.notifyReferralEarned(referralNotificationIntent).catch(error => {
+                    console.error('[Referral Notification Background Error]', error?.message);
+                });
+            }
+            notificationService.notifyPurchaseSuccess(user, {
+                type: transaction.type,
+                serviceId: transaction.service,
+                amount: transaction.amount,
+                reference: transaction.refId,
+                details: transaction.details,
+                greetingName: user.name,
+            }).catch(error => {
+                console.error('[Notification Background Error] Success notification failed:', error?.message);
+            });
+
+            return {
+                success: true,
+                status: 'success',
+                providerOutcome: PROVIDER_OUTCOMES.SUCCESS,
+                data: serializePurchaseResult(response, {
+                    reference: transaction.refId,
+                    transactionId: transaction.transactionId,
+                }),
+                transactionId: transaction._id,
+                reference: transaction.refId,
+            };
+        } catch (error) {
+            await session.abortTransaction();
+            await Transaction.updateOne(
+                { _id: transactionId, status: 'pending', isLoss: false },
+                { $set: { resolutionState: 'unresolved', resolutionError: error.message } }
+            ).catch(() => {});
+            throw error;
+        } finally {
+            session.endSession();
+        }
+    }
+
+    async resolveExistingTransaction(transactionId, response, { isRequery = false } = {}) {
+        const transaction = await Transaction.findById(transactionId);
+        if (!transaction) throw new Error('Transaction not found');
+
+        if (transaction.status === 'success') {
+            return {
+                success: true,
+                status: 'success',
+                providerOutcome: PROVIDER_OUTCOMES.SUCCESS,
+                transactionId: transaction._id,
+                reference: transaction.refId,
+                data: serializePurchaseResult(transaction.providerEvidence || {}, {
+                    reference: transaction.refId,
+                    transactionId: transaction.transactionId,
+                }),
+            };
+        }
+        if (transaction.status === 'failed' || transaction.isLoss) {
+            return {
+                success: false,
+                status: 'failed',
+                providerOutcome: transaction.providerOutcome,
+                refunded: Boolean(transaction.isLoss),
+                transactionId: transaction._id,
+                reference: transaction.refId,
+            };
+        }
+
+        const normalized = await this._recordProviderEvidence(transaction, response, isRequery);
+
+        if (transaction.status === 'success') {
+            return {
+                success: true,
+                status: 'success',
+                providerOutcome: PROVIDER_OUTCOMES.SUCCESS,
+                transactionId: transaction._id,
+                reference: transaction.refId,
+                data: serializePurchaseResult(transaction.providerEvidence || {}, {
+                    reference: transaction.refId,
+                    transactionId: transaction.transactionId,
+                }),
+            };
+        }
+        if (transaction.status === 'failed' || transaction.isLoss) {
+            return {
+                success: false,
+                status: 'failed',
+                providerOutcome: transaction.providerOutcome,
+                refunded: Boolean(transaction.isLoss),
+                transactionId: transaction._id,
+                reference: transaction.refId,
+            };
+        }
+
+        if (normalized.outcome === PROVIDER_OUTCOMES.SUCCESS) {
+            try {
+                return await this._finalizeSuccessfulPurchase(transaction._id);
+            } catch (error) {
+                return this._pendingResult(
+                    transaction,
+                    PROVIDER_OUTCOMES.SUCCESS,
+                    'Provider confirmed fulfillment; local finalization is pending reconciliation.'
+                );
+            }
+        }
+
+        if (normalized.outcome === PROVIDER_OUTCOMES.DEFINITIVE_FAILURE) {
+            const refund = await refundService.processRefund(
+                transaction._id,
+                normalized.message || 'Provider definitively rejected the transaction',
+                { mode: 'provider_failure' }
+            );
+            const customer = await User.findById(transaction.userId);
+            if (!refund.alreadyRefunded && customer) {
+                notificationService.notifyPurchaseFailure(customer, {
+                    type: transaction.type,
+                    serviceId: transaction.service,
+                    amount: transaction.amount,
+                    reference: transaction.refId,
+                    reason: normalized,
+                    refunded: true,
+                    greetingName: customer.name,
+                }).catch(error => {
+                    console.error('[Notification Background Error] Failure notification failed:', error?.message);
+                });
+            }
+            return {
+                success: false,
+                status: 'failed',
+                providerOutcome: PROVIDER_OUTCOMES.DEFINITIVE_FAILURE,
+                refunded: true,
+                message: normalized.message || 'Provider could not complete the transaction.',
+                transactionId: transaction._id,
+                reference: transaction.refId,
+                data: null,
+            };
+        }
+
+        return this._pendingResult(transaction, normalized.outcome, normalized.message);
+    }
+
+    /** Generic execution flow for all utility purchases. */
+    async processPurchase(userId, { type, serviceId, canonicalService, amount, details, providerCall, providerPreflight, pin, expectedPrice }) {
+        let transaction;
+        let user;
+        let reference;
+        let walletDebited = false;
+        let dispatchMayHaveOccurred = false;
+
+        try {
+            await pinService.verifyPin(userId, pin);
+            user = await User.findById(userId);
             if (!user) throw new Error('User not found');
 
-            let costPrice, finalAmount, pricingSnapshot = null;
-            let currentProvider = provider;
-            // PIN batch size (fixed-cost cards). Absent/invalid resolves to 1.
+            if (!canonicalService?._id || canonicalService.status === false) {
+                throw new Error('A valid canonical service is required for purchase');
+            }
+
             const quantity = resolvePinQuantity(details?.quantity);
-
-            // --- BATCH 2: NEW ENGINES INTEGRATION ---
-            // Try to find the normalized service by its code (e.g., MTN_DATA_1GB)
-            let service = await Service.findOne({ code: serviceId });
-            
-            // Fallback: If not found by code, check if serviceId is a ServiceIdentity slug (e.g. mtnairtime)
-            if (!service) {
-                const ServiceIdentity = require('../models/ServiceIdentity');
-                const identity = await ServiceIdentity.findOne({ slug: String(serviceId).toLowerCase() });
-                if (identity) {
-                    service = await Service.findOne({ identityId: identity._id });
-                }
+            const service = canonicalService;
+            const offer = await procurementEngine.selectBestOffer(service._id);
+            if (!offer) throw new Error('No active provider offer is configured for this service');
+            if (offer.status === false || offer.providerId?.status === 'inactive') {
+                throw new Error('Selected provider offer is not active');
+            }
+            if (!offer.providerId?.name || !String(offer.providerCode || '').trim()) {
+                throw new Error('Selected provider offer is invalid');
+            }
+            const offerServiceId = offer.serviceId?._id || offer.serviceId;
+            if (!offerServiceId || String(offerServiceId) !== String(service._id)) {
+                throw new Error('Selected provider offer does not belong to the canonical service');
             }
 
-            let offer = null;
-            let pricingResult = null;
+            const currentProvider = offer.providerId.name;
+            const providerServiceCode = procurementEngine.resolveProviderServiceCode(service, offer);
+            const pricingResult = await pricingEngine.resolvePricing(user, service, offer, amount, quantity);
 
-            if (service) {
-                // 1. Select the best provider offer (manual_priority strategy)
-                offer = await procurementEngine.selectBestOffer(service._id);
-                if (offer) {
-                    currentProvider = offer.providerId.name;
-                    // 2. Resolve pricing based on rules.
-                    // `amount` is the TOTAL for variable-cost categories and the
-                    // UNIT face value for `pin`; the engine scales pins by quantity.
-                    pricingResult = await pricingEngine.resolvePricing(user, service, offer, amount, quantity);
-                }
+            const selection = {
+                provider: currentProvider,
+                providerCode: offer.providerCode,
+                providerServiceCode,
+                providerOfferId: offer._id,
+            };
+            if (typeof providerPreflight === 'function') {
+                selection.adapter = await providerPreflight(selection);
+                if (!selection.adapter) throw new Error('Selected provider could not be initialized');
             }
 
-            if (pricingResult) {
-                // Use results from the new engines
-                costPrice = pricingResult.baseCostPrice; // total provider cost (pins: unitCost * qty)
-                finalAmount = pricingResult.salePrice;   // total customer charge (pins: unitPrice * qty)
-                pricingSnapshot = {
-                    serviceId: service._id,
-                    providerId: offer.providerId._id,
-                    providerOfferId: offer._id,
-                    ...pricingResult
-                };
-            } else {
-                // --- FALLBACK TO LEGACY PRICING ---
-                logLegacyPricingFallback({
-                    userId,
-                    serviceId,
-                    type,
-                    amount,
-                    source: 'purchase.service/processPurchase',
-                });
-                costPrice = await getProviderCost(serviceId, amount);
-                finalAmount = await calculateServicePrice(user, amount, costPrice);
-                if (type === 'pin' && quantity > 1) {
-                    // Legacy pin pricing is per-card; scale the whole order.
-                    costPrice = costPrice * quantity;
-                    finalAmount = finalAmount * quantity;
-                }
-            }
+            const costPrice = pricingResult.baseCostPrice;
+            const finalAmount = pricingResult.salePrice;
+            const pricingSnapshot = {
+                serviceId: service._id,
+                providerId: offer.providerId._id,
+                providerOfferId: offer._id,
+                ...pricingResult,
+            };
 
-            // --- BATCH 3.1: PURCHASE CHECKSUM (MISMATCH PREVENTION) ---
             if (expectedPrice !== undefined && expectedPrice !== null) {
                 if (Number(expectedPrice) !== Number(finalAmount)) {
-                    // Log structured mismatch event before throwing
                     logPriceMismatch({
                         userId,
                         userRole: user.accountType || user.role,
@@ -116,7 +396,6 @@ class PurchaseService {
                     throw new Error(`The price changed before checkout. Expected: ₦${expectedPrice}, but actual price is ₦${finalAmount}. Please review the updated price and try again.`);
                 }
             } else {
-                // No expectedPrice = legacy or un-migrated client path
                 logMissingExpectedPrice({
                     userId,
                     userRole: user.accountType || user.role,
@@ -128,219 +407,143 @@ class PurchaseService {
                 });
             }
 
-            // --- PROFIT SAFETY CHECK ---
             const profit = finalAmount - costPrice;
-            if (profit < 0) {
-                throw new Error(`Transaction aborted: Unsafe pricing (Potential Loss). Cost: ${costPrice}, Sale: ${finalAmount}.`);
-            }
+            if (profit < 0) throw new Error(`Transaction aborted: Unsafe pricing (Potential Loss). Cost: ${costPrice}, Sale: ${finalAmount}.`);
 
             const wallet = await Wallet.findOne({ userId });
             if (!wallet) throw new Error('Wallet not found');
             if (wallet.balance < finalAmount) throw new Error('Insufficient wallet balance');
-
-            // KYC Checks
             const kycLimits = { 1: 50000, 2: 500000, 3: 100000000 };
-            const userLimit = kycLimits[user.kycLevel || 1];
-            if (finalAmount > userLimit) {
+            if (finalAmount > kycLimits[user.kycLevel || 1]) {
                 throw new Error(`Transaction amount exceeds your Tier ${user.kycLevel || 1} limit.`);
             }
 
-            // 1. Create Transaction Record
-            const transactionId = generateTransactionId();
-            const reference = details.request_id || generateReference();
-
+            reference = details.request_id || generateReference();
             transaction = await Transaction.create({
                 userId,
-                transactionId,
+                transactionId: generateTransactionId(),
                 refId: reference,
                 type,
-                service: serviceId,
+                service: service.code,
                 amount: finalAmount,
-                costPrice, // Authoritative (estimated for now)
+                costPrice,
                 estimatedCostPrice: costPrice,
-                salePrice: amount, // Requested face value
-                agentPrice: finalAmount, 
-                profit, // Authoritative (estimated for now)
+                salePrice: amount,
+                agentPrice: finalAmount,
+                profit,
                 estimatedProfit: profit,
                 userRole: user.role && user.role !== 'user' ? user.role : (user.accountType || user.role),
                 provider: currentProvider,
+                providerOfferId: offer._id,
+                providerOutcome: PROVIDER_OUTCOMES.UNKNOWN,
+                dispatchState: 'not_dispatched',
+                resolutionState: 'unresolved',
                 status: 'pending',
                 details: { ...details, originalAmount: amount, request_id: reference, quantity },
-                pricingSnapshot: pricingSnapshot // Persist the engine snapshot
+                pricingSnapshot,
             });
 
-            // 2. Debit Wallet
             await walletService.debit(userId, finalAmount, reference, `${type}_purchase`, transaction._id);
+            walletDebited = true;
 
-            // 3. Call External Provider
-            const response = await providerCall(reference, costPrice);
+            await Transaction.updateOne(
+                { _id: transaction._id, status: 'pending', isLoss: false },
+                { $set: { dispatchState: 'dispatching' } }
+            );
+            transaction.dispatchState = 'dispatching';
+            dispatchMayHaveOccurred = true;
 
-            if (!response.success) {
-
-                // 4. Automated Refund if provider fails
-                await refundService.processRefund(transaction._id, response.message || 'Provider failed');
-
-                // 4a. Failure advisory — only after the refund has completed.
-                // Sanitized copy (provider refusal text never reaches the customer
-                // or exposes internal routing). Fire-and-forget; never blocks.
-                notificationService.notifyPurchaseFailure(user, {
-                    type,
-                    serviceId: transaction.service || serviceId,
-                    amount: finalAmount,
-                    reference,
-                    reason: response,
-                    refunded: true,
-                    greetingName: user.name
-                }).catch(notifErr => {
-                    console.error('[Notification Background Error] Failure notification failed:', notifErr && notifErr.message);
-                });
-
-                return {
+            let response;
+            try {
+                response = await providerCall(reference, costPrice, selection);
+            } catch (error) {
+                response = {
                     success: false,
-                    message: (response && response.message) || 'Service provider could not complete the transaction.',
-                    error: response && response.message
-                        ? { message: response.message }
-                        : { message: 'Service provider could not complete the transaction.' },
-                    transactionId: transaction._id,
-                    reference,
-                    data: null,
+                    status: 'unknown',
+                    outcome: PROVIDER_OUTCOMES.UNKNOWN,
+                    message: error.message || 'Provider request outcome is unknown',
+                    raw: {},
                 };
             }
 
-            // 5. Finalize transaction on success with atomicity
+            return await this.resolveExistingTransaction(transaction._id, response);
+        } catch (error) {
+            if (!transaction) throw error;
 
-            const session = await mongoose.startSession();
-            session.startTransaction();
-            try {
-                transaction.status = 'success';
-                transaction.response = response.raw;
-
-                // --- Hybrid Accounting Update ---
-                let finalProviderCost = costPrice; // Fallback to estimated
-                if (response.financials && response.financials.source === 'actual') {
-                    const { vendorCost, vendorCommission, providerUnitPrice, convenienceFee } = response.financials;
-                    
-                    transaction.actualCostPrice = vendorCost;
-                    transaction.vendorCommission = vendorCommission;
-                    transaction.providerUnitPrice = providerUnitPrice;
-                    transaction.convenienceFee = convenienceFee;
-                    transaction.accountingSource = 'actual';
-                    
-                    // Update authoritative profit and cost fields
-                    finalProviderCost = vendorCost;
-                    transaction.costPrice = vendorCost;
-                    transaction.actualProfit = transaction.amount - vendorCost;
-                    transaction.profit = transaction.actualProfit;
-                }
-                
-                await transaction.save({ session });
-
-                // 6. Referral Bonus (Lifetime Commission)
-                // Note: processLifetimeCommission also writes netProfitAfterCommission on the parent txn
-                // The function returns EITHER a legacy numeric commission amount (from mocks / the
-                // no-referrer fast path) OR { commission, notificationIntent } (from production code
-                // that defers the customer notification until after the parent commit below).
-                const { processLifetimeCommission } = require('../utils/referral');
-                const referralResult = await processLifetimeCommission(userId, finalAmount, transaction._id, transaction.transactionId, session);
-
-                const finalCommission = (referralResult && typeof referralResult === 'object')
-                    ? Number(referralResult.commission) || 0
-                    : (Number(referralResult) || 0);
-                referralNotificationIntent = (referralResult && typeof referralResult === 'object')
-                    ? referralResult.notificationIntent
-                    : null;
-
-                transaction.netProfitAfterCommission = transaction.profit - finalCommission;
-                console.log(`[PurchaseService] Hybrid Accounting: ${transaction.accountingSource}. Cost: ${transaction.costPrice}, Profit: ${transaction.profit}. Commission: ${finalCommission}`);
-                
-                await transaction.save({ session });
-
-                // 8. Log the vendor cost as an Expense for financial tracking
-                await Expense.create([{
-                    category: 'API_COST',
-                    title: `${provider} Cost: ${serviceId}`,
-                    amount: finalProviderCost,
-                    vendor: provider,
-                    date: new Date(),
-                    paymentSource: 'Business Float',
-                    notes: `Transaction ID: ${transaction.transactionId} | Source: ${transaction.accountingSource}`,
-                    createdBy: userId 
-                }], { session });
-
-                await session.commitTransaction();
-
-            } catch (error) {
-                await session.abortTransaction();
-
-                throw error;
-            } finally {
-                session.endSession();
-            }
-
-            // 7. Referral notification — dispatched ONLY after the parent commit.
-            // The referrer is never told about a commission before the purchase
-            // is durably committed. Fire-and-forget; never blocks the response.
-            if (referralNotificationIntent) {
-                notificationService.notifyReferralEarned(referralNotificationIntent).catch(err => {
-                    console.error('[Referral Notification Background Error]', err && err.message);
-                });
-            }
-
-            // Notify user of success (asynchronous fire-and-forget so it doesn't block HTTP response)
-            notificationService.notifyPurchaseSuccess(user, {
-                type,
-                serviceId: transaction.service || serviceId,
-                amount: finalAmount,
-                reference,
-                details: transaction.details || details,
-                greetingName: user.name
-            }).catch(err => {
-                console.error('[Notification Background Error] Success notification failed:', err && err.message);
-            });
-
-            // Build normalized Zantara response from an explicit allowlist.
-            // Provider internals (raw, financials, vendor costs, commissions)
-            // stay on the persisted Transaction for accounting/reconciliation
-            // and NEVER reach the customer DTO.
-            const normalizedData = serializePurchaseResult(response, {
-                reference,
-                transactionId: transaction.transactionId || response.transactionId || reference,
-            });
-
-            return {
-                success: true,
-                data: normalizedData,
-                transactionId: transaction._id,
-                reference,
-            };
-
-        } catch (err) {
-
-            if (transaction && transaction.status === 'pending') {
+            if (dispatchMayHaveOccurred) {
+                await Transaction.updateOne(
+                    {
+                        _id: transaction._id,
+                        status: 'pending',
+                        isLoss: false,
+                        providerOutcome: { $in: [null, PROVIDER_OUTCOMES.UNKNOWN] },
+                    },
+                    {
+                        $set: {
+                            providerOutcome: PROVIDER_OUTCOMES.UNKNOWN,
+                            dispatchState: 'dispatching',
+                            resolutionState: 'unresolved',
+                            resolutionError: error.message,
+                        },
+                    }
+                ).catch(() => {});
+                let latest = null;
                 try {
-
-                    await refundService.processRefund(transaction._id, err.message);
-
-                    // Notify user of failure (asynchronous fire-and-forget).
-                    // `refunded: true` is safe here because processRefund was
-                    // awaited successfully BEFORE the notification is fired.
-                    // The raw err.message is sanitized before any customer reaches it.
-                    notificationService.notifyPurchaseFailure(user, {
-                        type,
-                        serviceId: transaction.service || serviceId,
-                        amount: transaction.amount,
-                        reference,
-                        reason: err,
-                        refunded: true,
-                        greetingName: user.name
-                    }).catch(notifErr => {
-                        console.error('[Notification Background Error] Failure notification failed:', notifErr && notifErr.message);
-                    });
-                } catch (refundErr) {
-
+                    latest = await Transaction.findById(transaction._id);
+                } catch (_) {}
+                if (latest?.status === 'success') {
+                    return {
+                        success: true,
+                        status: 'success',
+                        providerOutcome: PROVIDER_OUTCOMES.SUCCESS,
+                        transactionId: latest._id,
+                        reference: latest.refId,
+                        data: serializePurchaseResult(latest.providerEvidence || {}, {
+                            reference: latest.refId,
+                            transactionId: latest.transactionId,
+                        }),
+                    };
                 }
+                if (latest?.status === 'failed' || latest?.isLoss) {
+                    return {
+                        success: false,
+                        status: 'failed',
+                        providerOutcome: latest.providerOutcome,
+                        refunded: Boolean(latest.isLoss),
+                        transactionId: latest._id,
+                        reference: latest.refId,
+                    };
+                }
+                const unresolved = latest || transaction;
+                return this._pendingResult(
+                    unresolved,
+                    unresolved.providerOutcome || PROVIDER_OUTCOMES.UNKNOWN,
+                    'Provider resolution is pending reconciliation.'
+                );
             }
-            throw err;
+
+            if (walletDebited) {
+                const refund = await refundService.processRefund(
+                    transaction._id,
+                    error.message,
+                    { mode: 'pre_dispatch' }
+                );
+                return {
+                    success: false,
+                    status: 'failed',
+                    providerOutcome: PROVIDER_OUTCOMES.UNKNOWN,
+                    refunded: !refund.skipped,
+                    message: 'Transaction was cancelled before provider dispatch.',
+                    transactionId: transaction._id,
+                    reference,
+                };
+            }
+
+            await Transaction.updateOne(
+                { _id: transaction._id, status: 'pending' },
+                { $set: { status: 'failed', resolutionError: error.message, resolvedAt: new Date() } }
+            ).catch(() => {});
+            throw error;
         }
     }
 }

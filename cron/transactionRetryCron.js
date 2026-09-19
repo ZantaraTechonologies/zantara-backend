@@ -1,20 +1,11 @@
 const cron = require('node-cron')
-const TransactionStatus = require('../models/TransactionStatus')
-const { retryTransaction } = require('../utils/transactionRetry')
 const paymentGatewayService = require('../services/paymentGateway.service')
 
 cron.schedule('*/5 * * * *', async () => {
-    // 1. Existing retry logic for failed provider-side transactions
-    const failed = await TransactionStatus.find({
-        status: 'failed',
-        retries: { $lt: 5 },
-        type: { $nin: ['funding', 'investment_buy'] }
-    })
-    for (const t of failed) {
-        await retryTransaction(t.refId)
-    }
+    // VTU purchases are never resubmitted automatically. Ambiguous fulfillment
+    // remains pending until an idempotent provider requery resolves it.
 
-    // 2. Crash-recovery sweep: finish transactions stranded in the settlement
+    // Crash-recovery sweep: finish transactions stranded in the settlement
     //    state machine ('settlement_pending' from an interrupted settle, or
     //    'processing' older than the crash-window threshold). Exactly-once and
     //    idempotent — see recoverStrandedSettlements.
