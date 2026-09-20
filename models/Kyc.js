@@ -15,7 +15,17 @@ const kycSchema = new mongoose.Schema({
     rejectionReason: String,
     verifiedAt: Date,
     verifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
-}, { timestamps: true });
+}, { timestamps: true, autoIndex: false });
+
+// Installed explicitly by the KYC pending-index migration.
+kycSchema.index(
+    { userId: 1, status: 1 },
+    {
+        unique: true,
+        partialFilterExpression: { status: 'pending' },
+        name: 'uniq_pending_kyc_per_user'
+    }
+);
 
 const Kyc = mongoose.model('Kyc', kycSchema);
 

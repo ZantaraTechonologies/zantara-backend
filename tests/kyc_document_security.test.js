@@ -183,6 +183,61 @@ async function run() {
             assert.ok(!JSON.stringify(res.body).includes('database topology secret'));
         });
 
+        await test('pending-index duplicate maps to existing business response and cleans losing asset once', async () => {
+            resetControllerState();
+            Kyc.create = async () => {
+                const error = new Error('duplicate detail must not be exposed');
+                error.code = 11000;
+                error.keyPattern = { userId: 1, status: 1 };
+                error.keyValue = { userId: '507f1f77bcf86cd799439011', status: 'pending' };
+                throw error;
+            };
+            const res = await submit({ file: validFile() });
+            assert.strictEqual(res.statusCode, 400);
+            assert.strictEqual(res.body.message, 'You already have a verification request under review');
+            assert.strictEqual(cleanupCalls.length, 1);
+            assert.deepStrictEqual(cleanupCalls[0], {
+                publicId: 'zantara/kyc/document',
+                resourceType: 'image',
+                deliveryType: 'authenticated'
+            });
+            assert.ok(!JSON.stringify(res.body).includes('duplicate detail'));
+            assert.ok(!JSON.stringify(res.body).includes('uniq_pending_kyc_per_user'));
+        });
+
+        await test('named pending-index duplicate is mapped without exposing index details', async () => {
+            resetControllerState();
+            Kyc.create = async () => {
+                const error = new Error('named duplicate detail');
+                error.code = 11000;
+                error.index = 'uniq_pending_kyc_per_user';
+                throw error;
+            };
+            const res = await submit({ file: validFile() });
+            assert.strictEqual(res.statusCode, 400);
+            assert.strictEqual(res.body.message, 'You already have a verification request under review');
+            assert.strictEqual(cleanupCalls.length, 1);
+            assert.ok(!JSON.stringify(res.body).includes('named duplicate detail'));
+            assert.ok(!JSON.stringify(res.body).includes('uniq_pending_kyc_per_user'));
+        });
+
+        await test('unrelated duplicate-key error retains generic failure behavior', async () => {
+            resetControllerState();
+            Kyc.create = async () => {
+                const error = new Error('unrelated duplicate detail');
+                error.code = 11000;
+                error.index = 'unrelated_unique_index';
+                error.keyPattern = { documentNumber: 1 };
+                error.keyValue = { documentNumber: 'ID-123' };
+                throw error;
+            };
+            const res = await submit({ file: validFile() });
+            assert.strictEqual(res.statusCode, 500);
+            assert.strictEqual(res.body.message, 'Unable to submit KYC');
+            assert.strictEqual(cleanupCalls.length, 1);
+            assert.ok(!JSON.stringify(res.body).includes('unrelated duplicate detail'));
+        });
+
         await test('cleanup failure preserves the primary validation failure', async () => {
             resetControllerState();
             let cleanupAttempts = 0;
@@ -208,6 +263,7 @@ async function run() {
             assert.strictEqual(createdDocs[0].documentFormat, 'jpg');
             assert.ok(!Object.prototype.hasOwnProperty.call(createdDocs[0], 'documentImage'));
             assert.strictEqual(cleanupCalls.length, 0);
+            assert.strictEqual(res.body.message, 'KYC submitted successfully and is pending review');
             const responseText = JSON.stringify(res.body);
             assert.ok(!responseText.includes('res.cloudinary.com'));
             assert.ok(!responseText.includes('documentPublicId'));

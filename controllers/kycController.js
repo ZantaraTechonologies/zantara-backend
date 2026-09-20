@@ -5,6 +5,8 @@ const { sendResponse } = require('../utils/response');
 const notificationService = require('../services/notification.service');
 const cloudinaryUtils = require('../utils/cloudinary');
 
+const PENDING_KYC_INDEX_NAME = 'uniq_pending_kyc_per_user';
+
 const sensitiveDocumentFields = [
     'documentImage',
     'documentPublicId',
@@ -90,6 +92,18 @@ const validatedStoredDocumentAsset = (kyc) => {
     return { publicId, resourceType, deliveryType, format };
 };
 
+const isPendingKycDuplicate = (err) => {
+    if (err?.code !== 11000) return false;
+    if (err.index === PENDING_KYC_INDEX_NAME) return true;
+
+    const keyPattern = err.keyPattern || {};
+    const keys = Object.keys(keyPattern);
+    return keys.length === 2
+        && keyPattern.userId === 1
+        && keyPattern.status === 1
+        && err.keyValue?.status === 'pending';
+};
+
 const submitKyc = async (req, res) => {
     const { tier, documentType, documentNumber, address } = req.body;
     const userId = req.user.id;
@@ -137,6 +151,9 @@ const submitKyc = async (req, res) => {
         });
     } catch (err) {
         await cleanupUploadedDocument(req.file);
+        if (isPendingKycDuplicate(err)) {
+            return sendResponse(res, { status: 400, success: false, message: 'You already have a verification request under review' });
+        }
         return sendResponse(res, { status: 500, success: false, message: 'Unable to submit KYC' });
     }
 
