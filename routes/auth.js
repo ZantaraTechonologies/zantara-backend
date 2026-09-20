@@ -20,7 +20,15 @@ const {
 } = require('../controllers/authController')
 const { setPin, changePin, verifyPin } = require('../controllers/pinController')
 const { verifyJWT } = require('../middlewares/auth')
-const { loginLimiter, pinLimiter, resetRequestLimiter, resetVerifyLimiter, resetCompleteLimiter } = require('../middlewares/limiter')
+const {
+    loginLimiter,
+    pinLimiter,
+    resetRequestLimiter,
+    resetVerifyLimiter,
+    resetCompleteLimiter,
+    phoneOtpRequestLimiter,
+    phoneOtpVerifyLimiter
+} = require('../middlewares/limiter')
 const multer = require('multer')
 
 const registrationUpload = multer({
@@ -66,8 +74,8 @@ router.post('/set-pin', verifyJWT, pinLimiter, setPin)
 router.post('/change-pin', verifyJWT, pinLimiter, changePin)
 router.post('/verify-pin', verifyJWT, pinLimiter, verifyPin)
 
-router.post('/send-otp', verifyJWT, sendOTP)
-router.post('/verify-otp', verifyJWT, verifyOTP)
+router.post('/send-otp', verifyJWT, phoneOtpRequestLimiter, sendOTP)
+router.post('/verify-otp', verifyJWT, phoneOtpVerifyLimiter, verifyOTP)
 router.post('/email/send-otp', verifyJWT, sendEmailOTP)
 router.post('/email/verify-otp', verifyJWT, verifyEmailOTP)
 router.get('/referrals', verifyJWT, getReferralStats)

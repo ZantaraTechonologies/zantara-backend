@@ -40,6 +40,12 @@ const userSchema = new mongoose.Schema({
     kycLevel: { type: Number, default: 1 }, // Tier 1, 2, 3
     otp: { type: String, select: false },
     otpExpires: Date,
+    phoneVerificationChallengeId: { type: String, select: false },
+    phoneVerificationOtpDigest: { type: String, select: false },
+    phoneVerificationPhone: { type: String, select: false },
+    phoneVerificationExpiresAt: { type: Date, select: false },
+    phoneVerificationAttempts: { type: Number, select: false, min: 0 },
+    phoneVerificationRequestedAt: { type: Date, select: false },
     passwordResetChallengeId: { type: String, select: false },
     passwordResetOtpDigest: { type: String, select: false },
     passwordResetExpiresAt: { type: Date, select: false },

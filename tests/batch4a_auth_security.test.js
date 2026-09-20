@@ -471,36 +471,37 @@ async function main() {
     });
 
     await test('phone verification changes only phone-verification state', async () => {
-        const User = require('../models/User');
         const authController = require('../controllers/authController');
-        const original = User.findOneAndUpdate;
+        const phoneVerificationService = require('../services/phoneVerification.service');
+        const original = phoneVerificationService.verifyPhoneVerificationChallenge;
         let observed;
-        User.findOneAndUpdate = async (filter, update) => {
-            observed = { filter, update };
-            return { _id: 'PHONE_USER', status: true, isPhoneVerified: true };
+        phoneVerificationService.verifyPhoneVerificationChallenge = async (userId, otp) => {
+            observed = { userId, otp };
+            return { _id: userId, phone: '08012345678', status: true, isPhoneVerified: true };
         };
         const res = makeRes();
         try {
             await authController.verifyOTP({ body: { otp: '123456' }, user: { id: 'PHONE_USER' } }, res);
             assert.strictEqual(res.statusCode, 200);
-            assert.strictEqual(observed.filter.status, true);
-            assert.strictEqual(observed.filter.otp, '123456');
-            assert.ok(observed.filter.otpExpires.$gt instanceof Date);
-            assert.deepStrictEqual(observed.update.$set, { isPhoneVerified: true });
-            assert.ok(!Object.prototype.hasOwnProperty.call(observed.update.$set, 'status'));
+            assert.deepStrictEqual(observed, { userId: 'PHONE_USER', otp: '123456' });
+            assert.deepStrictEqual(res.body.user, {
+                id: 'PHONE_USER',
+                phone: '08012345678',
+                isPhoneVerified: true
+            });
         } finally {
-            User.findOneAndUpdate = original;
+            phoneVerificationService.verifyPhoneVerificationChallenge = original;
         }
     });
 
     await test('phone verification loses race when account becomes inactive', async () => {
-        const User = require('../models/User');
         const authController = require('../controllers/authController');
-        const original = User.findOneAndUpdate;
+        const phoneVerificationService = require('../services/phoneVerification.service');
+        const original = phoneVerificationService.verifyPhoneVerificationChallenge;
         let active = true;
-        User.findOneAndUpdate = async filter => {
+        phoneVerificationService.verifyPhoneVerificationChallenge = async () => {
             active = false;
-            return filter.status === true && active ? { _id: 'PHONE_USER' } : null;
+            throw phoneVerificationService.phoneVerificationError();
         };
         const res = makeRes();
         try {
@@ -508,7 +509,7 @@ async function main() {
             assert.strictEqual(res.statusCode, 400);
             assert.strictEqual(active, false);
         } finally {
-            User.findOneAndUpdate = original;
+            phoneVerificationService.verifyPhoneVerificationChallenge = original;
         }
     });
 

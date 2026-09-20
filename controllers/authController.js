@@ -6,6 +6,7 @@ const crypto = require('crypto')
 const { sendToken, clearAuthCookie } = require('../utils/authUtils')
 const { TOKEN_PURPOSES, authVersionFilter, verifyPurposeToken } = require('../utils/authTokens')
 const passwordResetService = require('../services/passwordReset.service')
+const phoneVerificationService = require('../services/phoneVerification.service')
 const { sendEmail } = require('../utils/mailer')
 const { sendSMS } = require('../utils/sms')
 const notificationService = require('../services/notification.service')
@@ -80,7 +81,7 @@ const register = async (req, res) => {
             myReferralCode,
             role: 'user', // Never accept a role from a self-service registration
             roles: ['user'],
-            isPhoneVerified: true, // Bypass OTP for now as requested
+            isPhoneVerified: false,
             status: true // Auto-verify account
         };
 
@@ -317,14 +318,48 @@ const updateUser = async (req, res) => {
             if (body[field]) updateFields[field] = body[field]
         }
 
+        if (updateFields.phone) updateFields.phone = updateFields.phone.trim()
+
         // Track any privileged/unknown fields the client attempted to set.
         const blockedFields = Object.keys(body).filter(key => !SELF_EDITABLE_FIELDS.includes(key))
 
-        const updatedUser = await User.findByIdAndUpdate(
-            id,
-            updateFields,
+        const currentUser = await User.findById(id).select('phone')
+        if (!currentUser) {
+            return res.status(404).json({ message: "User not found." })
+        }
+
+        const phoneIncluded = updateFields.phone !== undefined
+        const phoneChanged = phoneIncluded &&
+            updateFields.phone !== String(currentUser.phone).trim()
+
+        const profileUpdate = phoneChanged
+            ? {
+                $set: { ...updateFields, isPhoneVerified: false },
+                $unset: {
+                    phoneVerificationChallengeId: 1,
+                    phoneVerificationOtpDigest: 1,
+                    phoneVerificationPhone: 1,
+                    phoneVerificationExpiresAt: 1,
+                    phoneVerificationAttempts: 1,
+                    phoneVerificationRequestedAt: 1,
+                    otp: 1,
+                    otpExpires: 1
+                }
+            }
+            : updateFields
+
+        const updateFilter = phoneIncluded ? { _id: id, phone: currentUser.phone } : { _id: id }
+        const updatedUser = await User.findOneAndUpdate(
+            updateFilter,
+            profileUpdate,
             { new: true, runValidators: true }
         );
+
+        if (!updatedUser) {
+            return res.status(phoneIncluded ? 409 : 404).json({
+                message: phoneIncluded ? "Profile changed concurrently. Please try again." : "User not found."
+            })
+        }
 
         await ActivityLog.create({
             userId: req.user.id,
@@ -338,12 +373,11 @@ const updateUser = async (req, res) => {
             }
         })
 
-        if (!updatedUser) {
-            return res.status(404).json({ message: "User not found." })
-        }
-
         sendToken(updatedUser, res)
     } catch (error) {
+        if (error.code === 11000) {
+            return res.status(409).json({ message: "This phone number or email address is already in use." })
+        }
         res.status(500).json({ message: "Server error.", error: error.message })
     }
 }
@@ -439,47 +473,39 @@ const logout = (req, res) => {
 };
 
 const sendOTP = async (req, res) => {
+    let challenge
     try {
-        const user = await User.findById(req.user.id);
-        if (!user) return res.status(404).json({ message: 'User not found' });
+        challenge = await phoneVerificationService.issuePhoneVerificationChallenge(req.user.id)
+        const purpose = req.body?.purpose
+        const validPurposes = ['phone_verification', 'change_pin', 'change_password']
+        const activityType = validPurposes.includes(purpose) ? purpose : 'phone_verification'
+        const delivery = await sendSMS(
+            challenge.user.phone,
+            `Your Zantara phone verification code is: ${challenge.otp}. Valid for 10 minutes.`,
+            activityType
+        )
 
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-
-        await User.findByIdAndUpdate(user._id, { otp, otpExpires });
-
-        // Map the incoming 'purpose' to the correct admin-controlled activityType toggle
-        const purpose = req.body?.purpose || 'phone_verification';
-        const validPurposes = ['phone_verification', 'change_pin', 'change_password'];
-        const activityType = validPurposes.includes(purpose) ? purpose : 'phone_verification';
-
-        await sendSMS(user.phone, `Your Zantara verification code is: ${otp}. Valid for 10 minutes.`, activityType);
-
-        if (user.email) {
-            const html = `
-                <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
-                    <h2>Verification Code</h2>
-                    <p>Hello ${user.name || 'User'},</p>
-                    <p>Your Zantara verification code is:</p>
-                    <h1 style="color: #136A63; letter-spacing: 5px;">${otp}</h1>
-                    <p>This code is valid for 10 minutes. Please do not share this code with anyone.</p>
-                    <br />
-                    <p>Regards,<br>The Zantara Team</p>
-                </div>
-            `;
-            await sendEmail(user.email, 'Your Zantara Verification Code', html, activityType);
+        if (!delivery?.success || delivery.delivered === false) {
+            await phoneVerificationService.invalidatePhoneVerificationChallenge(
+                req.user.id,
+                challenge.challengeId,
+                challenge.user.phone
+            )
+            return res.status(502).json({ message: 'Unable to deliver verification code' })
         }
-
-        // Also send as in-app notification (security fallback)
-        await notificationService.sendInApp(user._id, {
-            title: 'Verification OTP',
-            message: `Your verification code is: ${otp}. Valid for 10 minutes.`,
-            type: 'security'
-        });
 
         res.json({ success: true, message: 'OTP sent successfully' });
     } catch (error) {
-        res.status(500).json({ message: 'Error sending OTP', error: error.message });
+        if (challenge) {
+            await phoneVerificationService.invalidatePhoneVerificationChallenge(
+                req.user.id,
+                challenge.challengeId,
+                challenge.user.phone
+            ).catch(() => {})
+        }
+        res.status(error.statusCode || 500).json({
+            message: error.statusCode ? error.message : 'Error sending OTP'
+        });
     }
 };
 
@@ -580,24 +606,21 @@ const verifyOTP = async (req, res) => {
         const { otp } = req.body;
         if (!otp) return res.status(400).json({ message: 'OTP is required' });
 
-        const user = await User.findOneAndUpdate(
-            {
-                _id: req.user.id,
-                status: true,
-                otp: String(otp),
-                otpExpires: { $gt: new Date() }
-            },
-            {
-                $set: { isPhoneVerified: true },
-                $unset: { otp: 1, otpExpires: 1 }
-            },
-            { new: true }
-        );
-        if (!user) return res.status(400).json({ message: 'Invalid or expired OTP' });
+        const verifiedUser = await phoneVerificationService.verifyPhoneVerificationChallenge(req.user.id, String(otp));
 
-        res.json({ success: true, message: 'Phone verified successfully' });
+        res.json({
+            success: true,
+            message: 'Phone verified successfully',
+            user: {
+                id: String(verifiedUser._id),
+                phone: verifiedUser.phone,
+                isPhoneVerified: verifiedUser.isPhoneVerified === true
+            }
+        });
     } catch (error) {
-        res.status(500).json({ message: 'Error verifying OTP', error: error.message });
+        res.status(error.statusCode || 500).json({
+            message: error.statusCode ? 'Invalid or expired OTP' : 'Error verifying OTP'
+        });
     }
 };
 

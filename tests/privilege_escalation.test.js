@@ -42,7 +42,8 @@ async function callUpdateUser(body, selfId = 'USER_1', paramId = 'USER_1') {
         _id: selfId, name: 'Original Name', email: 'a@b.com', phone: '08000000000',
         role: 'user', roles: ['user'], isPhoneVerified: true, isPinSet: false,
     };
-    User.findByIdAndUpdate = async (_id, update) => {
+    User.findById = () => ({ select: async () => existingUser });
+    User.findOneAndUpdate = async (_filter, update) => {
         capturedUpdate = update;
         return { ...existingUser, ...(update || {}) };
     };
@@ -82,7 +83,13 @@ function test(name, fn) {
     console.log('  PRIVILEGE ESCALATION PREVENTION TESTS');
     console.log('====================================================\n');
 
+    const origFindById = User.findById;
+    const origFindOne = User.findOne;
+    const origFindOneAndUpdate = User.findOneAndUpdate;
     const origFindByIdAndUpdate = User.findByIdAndUpdate;
+    const origCreate = User.create;
+    const origWalletCreate = Wallet.create;
+    const origActivityCreate = ActivityLog.create;
     const origLogAction = auditController.logAction;
     const origNotifySuperAdmins = notificationService.notifySuperAdmins;
     const origAxiosPost = axios.post;
@@ -228,6 +235,7 @@ function test(name, fn) {
                     password: 'Passw0rd!',
                     role: 'superAdmin',
                     roles: ['admin', 'superAdmin'],
+                    isPhoneVerified: true,
                 },
                 ip: '127.0.0.1',
                 headers: { 'user-agent': 'test-agent' },
@@ -239,6 +247,9 @@ function test(name, fn) {
                 assert.ok(created, 'User.create should have been called');
                 assert.strictEqual(created.role, 'user');
                 assert.deepStrictEqual(created.roles, ['user']);
+            });
+            test('Register ignores client phone verification flag -> starts unverified', () => {
+                assert.strictEqual(created.isPhoneVerified, false);
             });
             test('Register with role escalation attempt still succeeds (no crash)', () => {
                 assert.strictEqual(res.statusCode, 200);
@@ -330,19 +341,22 @@ function test(name, fn) {
         await (async () => {
             const out = await callUpdateUser({ phone: '08123456789', role: 'superAdmin', roles: ['agent'], accountType: 'reseller', status: true });
             test('J. combined sensitive keys never appear in DB write', () => {
+                const writtenFields = out.capturedUpdate.$set || out.capturedUpdate;
                 for (const k of ['role', 'roles', 'accountType', 'status']) {
-                    assert.ok(!(k in out.capturedUpdate), `${k} leaked into update payload`);
+                    assert.ok(!(k in writtenFields), `${k} leaked into update payload`);
                 }
-                assert.deepStrictEqual(Object.keys(out.capturedUpdate), ['phone']);
+                assert.deepStrictEqual(Object.keys(writtenFields).sort(), ['isPhoneVerified', 'phone']);
+                assert.strictEqual(writtenFields.isPhoneVerified, false);
             });
         })();
     } finally {
+        User.findById = origFindById;
+        User.findOne = origFindOne;
+        User.findOneAndUpdate = origFindOneAndUpdate;
         User.findByIdAndUpdate = origFindByIdAndUpdate;
-        User.findById = User.findByIdAndUpdate;
-        User.findOne = User.findByIdAndUpdate;
-        User.create = User.findByIdAndUpdate;
-        Wallet.create = async () => ({});
-        ActivityLog.create = async () => {};
+        User.create = origCreate;
+        Wallet.create = origWalletCreate;
+        ActivityLog.create = origActivityCreate;
         auditController.logAction = origLogAction;
         notificationService.notifySuperAdmins = origNotifySuperAdmins;
         axios.post = origAxiosPost;

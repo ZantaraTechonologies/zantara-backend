@@ -17,7 +17,7 @@ const sendSMS = async (phone, message, activityType = null) => {
             const notificationSettings = await settingsService.getSetting('NOTIFICATION_SETTINGS', {});
             if (notificationSettings?.sms && notificationSettings.sms[activityType] === false) {
                 console.log(`[SMS Skipped] Activity '${activityType}' is disabled by Admin.`);
-                return { success: true, message: 'SMS disabled by admin settings' };
+                return { success: true, delivered: false, message: 'SMS disabled by admin settings' };
             }
         }
 
@@ -30,7 +30,7 @@ const sendSMS = async (phone, message, activityType = null) => {
 
         if (!TERMII_API_KEY || TERMII_API_KEY === 'mock') {
             console.log(`[SMS Mock] Termii API Key not set. Message not sent via SMS.`);
-            return { success: true, message: 'SMS logged to console (Mock Mode)' };
+            return { success: true, delivered: false, message: 'SMS logged to console (Mock Mode)' };
         }
 
         // Format phone number to international format if needed (Termii prefers 234...)
@@ -52,7 +52,7 @@ const sendSMS = async (phone, message, activityType = null) => {
         
         // Log only response metadata (never the echoed message content)
         console.log(`[SMS Success] Termii status: ${response.status}, message_id: ${response.data?.message_id || response.data?.code || 'n/a'}`);
-        return { success: true, data: response.data };
+        return { success: true, delivered: true, data: response.data };
 
     } catch (error) {
         const errorData = error.response?.data || error.message;

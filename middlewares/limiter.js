@@ -48,13 +48,31 @@ const resetCompleteLimiter = rateLimit({
     legacyHeaders: false
 })
 
+const phoneOtpRequestLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    message: 'Too many phone verification code requests. Please try again later.',
+    standardHeaders: true,
+    legacyHeaders: false
+})
+
+const phoneOtpVerifyLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    message: 'Too many phone verification attempts. Please try again later.',
+    standardHeaders: true,
+    legacyHeaders: false
+})
+
 module.exports = {
     loginLimiter,
     pinLimiter,
     kycLimiter,
     resetRequestLimiter,
     resetVerifyLimiter,
-    resetCompleteLimiter
+    resetCompleteLimiter,
+    phoneOtpRequestLimiter,
+    phoneOtpVerifyLimiter
 }
 // const rateLimit = require("express-rate-limit");
 
