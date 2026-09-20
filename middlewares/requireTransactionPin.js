@@ -10,8 +10,14 @@ const requireTransactionPin = async (req, res, next) => {
     }
 
     try {
-        await pinService.verifyPin(req.user.id, pin);
+        await pinService.verifyPin(req.user.id, pin, { enforceLockout: true });
     } catch (error) {
+        if (error.code === 'TRANSACTION_PIN_LOCKED') {
+            return res.status(429).json({ message: error.message });
+        }
+        if (error.code === 'PIN_STATE_CONFLICT') {
+            return res.status(409).json({ message: error.message });
+        }
         if (error.message === 'Transaction PIN not set' || error.message === 'Invalid transaction PIN') {
             return res.status(400).json({ message: error.message });
         }

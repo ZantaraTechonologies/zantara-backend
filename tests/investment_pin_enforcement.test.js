@@ -145,9 +145,12 @@ const bodyFor = (path, source = 'dividend') => {
 const routeHandlers = path => {
     const layer = investmentRouter.stack.find(item => item.route && item.route.path === path && item.route.methods.post);
     assert.ok(layer, `POST ${path} route must exist`);
-    // Authentication and legal-compliance behavior are covered separately. Start
-    // at the H4 authorization boundary and execute the real downstream controller.
-    return layer.route.stack.map(item => item.handle).slice(2);
+    // Authentication, legal compliance, and IP throttling are covered separately.
+    // Start at the H4 authorization boundary and execute the real controller.
+    const handlers = layer.route.stack.map(item => item.handle);
+    const pinIndex = handlers.findIndex(handler => handler.name === 'requireTransactionPin');
+    assert.ok(pinIndex >= 0, `POST ${path} must require a transaction PIN`);
+    return handlers.slice(pinIndex);
 };
 
 const dispatch = async (handlers, index, req, res) => {

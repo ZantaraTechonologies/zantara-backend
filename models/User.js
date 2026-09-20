@@ -37,6 +37,8 @@ const userSchema = new mongoose.Schema({
     transactionPin: { type: String, select: false }, // Hashed PIN
     pinHistory: { type: [String], select: false }, // Store last 5 hashed PINs
     isPinSet: { type: Boolean, default: false },
+    transactionPinFailedAttempts: { type: Number, default: 0, min: 0, select: false },
+    transactionPinLockedUntil: { type: Date, select: false },
     kycLevel: { type: Number, default: 1 }, // Tier 1, 2, 3
     otp: { type: String, select: false },
     otpExpires: Date,
@@ -82,4 +84,4 @@ userSchema.post('findOneAndDelete', async function (doc) {
 
 const userModel = mongoose.model('User', userSchema)
 userModel.ALLOWED_ROLES = ALLOWED_ROLES;
-module.exports = userModel
+module.exports = userModel
