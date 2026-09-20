@@ -10,6 +10,7 @@ const User = require('../models/User');
 const PaymentGateway = require('../models/PaymentGateway');
 const TransactionStatus = require('../models/TransactionStatus');
 const ShareExitRequest = require('../models/ShareExitRequest');
+const ShareExitQuota = require('../models/ShareExitQuota');
 const InvestmentWithdrawal = require('../models/InvestmentWithdrawal');
 const investmentService = require('../services/investment.service');
 const paymentGatewayService = require('../services/paymentGateway.service');
@@ -25,6 +26,7 @@ const originals = {
     userCountDocuments: User.countDocuments,
     exitCountDocuments: ShareExitRequest.countDocuments,
     exitCreate: ShareExitRequest.create,
+    quotaUpdateOne: ShareExitQuota.updateOne,
     withdrawalCreate: InvestmentWithdrawal.create,
     getInvestmentSettings: investmentService.getInvestmentSettings,
     assertShareCapacity: investmentService.assertShareCapacity,
@@ -57,6 +59,17 @@ const makeSession = () => ({
     inTransaction() { return this.active; },
     async commitTransaction() { this.active = false; },
     async abortTransaction() { this.active = false; },
+    async withTransaction(operation) {
+        this.startTransaction();
+        try {
+            const result = await operation();
+            await this.commitTransaction();
+            return result;
+        } catch (error) {
+            if (this.active) await this.abortTransaction();
+            throw error;
+        }
+    },
     endSession() { this.active = false; }
 });
 
@@ -93,7 +106,7 @@ const resetFlowMocks = () => {
     callOrder = [];
     mongoose.startSession = async () => makeSession();
     investmentService.getInvestmentSettings = async () => ({ ...settings });
-    User.countDocuments = async () => 100;
+    User.countDocuments = () => queryResult(100);
     ShareExitRequest.countDocuments = async () => 0;
 
     const userDocument = {
@@ -113,6 +126,7 @@ const resetFlowMocks = () => {
     walletService.debit = async (...args) => mutationStop('walletService.debit', args);
     walletService.credit = async (...args) => mutationStop('walletService.credit', args);
     ShareExitRequest.create = async (...args) => mutationStop('ShareExitRequest.create', args);
+    ShareExitQuota.updateOne = async (...args) => mutationStop('ShareExitQuota.updateOne', args);
     InvestmentWithdrawal.create = async (...args) => mutationStop('InvestmentWithdrawal.create', args);
 };
 
@@ -366,6 +380,7 @@ run().catch(error => {
     User.countDocuments = originals.userCountDocuments;
     ShareExitRequest.countDocuments = originals.exitCountDocuments;
     ShareExitRequest.create = originals.exitCreate;
+    ShareExitQuota.updateOne = originals.quotaUpdateOne;
     InvestmentWithdrawal.create = originals.withdrawalCreate;
     investmentService.getInvestmentSettings = originals.getInvestmentSettings;
     investmentService.assertShareCapacity = originals.assertShareCapacity;

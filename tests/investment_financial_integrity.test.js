@@ -11,7 +11,9 @@ const Setting = require('../models/Setting');
 const InvestmentWithdrawal = require('../models/InvestmentWithdrawal');
 const ShareExitRequest = require('../models/ShareExitRequest');
 const ShareIssuanceLock = require('../models/ShareIssuanceLock');
+const ShareExitQuota = require('../models/ShareExitQuota');
 const investmentService = require('../services/investment.service');
+const shareExitQuotaService = require('../services/shareExitQuota.service');
 const { allocateDividendPool } = require('../utils/dividendCron');
 const notificationService = require('../services/notification.service');
 const legacyNotificationService = require('../services/notificationService');
@@ -32,6 +34,9 @@ const originals = {
     transactionFindOne: Transaction.findOne,
     settingFind: Setting.find,
     shareLockUpdateOne: ShareIssuanceLock.updateOne,
+    quotaUpdateOne: ShareExitQuota.updateOne,
+    quotaFindOneAndUpdate: ShareExitQuota.findOneAndUpdate,
+    quotaFindById: ShareExitQuota.findById,
     withdrawalCreate: InvestmentWithdrawal.create,
     withdrawalFindById: InvestmentWithdrawal.findById,
     withdrawalFindOneAndUpdate: InvestmentWithdrawal.findOneAndUpdate,
@@ -120,12 +125,24 @@ function makeSession() {
         entityWrites: {},
         recordReads: new Map(),
         recordWrites: new Map(),
+        quotaReads: new Map(),
+        quotaWrites: new Map(),
         newWithdrawals: [],
         newExits: [],
         newTransactions: [],
         newLedger: [],
         startTransaction() {
             this.active = true;
+            this.reads = {};
+            this.entityWrites = {};
+            this.recordReads = new Map();
+            this.recordWrites = new Map();
+            this.quotaReads = new Map();
+            this.quotaWrites = new Map();
+            this.newWithdrawals = [];
+            this.newExits = [];
+            this.newTransactions = [];
+            this.newLedger = [];
             state.starts++;
         },
         inTransaction() {
@@ -152,6 +169,14 @@ function makeSession() {
             if (!this.recordReads.has(key)) this.recordReads.set(key, state.recordVersions.get(key) || 0);
             this.recordWrites.set(key, clone(value));
         },
+        readQuota(id) {
+            if (!this.quotaReads.has(id)) this.quotaReads.set(id, state.quotaVersions.get(id) || 0);
+            return clone(this.quotaWrites.get(id) || state.quotas[id] || null);
+        },
+        stageQuota(id, value) {
+            if (!this.quotaReads.has(id)) this.quotaReads.set(id, state.quotaVersions.get(id) || 0);
+            this.quotaWrites.set(id, clone(value));
+        },
         async commitTransaction() {
             for (const kind of Object.keys(this.entityWrites)) {
                 if (this.reads[kind] !== state.versions[kind]) {
@@ -161,6 +186,11 @@ function makeSession() {
             for (const [key] of this.recordWrites) {
                 if (this.recordReads.get(key) !== (state.recordVersions.get(key) || 0)) {
                     throw new Error(`write conflict on ${key}`);
+                }
+            }
+            for (const [id] of this.quotaWrites) {
+                if (this.quotaReads.get(id) !== (state.quotaVersions.get(id) || 0)) {
+                    throw new Error(`write conflict on quota:${id}`);
                 }
             }
 
@@ -174,6 +204,10 @@ function makeSession() {
                 if (index >= 0) collection[index] = clone(value);
                 state.recordVersions.set(key, (state.recordVersions.get(key) || 0) + 1);
             }
+            for (const [id, value] of this.quotaWrites) {
+                state.quotas[id] = clone(value);
+                state.quotaVersions.set(id, (state.quotaVersions.get(id) || 0) + 1);
+            }
             state.withdrawals.push(...clone(this.newWithdrawals));
             state.exits.push(...clone(this.newExits));
             state.transactions.push(...clone(this.newTransactions));
@@ -184,6 +218,20 @@ function makeSession() {
         async abortTransaction() {
             this.active = false;
             state.aborts++;
+        },
+        async withTransaction(operation) {
+            for (let attempt = 0; attempt < 20; attempt++) {
+                this.startTransaction();
+                try {
+                    const result = await operation();
+                    await this.commitTransaction();
+                    return result;
+                } catch (error) {
+                    if (this.active) await this.abortTransaction();
+                    if (/write conflict/i.test(error.message || '') && attempt < 19) continue;
+                    throw error;
+                }
+            }
         },
         endSession() {
             if (this.active) state.endedActive++;
@@ -226,6 +274,8 @@ function resetState(overrides = {}) {
         },
         withdrawals: [],
         exits: [],
+        quotas: {},
+        quotaVersions: new Map(),
         transactions: [],
         ledger: [],
         sessions: [],
@@ -273,7 +323,7 @@ function resetState(overrides = {}) {
             return Promise.resolve([{ _id: null, total: state.user.sharesOwned }]).then(resolve, reject);
         }
     });
-    User.countDocuments = async filter => filter && filter.isShareholder ? 100 : 1;
+    User.countDocuments = filter => makeQuery(() => filter && filter.isShareholder ? 100 : 1);
 
     Wallet.findOne = filter => makeQuery(session => {
         if (filter && filter.userId && idOf(filter.userId) !== idOf(state.wallet.userId)) return null;
@@ -381,6 +431,30 @@ function resetState(overrides = {}) {
     ShareExitRequest.countDocuments = async filter => {
         return state.exits.filter(item => !filter.status || item.status === filter.status).length;
     };
+    ShareExitQuota.updateOne = async (filter, update, options = {}) => {
+        const session = options.session;
+        let quota = session ? session.readQuota(filter._id) : clone(state.quotas[filter._id]);
+        if (!quota && options.upsert) quota = { _id: filter._id, ...clone(update.$setOnInsert || {}) };
+        if (!quota) return { matchedCount: 0, modifiedCount: 0, upsertedCount: 0 };
+        if (session) session.stageQuota(filter._id, quota);
+        else state.quotas[filter._id] = clone(quota);
+        return { matchedCount: state.quotas[filter._id] ? 1 : 0, modifiedCount: 0, upsertedCount: 1 };
+    };
+    ShareExitQuota.findOneAndUpdate = async (filter, update, options = {}) => {
+        const session = options.session;
+        const quota = session ? session.readQuota(filter._id) : clone(state.quotas[filter._id]);
+        if (!quota || filter.used?.$gte > quota.used) return null;
+        if (filter.$expr && quota.used >= quota.allowance) return null;
+        quota.used += update.$inc?.used || 0;
+        quota.revision += update.$inc?.revision || 0;
+        if (session) session.stageQuota(filter._id, quota);
+        else state.quotas[filter._id] = clone(quota);
+        return makeDocument('quota', quota, session);
+    };
+    ShareExitQuota.findById = id => makeQuery(session => {
+        const quota = session ? session.readQuota(id) : state.quotas[id];
+        return quota ? clone(quota) : null;
+    });
 
     notificationService.sendInApp = async () => ({ _id: 'notification-1' });
     legacyNotificationService.notifySuperAdmins = async () => {};
@@ -415,6 +489,10 @@ function seedWithdrawal(overrides = {}) {
 }
 
 function seedExit(overrides = {}) {
+    const quotaPeriodKey = overrides.quotaPeriodKey || '2026-09';
+    if (!state.quotas[quotaPeriodKey]) {
+        state.quotas[quotaPeriodKey] = { _id: quotaPeriodKey, allowance: 10, used: 1, revision: 1 };
+    }
     const exit = {
         _id: `exit-${++state.exitSequence}`,
         userId: 'user-1',
@@ -428,6 +506,9 @@ function seedExit(overrides = {}) {
         status: 'pending',
         reservationVersion: 1,
         reservedShares: 1,
+        quotaReservationVersion: 1,
+        quotaPeriodKey,
+        quotaReservationState: 'reserved',
         firstPurchasedAt: new Date('2024-01-01T00:00:00.000Z'),
         lockPeriodMonths: 6,
         lockExpiresAt: new Date('2024-07-01T00:00:00.000Z'),
@@ -515,7 +596,8 @@ function mutationSnapshot() {
         withdrawals: state.withdrawals.length,
         exits: state.exits.length,
         transactions: state.transactions.length,
-        ledger: state.ledger.length
+        ledger: state.ledger.length,
+        quotas: clone(state.quotas)
     };
 }
 
@@ -872,6 +954,207 @@ async function run() {
         assert.strictEqual(state.aborts, 1);
     });
 
+    await test('H7 A/C a normal pending exit atomically reserves one monthly quota slot', async () => {
+        state.settings.maxMonthlyExitPercent = 1;
+        const response = await requestExit(2);
+        const periodKey = shareExitQuotaService.getQuotaPeriod().periodKey;
+        assert.strictEqual(response.statusCode, 200);
+        assert.strictEqual(state.exits.length, 1);
+        assert.strictEqual(state.user.frozenShares, 2);
+        assert.strictEqual(state.quotas[periodKey].allowance, 1);
+        assert.strictEqual(state.quotas[periodKey].used, 1);
+        assert.strictEqual(state.exits[0].quotaPeriodKey, periodKey);
+        assert.strictEqual(state.exits[0].quotaReservationState, 'reserved');
+    });
+
+    await test('H7 B a request exceeding remaining monthly allowance changes no state', async () => {
+        const period = shareExitQuotaService.getQuotaPeriod();
+        state.quotas[period.periodKey] = {
+            _id: period.periodKey,
+            periodStart: period.periodStart,
+            periodEnd: period.periodEnd,
+            allowance: 1,
+            used: 1,
+            shareholderCount: 100,
+            percentage: 1,
+            revision: 1
+        };
+        const before = mutationSnapshot();
+        const response = await requestExit(1);
+        assert.strictEqual(response.statusCode, 429);
+        assert.deepStrictEqual(mutationSnapshot(), before);
+    });
+
+    await test('H7 D approval consumes the pending reservation without incrementing quota again', async () => {
+        state.settings.maxMonthlyExitPercent = 1;
+        assert.strictEqual((await requestExit(1)).statusCode, 200);
+        const periodKey = state.exits[0].quotaPeriodKey;
+        assert.strictEqual((await processExit(state.exits[0]._id, 'approved')).statusCode, 200);
+        assert.strictEqual(state.quotas[periodKey].used, 1);
+        assert.strictEqual(state.exits[0].quotaReservationState, 'consumed');
+        assert.strictEqual(state.user.frozenShares, 0);
+        assert.strictEqual(state.user.sharesOwned, 4);
+    });
+
+    await test('H7 E/F rejection releases quota once and repeated rejection cannot release twice', async () => {
+        state.settings.maxMonthlyExitPercent = 1;
+        assert.strictEqual((await requestExit(1)).statusCode, 200);
+        const periodKey = state.exits[0].quotaPeriodKey;
+        assert.strictEqual((await processExit(state.exits[0]._id, 'rejected')).statusCode, 200);
+        assert.strictEqual(state.quotas[periodKey].used, 0);
+        assert.strictEqual(state.exits[0].quotaReservationState, 'released');
+        assert.strictEqual(state.user.frozenShares, 0);
+        assert.strictEqual((await processExit(state.exits[0]._id, 'rejected')).statusCode, 409);
+        assert.strictEqual(state.quotas[periodKey].used, 0);
+    });
+
+    await test('H7 G approve-vs-reject has one terminal effect and reconciled quota disposition', async () => {
+        state.settings.maxMonthlyExitPercent = 1;
+        assert.strictEqual((await requestExit(1)).statusCode, 200);
+        const periodKey = state.exits[0].quotaPeriodKey;
+        const responses = await Promise.all([
+            processExit(state.exits[0]._id, 'approved', 'admin-a'),
+            processExit(state.exits[0]._id, 'rejected', 'admin-b')
+        ]);
+        assert.strictEqual(responses.filter(item => item.statusCode === 200).length, 1);
+        assert.strictEqual(responses.filter(item => [409, 500].includes(item.statusCode)).length, 1);
+        if (state.exits[0].status === 'approved') {
+            assert.strictEqual(state.quotas[periodKey].used, 1);
+            assert.strictEqual(state.exits[0].quotaReservationState, 'consumed');
+        } else {
+            assert.strictEqual(state.quotas[periodKey].used, 0);
+            assert.strictEqual(state.exits[0].quotaReservationState, 'released');
+        }
+        assert.strictEqual(state.user.frozenShares, 0);
+    });
+
+    await test('H7 H request transaction rollback leaves no quota, frozen shares, or pending request', async () => {
+        state.settings.maxMonthlyExitPercent = 1;
+        const originalCreate = ShareExitRequest.create;
+        ShareExitRequest.create = async () => { throw new Error('injected request creation failure'); };
+        try {
+            const response = await requestExit(1);
+            assert.strictEqual(response.statusCode, 500);
+        } finally {
+            ShareExitRequest.create = originalCreate;
+        }
+        assert.strictEqual(state.user.frozenShares, 0);
+        assert.strictEqual(state.exits.length, 0);
+        assert.deepStrictEqual(state.quotas, {});
+    });
+
+    await test('H7 I/J each local calendar month has independent quota and old pending requests keep their period', async () => {
+        state.settings.maxMonthlyExitPercent = 1;
+        assert.strictEqual((await requestExit(1)).statusCode, 200);
+        const originalPeriod = state.exits[0].quotaPeriodKey;
+        const nextMonth = new Date();
+        nextMonth.setMonth(nextMonth.getMonth() + 1, 1);
+        const nextPeriod = shareExitQuotaService.getQuotaPeriod(nextMonth).periodKey;
+        const session = await mongoose.startSession();
+        await session.withTransaction(() => shareExitQuotaService.reserve({
+            session,
+            percentage: 1,
+            now: nextMonth
+        }));
+        session.endSession();
+        assert.notStrictEqual(nextPeriod, originalPeriod);
+        assert.strictEqual(state.quotas[originalPeriod].used, 1);
+        assert.strictEqual(state.quotas[nextPeriod].used, 1);
+        assert.strictEqual(state.exits[0].quotaPeriodKey, originalPeriod);
+    });
+
+    await test('H7 allowance percentage uses exact basis-point arithmetic', async () => {
+        const session = await mongoose.startSession();
+        await session.withTransaction(() => shareExitQuotaService.reserve({ session, percentage: 29 }));
+        session.endSession();
+        const periodKey = shareExitQuotaService.getQuotaPeriod().periodKey;
+        assert.strictEqual(state.quotas[periodKey].allowance, 29);
+        assert.strictEqual(state.quotas[periodKey].used, 1);
+    });
+
+    await test('H7 K/L first-use eight-way contention with allowance one creates one bucket and one reservation', async () => {
+        state.settings.maxMonthlyExitPercent = 1;
+        state.user.sharesOwned = 20;
+        const responses = await Promise.all(Array.from({ length: 8 }, () => requestExit(1)));
+        const periodKey = shareExitQuotaService.getQuotaPeriod().periodKey;
+        assert.strictEqual(responses.filter(item => item.statusCode === 200).length, 1);
+        assert.strictEqual(responses.filter(item => item.statusCode === 429).length, 7);
+        assert.strictEqual(Object.keys(state.quotas).length, 1);
+        assert.strictEqual(state.quotas[periodKey].used, 1);
+        assert.strictEqual(state.exits.length, 1);
+        assert.strictEqual(state.user.frozenShares, 1);
+    });
+
+    await test('H7 K deterministic first-use duplicate-key race retries the whole transaction safely', async () => {
+        state.settings.maxMonthlyExitPercent = 1;
+        const originalUpdateOne = ShareExitQuota.updateOne;
+        let attempts = 0;
+        ShareExitQuota.updateOne = async (...args) => {
+            attempts++;
+            if (attempts === 1) throw Object.assign(new Error('simulated duplicate key'), { code: 11000 });
+            return originalUpdateOne(...args);
+        };
+        try {
+            assert.strictEqual((await requestExit(1)).statusCode, 200);
+        } finally {
+            ShareExitQuota.updateOne = originalUpdateOne;
+        }
+        const periodKey = shareExitQuotaService.getQuotaPeriod().periodKey;
+        assert.strictEqual(attempts, 2);
+        assert.strictEqual(state.quotas[periodKey].used, 1);
+        assert.strictEqual(state.exits.length, 1);
+        assert.strictEqual(state.user.frozenShares, 1);
+    });
+
+    await test('H7 M concurrent demand exactly equal to allowance may fill but never exceed it', async () => {
+        state.settings.maxMonthlyExitPercent = 3;
+        state.user.sharesOwned = 20;
+        const responses = await Promise.all(Array.from({ length: 3 }, () => requestExit(1)));
+        const periodKey = shareExitQuotaService.getQuotaPeriod().periodKey;
+        assert.strictEqual(responses.filter(item => item.statusCode === 200).length, 3);
+        assert.strictEqual(state.quotas[periodKey].used, 3);
+        assert.strictEqual(state.exits.length, 3);
+        assert.strictEqual(state.user.frozenShares, 3);
+    });
+
+    await test('H7 N aggregate success cannot exceed allowance when concurrent demand is higher', async () => {
+        state.settings.maxMonthlyExitPercent = 3;
+        state.user.sharesOwned = 20;
+        const responses = await Promise.all(Array.from({ length: 8 }, () => requestExit(1)));
+        const periodKey = shareExitQuotaService.getQuotaPeriod().periodKey;
+        assert.strictEqual(responses.filter(item => item.statusCode === 200).length, 3);
+        assert.strictEqual(responses.filter(item => item.statusCode === 429).length, 5);
+        assert.strictEqual(state.quotas[periodKey].used, 3);
+        assert.strictEqual(state.exits.length, 3);
+        assert.strictEqual(state.user.frozenShares, 3);
+    });
+
+    await test('H7 O same-share double-exit protection remains intact with quota reservation', async () => {
+        state.settings.maxMonthlyExitPercent = 10;
+        const responses = await Promise.all([requestExit(3), requestExit(3)]);
+        const periodKey = shareExitQuotaService.getQuotaPeriod().periodKey;
+        assert.strictEqual(responses.filter(item => item.statusCode === 200).length, 1);
+        assert.strictEqual(responses.filter(item => item.statusCode === 400).length, 1);
+        assert.strictEqual(state.quotas[periodKey].used, 1);
+        assert.strictEqual(state.exits.length, 1);
+        assert.strictEqual(state.user.frozenShares, 3);
+    });
+
+    await test('H7 P concurrent admin approvals preserve exactly-once payout and quota consumption', async () => {
+        state.settings.maxMonthlyExitPercent = 1;
+        assert.strictEqual((await requestExit(1)).statusCode, 200);
+        const periodKey = state.exits[0].quotaPeriodKey;
+        const responses = await Promise.all([
+            processExit(state.exits[0]._id, 'approved', 'admin-a'),
+            processExit(state.exits[0]._id, 'approved', 'admin-b')
+        ]);
+        assert.strictEqual(responses.filter(item => item.statusCode === 200).length, 1);
+        assert.strictEqual(state.ledger.filter(item => item.source === 'investment_share_exit').length, 1);
+        assert.strictEqual(state.transactions.filter(item => item.type === 'share_exit').length, 1);
+        assert.strictEqual(state.quotas[periodKey].used, 1);
+        assert.strictEqual(state.exits[0].quotaReservationState, 'consumed');
+    });
+
     console.log(`\nTest Execution Finished: ${passed} PASSED, ${failed} FAILED.`);
     if (failed > 0) process.exitCode = 1;
 }
@@ -891,6 +1174,9 @@ run().catch(error => {
     Transaction.findOne = originals.transactionFindOne;
     Setting.find = originals.settingFind;
     ShareIssuanceLock.updateOne = originals.shareLockUpdateOne;
+    ShareExitQuota.updateOne = originals.quotaUpdateOne;
+    ShareExitQuota.findOneAndUpdate = originals.quotaFindOneAndUpdate;
+    ShareExitQuota.findById = originals.quotaFindById;
     InvestmentWithdrawal.create = originals.withdrawalCreate;
     InvestmentWithdrawal.findById = originals.withdrawalFindById;
     InvestmentWithdrawal.findOneAndUpdate = originals.withdrawalFindOneAndUpdate;

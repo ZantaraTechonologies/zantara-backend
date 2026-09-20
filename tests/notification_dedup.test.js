@@ -11,6 +11,7 @@ const Wallet = require('../models/Wallet');
 const Service = require('../models/Service');
 const ServiceIdentity = require('../models/ServiceIdentity');
 const ShareExitRequest = require('../models/ShareExitRequest');
+const ShareExitQuota = require('../models/ShareExitQuota');
 const InvestmentWithdrawal = require('../models/InvestmentWithdrawal');
 
 const pinService = require('../services/pin.service');
@@ -78,6 +79,7 @@ async function runNotificationDedupTests() {
         logAction: auditController.logAction,
         ShareExitFindById: ShareExitRequest.findById,
         ShareExitFindOneAndUpdate: ShareExitRequest.findOneAndUpdate,
+        ShareExitQuotaFindById: ShareExitQuota.findById,
         InvestmentWithdrawalFindById: InvestmentWithdrawal.findById,
         InvestmentWithdrawalFindOneAndUpdate: InvestmentWithdrawal.findOneAndUpdate,
     };
@@ -615,6 +617,9 @@ async function runNotificationDedupTests() {
             walletCredits.push(args);
             return { balance: 119000 };
         };
+        ShareExitQuota.findById = () => ({
+            session: async () => ({ allowance: 10, used: 1 })
+        });
 
         await test('B3. processShareExit (approved) notifies only AFTER commit, with proper eventKey+payload', async () => {
             sessionCommitted = false;
@@ -627,6 +632,7 @@ async function runNotificationDedupTests() {
                 _id: exitId, userId: uid, sharesRequested: 2, sharePrice: 10000,
                 grossAmount: 20000, exitFeePercent: 5, exitFeeCharged: 1000, netAmount: 19000,
                 reservationVersion: 1, reservedShares: 2,
+                quotaReservationVersion: 1, quotaPeriodKey: '2026-09', quotaReservationState: 'reserved',
                 firstPurchasedAt: new Date('2024-01-01T00:00:00.000Z'), lockPeriodMonths: 6,
                 lockExpiresAt: new Date('2024-07-01T00:00:00.000Z'),
                 status: 'pending', refId: 'EXIT-REF-1', save: async () => {},
@@ -675,6 +681,7 @@ async function runNotificationDedupTests() {
                 _id: 'EXTID001', userId: uid, sharesRequested: 2, sharePrice: 10000,
                 grossAmount: 20000, exitFeePercent: 5, exitFeeCharged: 1000, netAmount: 19000,
                 reservationVersion: 1, reservedShares: 2,
+                quotaReservationVersion: 1, quotaPeriodKey: '2026-09', quotaReservationState: 'reserved',
                 firstPurchasedAt: new Date('2024-01-01T00:00:00.000Z'), lockPeriodMonths: 6,
                 lockExpiresAt: new Date('2024-07-01T00:00:00.000Z'),
                 status: 'pending', refId: 'EXIT-REF-ROLLBACK', save: async () => {},
@@ -831,6 +838,7 @@ async function runNotificationDedupTests() {
         auditController.logAction = O.logAction;
         ShareExitRequest.findById = O.ShareExitFindById;
         ShareExitRequest.findOneAndUpdate = O.ShareExitFindOneAndUpdate;
+        ShareExitQuota.findById = O.ShareExitQuotaFindById;
         InvestmentWithdrawal.findById = O.InvestmentWithdrawalFindById;
         InvestmentWithdrawal.findOneAndUpdate = O.InvestmentWithdrawalFindOneAndUpdate;
     }

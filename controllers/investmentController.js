@@ -12,13 +12,14 @@ const notificationService = require('../services/notification.service');
 const { formatNairaAmount } = require('../utils/notificationFormatter');
 const { serializeCustomerTransactions } = require('../utils/customerTransactionSerializer');
 const walletService = require('../services/wallet.service');
+const shareExitQuotaService = require('../services/shareExitQuota.service');
 const { parseInvestmentMoney, parseShareQuantity, parsePercentage } = require('../utils/investmentValidation');
 
 // ─────────────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────────────
 
-const getSettings = async () => investmentService.getInvestmentSettings();
+const getSettings = async (session = null) => investmentService.getInvestmentSettings(session);
 
 const generateRef = (prefix) => `${prefix}-${crypto.randomUUID().split('-')[0].toUpperCase()}-${Date.now()}`;
 
@@ -71,7 +72,12 @@ const validateShareExitRecord = exitRequest => {
     if (exitRequest.reservationVersion !== 1 || exitRequest.reservedShares !== shares) {
         throw new Error('Share exit reservation proof is missing or invalid');
     }
-    return { shares, net };
+    if (exitRequest.quotaReservationVersion !== 1 ||
+        !/^\d{4}-\d{2}$/.test(exitRequest.quotaPeriodKey || '') ||
+        exitRequest.quotaReservationState !== 'reserved') {
+        throw new Error('Share exit quota reservation proof is missing or invalid');
+    }
+    return { shares, net, quotaPeriodKey: exitRequest.quotaPeriodKey };
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -209,74 +215,83 @@ exports.requestShareExit = async (req, res) => {
         return res.status(400).json({ message: error.message });
     }
     const session = await mongoose.startSession();
-    session.startTransaction();
+    let responseData;
     try {
-        const userId = req.user.id;
+        const reserveAndCreate = async () => session.withTransaction(async () => {
+            const userId = req.user.id;
+            const user = await User.findById(userId).session(session);
+            const settings = await getSettings(session);
 
-        const user = await User.findById(userId).session(session);
-        const settings = await getSettings();
+            if (!user?.isShareholder) throw Object.assign(new Error('You are not a shareholder'), { statusCode: 403 });
 
-        if (!user?.isShareholder) throw Object.assign(new Error('You are not a shareholder'), { statusCode: 403 });
+            if (!user.firstSharePurchasedAt) throw Object.assign(new Error('No purchase date on record'), { statusCode: 400 });
+            const lockExpiresAt = new Date(user.firstSharePurchasedAt);
+            lockExpiresAt.setMonth(lockExpiresAt.getMonth() + settings.shareLockPeriodMonths);
+            if (new Date() < lockExpiresAt)
+                throw Object.assign(new Error(`Shares are locked until ${lockExpiresAt.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}`), { statusCode: 403 });
 
-        // Check lock period
-        if (!user.firstSharePurchasedAt) throw Object.assign(new Error('No purchase date on record'), { statusCode: 400 });
-        const lockExpiresAt = new Date(user.firstSharePurchasedAt);
-        lockExpiresAt.setMonth(lockExpiresAt.getMonth() + settings.shareLockPeriodMonths);
-        if (new Date() < lockExpiresAt)
-            throw Object.assign(new Error(`Shares are locked until ${lockExpiresAt.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}`), { statusCode: 403 });
+            const availableShares = user.sharesOwned - user.frozenShares;
+            if (qty > availableShares)
+                throw Object.assign(new Error(`You only have ${availableShares} shares available for exit`), { statusCode: 400 });
 
-        // Check available shares
-        const availableShares = user.sharesOwned - user.frozenShares;
-        if (qty > availableShares)
-            throw Object.assign(new Error(`You only have ${availableShares} shares available for exit`), { statusCode: 400 });
+            const quota = await shareExitQuotaService.reserve({
+                session,
+                percentage: settings.maxMonthlyExitPercent
+            });
 
-        // Check monthly exit quota
-        const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
-        const totalShareholders = await User.countDocuments({ isShareholder: true });
-        const exitsThisMonth = await ShareExitRequest.countDocuments({ status: 'approved', createdAt: { $gte: monthStart } });
-        const maxExits = Math.floor(totalShareholders * (settings.maxMonthlyExitPercent / 100));
-        if (exitsThisMonth >= maxExits)
-            throw Object.assign(new Error(`Monthly exit quota reached (${settings.maxMonthlyExitPercent}% of shareholders). Try again next month.`), { statusCode: 429 });
+            const sharePrice = parseInvestmentMoney(settings.sharePrice, { label: 'Share price' });
+            const grossKobo = qty * sharePrice.kobo;
+            if (!Number.isSafeInteger(grossKobo)) throw new Error('Share exit total exceeds safe monetary precision');
+            const fee = calculateFee(grossKobo, settings.shareExitFee, 'share exit fee');
+            const grossAmount = grossKobo / 100;
+            const exitFeeCharged = fee.feeKobo / 100;
+            const netAmount = fee.netKobo / 100;
 
-        const sharePrice = parseInvestmentMoney(settings.sharePrice, { label: 'Share price' });
-        const grossKobo = qty * sharePrice.kobo;
-        if (!Number.isSafeInteger(grossKobo)) throw new Error('Share exit total exceeds safe monetary precision');
-        const fee = calculateFee(grossKobo, settings.shareExitFee, 'share exit fee');
-        const grossAmount = grossKobo / 100;
-        const exitFeeCharged = fee.feeKobo / 100;
-        const netAmount = fee.netKobo / 100;
+            user.frozenShares += qty;
+            await user.save({ session });
 
-        // Freeze shares
-        user.frozenShares += qty;
-        await user.save({ session });
-
-        // Create exit request
-        const exitRequest = await ShareExitRequest.create([{
-            userId,
-            sharesRequested: qty,
-            sharePrice: settings.sharePrice,
-            grossAmount,
-            exitFeePercent: settings.shareExitFee,
-            exitFeeCharged,
-            netAmount,
-            reservationVersion: 1,
-            reservedShares: qty,
-            refId: generateRef('EXIT'),
-            firstPurchasedAt: user.firstSharePurchasedAt,
-            lockPeriodMonths: settings.shareLockPeriodMonths,
-            lockExpiresAt
-        }], { session });
-
-        await session.commitTransaction();
+            const exitRequest = await ShareExitRequest.create([{
+                userId,
+                sharesRequested: qty,
+                sharePrice: settings.sharePrice,
+                grossAmount,
+                exitFeePercent: settings.shareExitFee,
+                exitFeeCharged,
+                netAmount,
+                reservationVersion: 1,
+                reservedShares: qty,
+                quotaReservationVersion: 1,
+                quotaPeriodKey: quota.periodKey,
+                quotaReservationState: 'reserved',
+                refId: generateRef('EXIT'),
+                firstPurchasedAt: user.firstSharePurchasedAt,
+                lockPeriodMonths: settings.shareLockPeriodMonths,
+                lockExpiresAt
+            }], { session });
+            responseData = { grossAmount, exitFeeCharged, netAmount, refId: exitRequest[0].refId };
+        });
+        for (let attempt = 0; ; attempt++) {
+            try {
+                await reserveAndCreate();
+                break;
+            } catch (error) {
+                if (error?.code === 11000 && attempt < 2) continue;
+                throw error;
+            }
+        }
         res.json({
             success: true,
             message: 'Share exit request submitted. Pending admin approval.',
-            data: { grossAmount, exitFeeCharged, netAmount, refId: exitRequest[0].refId }
+            data: responseData
         });
     } catch (err) {
-        await session.abortTransaction();
+        if (session.inTransaction()) await session.abortTransaction();
         console.error('requestShareExit error:', err);
-        res.status(err.statusCode || (isWriteConflict(err) ? 409 : 500)).json({ message: err.message || 'Exit request failed' });
+        const status = err.statusCode || (isWriteConflict(err) || err?.code === 11000 ? 409 : 500);
+        const message = err.statusCode ? err.message : status === 409
+            ? 'Share exit request conflicted with another update. Please retry.'
+            : 'Share exit request failed';
+        res.status(status).json({ message });
     } finally {
         session.endSession();
     }
@@ -610,6 +625,7 @@ exports.processShareExit = async (req, res) => {
             await session.abortTransaction();
             return res.status(422).json({ message: 'Exit request reservation no longer reconciles with the user portfolio' });
         }
+        await shareExitQuotaService.assertReserved({ periodKey: validated.quotaPeriodKey, session });
 
         if (action === 'approved') {
             user.sharesOwned -= validated.shares;
@@ -625,6 +641,7 @@ exports.processShareExit = async (req, res) => {
                 session
             );
             exitRequest.status = 'approved';
+            exitRequest.quotaReservationState = 'consumed';
             exitRequest.adminNote = adminNote || '';
             await exitRequest.save({ session });
 
@@ -638,7 +655,9 @@ exports.processShareExit = async (req, res) => {
             }], { session });
         } else {
             user.frozenShares -= validated.shares;
+            await shareExitQuotaService.release({ periodKey: validated.quotaPeriodKey, session });
             exitRequest.status = 'rejected';
+            exitRequest.quotaReservationState = 'released';
             exitRequest.adminNote = adminNote || '';
             await Promise.all([user.save({ session }), exitRequest.save({ session })]);
         }
