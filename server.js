@@ -1,8 +1,10 @@
 // Import the Express framework to create the server
 const express = require('express');
 const mongoose = require('mongoose');
+const cron = require('node-cron');
 const morgan = require('morgan');
 const { sanitizeUrl } = require('./utils/logSanitizer');
+const { createGracefulShutdown, registerShutdownSignals } = require('./utils/gracefulShutdown');
 const cors = require('cors');
 require('dotenv').config();
 
@@ -148,15 +150,27 @@ app.get('/', (req, res) => {
 // Boot
 const PORT = process.env.PORT || 7000;
 const MONGOURI = process.env.MONGO_URI;
+let server = null;
+
+const gracefulShutdown = createGracefulShutdown({
+    getServer: () => server,
+    cron,
+    mongoose
+});
+registerShutdownSignals({ shutdown: gracefulShutdown.shutdown });
 
 mongoose.connect(MONGOURI).then(() => {
-    app.listen(PORT, () => console.log(`API is Live on port ${PORT}`));
+    if (gracefulShutdown.isShuttingDown()) return;
+
+    server = app.listen(PORT, () => console.log(`API is Live on port ${PORT}`));
     // Start the monthly dividend cron job
     const { startDividendCron } = require('./utils/dividendCron');
     startDividendCron();
     // Start the periodic settlement/transaction recovery cron (idempotent, exactly-once)
     require('./cron/transactionRetryCron');
 }).catch((err) => {
+    if (gracefulShutdown.isShuttingDown()) return;
+
     console.error('CRITICAL: Database connection failed!');
     console.error('Reason:', err.message || err);
     process.exit(1); // Force exit so nodemon can try again or the user sees the hard crash
