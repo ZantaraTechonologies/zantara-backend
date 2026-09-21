@@ -164,27 +164,35 @@ async function expectReject(fn) {
 // ---------------------------------------------------------------
 const TOS_AGREE = {
     documentType: 'terms',
-    title: 'Zantara Terms of Service',
+    title: 'Terms of Service',
     sourceMarkdown: '# Zantara Terms of Service\n\nBy using Zantara you agree to these terms.',
     acceptanceMode: 'agreement',
     requiresReacceptance: false
 };
 const PRIVACY_ACK = {
     documentType: 'privacy',
-    title: 'Zantara Privacy Policy',
+    title: 'Privacy Policy',
     sourceMarkdown: '# Zantara Privacy Policy\n\nWe process your data as described.',
     acceptanceMode: 'acknowledgement',
     requiresReacceptance: false
 };
 const REFUND_NONE = {
     documentType: 'refund_complaints',
-    title: 'Zantara Refund, Reversal & Complaints Policy',
+    title: 'Refund, Reversal & Complaints Policy',
     sourceMarkdown: '# Refund Policy\n\nClaims are handled within 24 hours.',
     acceptanceMode: 'none',
     requiresReacceptance: false
 };
+const AML_NONE = {
+    documentType: 'aml_kyc',
+    title: 'AML/KYC, Fraud Prevention & Acceptable Use Framework',
+    sourceMarkdown: '# Internal AML/KYC framework',
+    acceptanceMode: 'none',
+    isPublic: false,
+    requiresReacceptance: false
+};
 
-// Publish a full baseline set: terms(agreement) + privacy(acknowledgement) + refund(none).
+// Publish all canonical types, including the internal AML/KYC document.
 async function publishBaseline() {
     const t = await legalService.publish(
         (await legalService.createDraft({ ...TOS_AGREE, createdBy: 'A1' }))._id, { publishedBy: 'A1' });
@@ -192,7 +200,9 @@ async function publishBaseline() {
         (await legalService.createDraft({ ...PRIVACY_ACK, createdBy: 'A1' }))._id, { publishedBy: 'A1' });
     const r = await legalService.publish(
         (await legalService.createDraft({ ...REFUND_NONE, createdBy: 'A1' }))._id, { publishedBy: 'A1' });
-    return { t, p, r };
+    const a = await legalService.publish(
+        (await legalService.createDraft({ ...AML_NONE, createdBy: 'A1' }))._id, { publishedBy: 'A1' });
+    return { t, p, r, a };
 }
 
 const validPayload = (state) => {
@@ -267,7 +277,7 @@ function test(name, fn) {
     {
         const all = await legalService.getAllDocuments();
         test('B1. getAllDocuments returns metadata only (no sourceMarkdown/contentHtml)', () => {
-            assert.strictEqual(all.length, 3);
+            assert.strictEqual(all.length, 4);
             for (const item of all) {
                 assert.ok(!('sourceMarkdown' in item));
                 assert.ok(!('contentHtml' in item));

@@ -1,7 +1,12 @@
 const mongoose = require('mongoose');
 const LegalDocument = require('../models/LegalDocument');
 const LegalAcceptance = require('../models/LegalAcceptance');
-const { DOCUMENT_TYPES, ACCEPTANCE_MODES, MANDATORY_DOCUMENT_TYPES } = require('../models/LegalDocument');
+const {
+    DOCUMENT_POLICIES,
+    DOCUMENT_TYPES,
+    MANDATORY_DOCUMENT_TYPES,
+    PUBLIC_DOCUMENT_TYPES
+} = require('../models/LegalDocument');
 const { markdownToHtml, computeHash } = require('../utils/legalHtml');
 
 function httpError(status, code, message) {
@@ -29,28 +34,61 @@ function requireValidDocumentId(id) {
 // are deliberately never serialized here.
 const serializeCurrent = (d) => ({
     documentType: d.documentType,
-    title: d.title,
+    title: DOCUMENT_POLICIES[d.documentType].displayName,
     version: d.version,
     contentHtml: d.contentHtml,
     contentHash: d.contentHash,
     effectiveDate: d.effectiveDate,
-    acceptanceMode: d.acceptanceMode,
-    requiresAcceptance: d.acceptanceMode !== 'none',
+    acceptanceMode: DOCUMENT_POLICIES[d.documentType].acceptanceMode,
+    requiresAcceptance: DOCUMENT_POLICIES[d.documentType].acceptanceMode !== 'none',
     requiresReacceptance: d.requiresReacceptance
 });
+
+function enforceCanonicalPolicy(documentType, overrides = {}) {
+    const policy = DOCUMENT_POLICIES[documentType];
+    if (!policy) {
+        throw httpError(400, 'INVALID_DOCUMENT_TYPE', `Unknown document type: ${documentType}`);
+    }
+
+    const attemptedOverride =
+        (overrides.title !== undefined && overrides.title !== policy.displayName) ||
+        (overrides.acceptanceMode !== undefined && overrides.acceptanceMode !== policy.acceptanceMode) ||
+        (overrides.isPublic !== undefined && overrides.isPublic !== policy.isPublic);
+    if (attemptedOverride) {
+        throw httpError(400, 'CANONICAL_POLICY_OVERRIDE',
+            `title, isPublic and acceptanceMode are fixed for ${documentType}`);
+    }
+    return policy;
+}
+
+function applyCanonicalPolicy(doc) {
+    const policy = DOCUMENT_POLICIES[doc.documentType];
+    if (policy) {
+        doc.title = policy.displayName;
+        doc.isPublic = policy.isPublic;
+        doc.acceptanceMode = policy.acceptanceMode;
+    }
+}
 
 class LegalDocumentService {
 
     // ── read helpers ──────────────────────────────────────────────────────
 
     async getCurrentDocuments() {
-        const docs = await LegalDocument.find({ status: 'published', isPublic: true }).sort({ documentType: 1 });
+        const docs = await LegalDocument.find({
+            documentType: { $in: PUBLIC_DOCUMENT_TYPES },
+            status: 'published',
+            isPublic: true
+        }).sort({ documentType: 1 });
         return docs.map(serializeCurrent);
     }
 
     async getCurrentByType(documentType) {
         if (!DOCUMENT_TYPES.includes(documentType)) {
             throw httpError(404, 'DOCUMENT_TYPE_UNKNOWN', `Unknown document type: ${documentType}`);
+        }
+        if (!DOCUMENT_POLICIES[documentType].isPublic) {
+            throw httpError(404, 'DOCUMENT_NOT_PUBLISHED', `No current published version for ${documentType}`);
         }
         const doc = await LegalDocument.findOne({ documentType, status: 'published', isPublic: true });
         if (!doc) throw httpError(404, 'DOCUMENT_NOT_PUBLISHED', `No current published version for ${documentType}`);
@@ -67,13 +105,13 @@ class LegalDocumentService {
         return docs.map(d => ({
             id: d._id,
             documentType: d.documentType,
-            title: d.title,
+            title: DOCUMENT_POLICIES[d.documentType].displayName,
             version: d.version,
             status: d.status,
-            acceptanceMode: d.acceptanceMode,
-            requiresAcceptance: d.acceptanceMode !== 'none',
+            acceptanceMode: DOCUMENT_POLICIES[d.documentType].acceptanceMode,
+            requiresAcceptance: DOCUMENT_POLICIES[d.documentType].acceptanceMode !== 'none',
             requiresReacceptance: d.requiresReacceptance,
-            isPublic: d.isPublic,
+            isPublic: DOCUMENT_POLICIES[d.documentType].isPublic,
             changeSummary: d.changeSummary,
             effectiveDate: d.effectiveDate,
             publishedAt: d.publishedAt,
@@ -91,6 +129,7 @@ class LegalDocumentService {
         requireValidDocumentId(id);
         const doc = await LegalDocument.findById(id);
         if (!doc) throw httpError(404, 'DOC_NOT_FOUND', 'Legal document not found');
+        applyCanonicalPolicy(doc);
         return doc;
     }
 
@@ -100,7 +139,7 @@ class LegalDocumentService {
         // LEGAL-01 / LEGAL-02: Mandatory documents ('terms' and 'privacy') must have an
         // active, published version. If either is absent, missingMandatoryDocuments will
         // flag it so protected operations can fail closed with 503 LEGAL_SERVICE_UNAVAILABLE.
-        const mandatoryTypes = LegalDocument.MANDATORY_DOCUMENT_TYPES || MANDATORY_DOCUMENT_TYPES || ['terms', 'privacy'];
+        const mandatoryTypes = LegalDocument.MANDATORY_DOCUMENT_TYPES || MANDATORY_DOCUMENT_TYPES;
         const missingMandatoryDocuments = mandatoryTypes.filter(type =>
             !currentDocs.some(d => d.documentType === type && d.requiresAcceptance)
         );
@@ -170,13 +209,17 @@ class LegalDocumentService {
         if (!DOCUMENT_TYPES.includes(documentType)) {
             throw httpError(404, 'DOCUMENT_TYPE_UNKNOWN', `Unknown document type: ${documentType}`);
         }
+        const policy = DOCUMENT_POLICIES[documentType];
+        if (!policy.isPublic || policy.acceptanceMode === 'none') {
+            throw httpError(400, 'ACCEPTANCE_NOT_REQUIRED', 'This document does not require customer acceptance');
+        }
         if (!LegalAcceptance.ACCEPTANCE_CHANNELS.includes(channel)) {
             throw httpError(400, 'INVALID_CHANNEL', `Invalid channel: ${channel}`);
         }
 
         const current = await LegalDocument.findOne({ documentType, status: 'published', isPublic: true });
         if (!current) throw httpError(404, 'DOCUMENT_NOT_PUBLISHED', 'No current published version to accept');
-        if (current.acceptanceMode === 'none') {
+        if (policy.acceptanceMode === 'none') {
             throw httpError(400, 'ACCEPTANCE_NOT_REQUIRED', 'This document is informational only and does not require acceptance');
         }
 
@@ -192,7 +235,7 @@ class LegalDocumentService {
         }
 
         // Derive acceptanceType from document, NOT from client body.
-        const acceptanceType = current.acceptanceMode;
+        const acceptanceType = policy.acceptanceMode;
 
         try {
             const record = await LegalAcceptance.create({
@@ -231,14 +274,14 @@ class LegalDocumentService {
         }
 
         const current = {};
-        for (const t of DOCUMENT_TYPES) {
+        for (const t of PUBLIC_DOCUMENT_TYPES) {
             const doc = await LegalDocument.findOne({ documentType: t, status: 'published', isPublic: true }).lean();
             if (doc) current[t] = doc;
         }
 
         // Required set = published docs that are not informational ('none').
         // Terms=agreement, Privacy=acknowledgement, Refund/Complaints=none.
-        const required = DOCUMENT_TYPES.filter(t => current[t] && current[t].acceptanceMode !== 'none');
+        const required = MANDATORY_DOCUMENT_TYPES.filter(t => current[t]);
         const missing = required.filter(t => !items.some(i => i && i.documentType === t));
         if (missing.length) {
             const e = httpError(400, 'LEGAL_ACCEPTANCE_REQUIRED',
@@ -253,11 +296,11 @@ class LegalDocumentService {
                 throw httpError(400, 'INVALID_DOCUMENT_TYPE',
                     `Unknown document type: ${item && item.documentType}`);
             }
+            const policy = DOCUMENT_POLICIES[item.documentType];
+            if (!policy.isPublic || policy.acceptanceMode === 'none') continue;
             const cur = current[item.documentType];
             if (!cur) throw httpError(400, 'DOCUMENT_NOT_PUBLISHED',
                 `No current published version for ${item.documentType}`);
-            if (cur.acceptanceMode === 'none') continue; // informational -> no acceptance row
-
             const incomingVersion = Number(item.version);
             if (Number.isNaN(incomingVersion) || incomingVersion !== cur.version) {
                 throw httpError(409, 'STALE_VERSION', 'The supplied version is not the current published version');
@@ -273,7 +316,7 @@ class LegalDocumentService {
                 documentType: cur.documentType,
                 version: cur.version,
                 channel: LegalAcceptance.ACCEPTANCE_CHANNELS.includes(item.channel) ? item.channel : 'web',
-                acceptanceType: cur.acceptanceMode,
+                acceptanceType: policy.acceptanceMode,
                 contentHash: expectedHash
             });
         }
@@ -282,28 +325,22 @@ class LegalDocumentService {
 
     // ── draft/publish lifecycle ───────────────────────────────────────────
 
-    async createDraft({ documentType, title, sourceMarkdown = '', changeSummary = '', acceptanceMode = 'none', requiresReacceptance = false, createdBy }) {
-        if (!DOCUMENT_TYPES.includes(documentType)) {
-            throw httpError(400, 'INVALID_DOCUMENT_TYPE', `Unknown document type: ${documentType}`);
-        }
-        if (!title) throw httpError(400, 'TITLE_REQUIRED', 'Document title is required');
+    async createDraft({ documentType, title, sourceMarkdown = '', changeSummary = '', acceptanceMode, isPublic, requiresReacceptance = false, createdBy }) {
+        const policy = enforceCanonicalPolicy(documentType, { title, acceptanceMode, isPublic });
         if (!createdBy) throw httpError(400, 'CREATED_BY_REQUIRED', 'createdBy actor is required');
-        if (!ACCEPTANCE_MODES.includes(acceptanceMode)) {
-            throw httpError(400, 'INVALID_ACCEPTANCE_MODE', `Invalid acceptanceMode: ${acceptanceMode}`);
-        }
 
         const contentHtml = markdownToHtml(sourceMarkdown);
 
         const doc = await LegalDocument.create({
             documentType,
-            title,
+            title: policy.displayName,
             version: null,
             sourceMarkdown,
             contentHtml,
             status: 'draft',
-            acceptanceMode,
+            acceptanceMode: policy.acceptanceMode,
             requiresReacceptance,
-            isPublic: true,
+            isPublic: policy.isPublic,
             changeSummary,
             createdBy
         });
@@ -317,22 +354,20 @@ class LegalDocumentService {
         if (!doc) throw httpError(404, 'DOC_NOT_FOUND', 'Legal document not found');
         if (doc.status !== 'draft') throw httpError(409, 'IMMUTABLE', 'Only drafts can be edited');
 
-        const { title, sourceMarkdown, changeSummary, acceptanceMode, requiresReacceptance, isPublic } = patch || {};
+        const { title, sourceMarkdown, changeSummary, acceptanceMode, requiresReacceptance, isPublic, documentType } = patch || {};
 
-        if (title !== undefined) doc.title = title;
+        if (documentType !== undefined && documentType !== doc.documentType) {
+            throw httpError(400, 'CANONICAL_POLICY_OVERRIDE', 'documentType cannot be changed');
+        }
+        enforceCanonicalPolicy(doc.documentType, { title, acceptanceMode, isPublic });
+
         if (sourceMarkdown !== undefined) {
             doc.sourceMarkdown = sourceMarkdown;
             doc.contentHtml = markdownToHtml(sourceMarkdown);
         }
         if (changeSummary !== undefined) doc.changeSummary = changeSummary;
-        if (acceptanceMode !== undefined) {
-            if (!ACCEPTANCE_MODES.includes(acceptanceMode)) {
-                throw httpError(400, 'INVALID_ACCEPTANCE_MODE', `Invalid acceptanceMode: ${acceptanceMode}`);
-            }
-            doc.acceptanceMode = acceptanceMode;
-        }
         if (requiresReacceptance !== undefined) doc.requiresReacceptance = !!requiresReacceptance;
-        if (isPublic !== undefined) doc.isPublic = !!isPublic;
+        applyCanonicalPolicy(doc);
 
         await doc.save();
         return doc;
@@ -348,6 +383,7 @@ class LegalDocumentService {
             doc = await LegalDocument.findById(id).session(session);
             if (!doc) throw httpError(404, 'DOC_NOT_FOUND', 'Legal document not found');
             if (doc.status !== 'draft') throw httpError(409, 'NOT_A_DRAFT', 'Only drafts can be published');
+            applyCanonicalPolicy(doc);
 
             const prior = await LegalDocument.findOne({
                 documentType: doc.documentType,
@@ -393,7 +429,7 @@ class LegalDocumentService {
         const doc = await LegalDocument.findById(id);
         if (!doc) throw httpError(404, 'DOC_NOT_FOUND', 'Legal document not found');
         if (doc.status !== 'published') throw httpError(409, 'NOT_PUBLISHED', 'Only published documents can be archived');
-        if (doc.acceptanceMode !== 'none') {
+        if (DOCUMENT_POLICIES[doc.documentType].acceptanceMode !== 'none') {
             throw httpError(409, 'MANDATORY_DOCUMENT', 'A mandatory document cannot be archived in isolation; publish a replacement version via publish() instead');
         }
         doc.status = 'archived';

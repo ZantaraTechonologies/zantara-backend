@@ -100,13 +100,14 @@ exports.adminGetDocument = async (req, res) => {
 
 exports.adminCreateDraft = async (req, res) => {
     try {
-        const { documentType, title, sourceMarkdown, changeSummary, acceptanceMode, requiresReacceptance } = req.body || {};
+        const { documentType, title, sourceMarkdown, changeSummary, acceptanceMode, isPublic, requiresReacceptance } = req.body || {};
         const data = await legalService.createDraft({
             documentType,
             title,
             sourceMarkdown: sourceMarkdown || '',
             changeSummary: changeSummary || '',
             acceptanceMode,
+            isPublic,
             requiresReacceptance: !!requiresReacceptance,
             createdBy: req.user?._id || req.user?.id
         });

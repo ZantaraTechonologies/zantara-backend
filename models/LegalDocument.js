@@ -1,7 +1,16 @@
 const mongoose = require('mongoose');
 
-const DOCUMENT_TYPES = ['terms', 'privacy', 'refund_complaints'];
-const MANDATORY_DOCUMENT_TYPES = ['terms', 'privacy'];
+const DOCUMENT_POLICIES = Object.freeze({
+    terms: Object.freeze({ displayName: 'Terms of Service', isPublic: true, acceptanceMode: 'agreement' }),
+    privacy: Object.freeze({ displayName: 'Privacy Policy', isPublic: true, acceptanceMode: 'acknowledgement' }),
+    refund_complaints: Object.freeze({ displayName: 'Refund, Reversal & Complaints Policy', isPublic: true, acceptanceMode: 'none' }),
+    aml_kyc: Object.freeze({ displayName: 'AML/KYC, Fraud Prevention & Acceptable Use Framework', isPublic: false, acceptanceMode: 'none' })
+});
+const DOCUMENT_TYPES = Object.freeze(Object.keys(DOCUMENT_POLICIES));
+const MANDATORY_DOCUMENT_TYPES = Object.freeze(DOCUMENT_TYPES.filter(type =>
+    DOCUMENT_POLICIES[type].isPublic && DOCUMENT_POLICIES[type].acceptanceMode !== 'none'
+));
+const PUBLIC_DOCUMENT_TYPES = Object.freeze(DOCUMENT_TYPES.filter(type => DOCUMENT_POLICIES[type].isPublic));
 const DOCUMENT_STATUS = ['draft', 'published', 'archived'];
 const ACCEPTANCE_MODES = ['agreement', 'acknowledgement', 'none'];
 
@@ -35,6 +44,16 @@ const legalDocumentSchema = new mongoose.Schema({
     publishedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
 }, { timestamps: true });
 
+// Canonical policy metadata is not editable document content.
+legalDocumentSchema.pre('validate', function () {
+    const policy = DOCUMENT_POLICIES[this.documentType];
+    if (policy) {
+        this.title = policy.displayName;
+        this.isPublic = policy.isPublic;
+        this.acceptanceMode = policy.acceptanceMode;
+    }
+});
+
 // Derived flag: a document requires acceptance unless it is informational.
 legalDocumentSchema.virtual('requiresAcceptance').get(function () {
     return this.acceptanceMode !== 'none';
@@ -48,8 +67,10 @@ legalDocumentSchema.index(
 legalDocumentSchema.index({ documentType: 1, version: -1 });
 
 const legalDocumentModel = mongoose.model('LegalDocument', legalDocumentSchema);
+legalDocumentModel.DOCUMENT_POLICIES = DOCUMENT_POLICIES;
 legalDocumentModel.DOCUMENT_TYPES = DOCUMENT_TYPES;
 legalDocumentModel.MANDATORY_DOCUMENT_TYPES = MANDATORY_DOCUMENT_TYPES;
+legalDocumentModel.PUBLIC_DOCUMENT_TYPES = PUBLIC_DOCUMENT_TYPES;
 legalDocumentModel.DOCUMENT_STATUS = DOCUMENT_STATUS;
 legalDocumentModel.ACCEPTANCE_MODES = ACCEPTANCE_MODES;
 module.exports = legalDocumentModel;

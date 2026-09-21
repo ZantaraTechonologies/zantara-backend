@@ -1,12 +1,10 @@
-require('dotenv').config();
 const mongoose = require('mongoose');
 const User = require('../models/User');
 const LegalDocument = require('../models/LegalDocument');
 const legalService = require('../services/legalDocument.service');
 
 // Authoritative content gate: kept empty in this commit. The final approved
-// Zantara Terms of Service v1.0, Privacy Policy v1.0 and Refund, Reversal &
-// Complaints Policy v1.0 must be reviewed, approved and placed in
+// All four legal document types must be reviewed, approved and placed in
 // scripts/legal_content/approved.js (with APPROVED: true) before this seed is
 // run. Placeholder wording must NEVER be seed/published.
 let APPROVED_CONTENT = null;
@@ -16,11 +14,19 @@ try {
     APPROVED_CONTENT = null;
 }
 
-const isApproved = (content) =>
-    content && content.APPROVED === true &&
-    content.terms && content.terms.version && content.terms.title && content.terms.markdown &&
-    content.privacy && content.privacy.version && content.privacy.title && content.privacy.markdown &&
-    content.refund_complaints && content.refund_complaints.version && content.refund_complaints.title && content.refund_complaints.markdown;
+function getMissingApprovedContent(content) {
+    const missing = [];
+    if (!content || content.APPROVED !== true) missing.push('APPROVED: true');
+    for (const type of LegalDocument.DOCUMENT_TYPES) {
+        if (!content || !content[type]) {
+            missing.push(`${type} content`);
+            continue;
+        }
+        if (!content[type].version) missing.push(`${type}.version`);
+        if (!content[type].markdown) missing.push(`${type}.markdown`);
+    }
+    return missing;
+}
 
 function isSuperAdmin(user) {
     if (!user) return false;
@@ -46,26 +52,28 @@ async function resolveActor() {
 }
 
 async function seedLegalDocuments() {
+    require('dotenv').config();
     console.log('====================================================');
     console.log('       ZANTARA LEGAL DOCUMENTS SEED / BASELINE');
     console.log('====================================================\n');
 
-    const mongoUri = process.env.MONGO_URI;
-    if (!mongoUri) {
-        console.error('ERROR: MONGO_URI is not set in environment.');
-        process.exit(1);
-    }
-
     try {
         // 1. Pending-content gate -> fail safely, zero writes.
-        if (!isApproved(APPROVED_CONTENT)) {
+        const missingApprovedContent = getMissingApprovedContent(APPROVED_CONTENT);
+        if (missingApprovedContent.length > 0) {
             console.error('ABORT: No approved legal content is bundled.');
-            console.error('The Zantara Terms of Service v1.0, Privacy Policy v1.0 and');
-            console.error('Refund, Reversal & Complaints Policy v1.0 must be separately');
-            console.error('approved and placed in scripts/legal_content/approved.js');
+            console.error(`Missing approved types/content: ${missingApprovedContent.join(', ')}`);
+            console.error('All four canonical documents must be separately approved and');
+            console.error('placed in scripts/legal_content/approved.js');
             console.error('(with APPROVED: true) before legal documents are published.');
             console.error('No documents were written.');
             process.exit(3);
+        }
+
+        const mongoUri = process.env.MONGO_URI;
+        if (!mongoUri) {
+            console.error('ERROR: MONGO_URI is not set in environment.');
+            process.exit(1);
         }
 
         await mongoose.connect(mongoUri);
@@ -81,11 +89,11 @@ async function seedLegalDocuments() {
         }
         console.log(`[+] Actor: ${actor._id} (superAdmin, active)\n`);
 
-        const drafts = [
-            { type: 'terms', config: APPROVED_CONTENT.terms, acceptanceMode: 'agreement', requiresReacceptance: false },
-            { type: 'privacy', config: APPROVED_CONTENT.privacy, acceptanceMode: 'acknowledgement', requiresReacceptance: false },
-            { type: 'refund_complaints', config: APPROVED_CONTENT.refund_complaints, acceptanceMode: 'none', requiresReacceptance: false }
-        ];
+        const drafts = LegalDocument.DOCUMENT_TYPES.map(type => ({
+            type,
+            config: APPROVED_CONTENT[type],
+            policy: LegalDocument.DOCUMENT_POLICIES[type]
+        }));
 
         for (const item of drafts) {
             const existing = await LegalDocument.findOne({ documentType: item.type, status: 'published' });
@@ -95,15 +103,16 @@ async function seedLegalDocuments() {
             }
             const doc = await legalService.createDraft({
                 documentType: item.type,
-                title: item.config.title,
+                title: item.policy.displayName,
                 sourceMarkdown: item.config.markdown,
                 changeSummary: item.config.changeSummary || 'Initial approved version',
-                acceptanceMode: item.acceptanceMode,
-                requiresReacceptance: item.requiresReacceptance,
+                acceptanceMode: item.policy.acceptanceMode,
+                isPublic: item.policy.isPublic,
+                requiresReacceptance: false,
                 createdBy: actor._id
             });
             const published = await legalService.publish(doc._id, { publishedBy: actor._id });
-            console.log(`[+] ${item.type}: published v${published.version} (${item.acceptanceMode})`);
+            console.log(`[+] ${item.type}: published v${published.version} (${item.policy.acceptanceMode})`);
         }
 
         console.log('\nLegal document seed completed successfully.');
@@ -119,3 +128,4 @@ if (require.main === module) {
 }
 
 module.exports = seedLegalDocuments;
+module.exports.getMissingApprovedContent = getMissingApprovedContent;

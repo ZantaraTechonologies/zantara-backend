@@ -11,6 +11,7 @@ bundled with this repository.
 | Terms of Service | v1.0 | pending approval |
 | Privacy Policy | v1.0 | pending approval |
 | Refund, Reversal & Complaints Policy | v1.0 | pending approval |
+| AML/KYC, Fraud Prevention & Acceptable Use Framework | v1.0 | pending approval |
 
 ## How approval unlocks seeding
 
@@ -20,7 +21,7 @@ Once the drafted wording is reviewed and approved, place a module at:
 scripts/legal_content/approved.js
 ```
 
-whose export sets `APPROVED: true` and provides the three documents as
+whose export sets `APPROVED: true` and provides all four documents as
 Markdown. Example shape:
 
 ```js
@@ -28,20 +29,22 @@ module.exports = {
     APPROVED: true,
     terms: {
         version: '1.0',
-        title: 'Zantara Terms of Service',
         markdown: '# Zantara Terms of Service\n\n...',
         changeSummary: 'Initial approved version'
     },
     privacy: {
         version: '1.0',
-        title: 'Zantara Privacy Policy',
         markdown: '# Zantara Privacy Policy\n\n...',
         changeSummary: 'Initial approved version'
     },
     refund_complaints: {
         version: '1.0',
-        title: 'Zantara Refund, Reversal & Complaints Policy',
         markdown: '# Zantara Refund, Reversal & Complaints Policy\n\n...',
+        changeSummary: 'Initial approved version'
+    },
+    aml_kyc: {
+        version: '1.0',
+        markdown: '# AML/KYC, Fraud Prevention & Acceptable Use Framework\n\n...',
         changeSummary: 'Initial approved version'
     }
 };
@@ -56,5 +59,7 @@ module.exports = {
 - Publishing additionally requires a real **active superAdmin** account, or a
   valid `BOOTSTRAP_ACTOR_ID` pointing to one; otherwise the seed fails with zero
   writes.
+- Titles, visibility and acceptance modes come from the backend canonical policy
+  map; approved modules provide only approved versioned wording and summaries.
 - Re-running is idempotent: types that already have a published document are
   skipped.
