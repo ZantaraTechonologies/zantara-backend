@@ -4,6 +4,15 @@ const Log = require('../models/Logs')
 const mongoose = require('mongoose')
 const { EVENTS } = require('../utils/pricingLogger')
 const notificationService = require('../services/notification.service');
+const settingsService = require('../services/settings.service');
+
+const CACHED_PUBLIC_SETTING_KEYS = new Set([
+    'SITE_NAME',
+    'SITE_URL',
+    'SITE_LOGO',
+    'SUPPORT_EMAIL',
+    'SUPPORT_PHONE'
+]);
 
 const getFilteredTransactions = async (req, res) => {
     try {
@@ -177,11 +186,15 @@ const updateSetting = async (req, res) => {
         if (investmentService.INVESTMENT_SETTING_KEYS.includes(key)) {
             value = investmentService.validateInvestmentSetting(key, value);
         }
-        await require('../models/Setting').findOneAndUpdate(
-            { key },
-            { key, value },
-            { upsert: true, new: true }
-        );
+        if (CACHED_PUBLIC_SETTING_KEYS.has(key)) {
+            await settingsService.updateSetting(key, value);
+        } else {
+            await require('../models/Setting').findOneAndUpdate(
+                { key },
+                { key, value },
+                { upsert: true, new: true }
+            );
+        }
         const { logAction } = require('./auditController');
         await logAction(req.user.id, req.user.name, 'SETTING_UPDATE', `Key: ${key}`, { value }, 'success', req);
 
