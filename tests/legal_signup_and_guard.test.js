@@ -9,16 +9,19 @@
  */
 const assert = require('assert');
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-legal-jwt-secret';
 
 const LegalDocument = require('../models/LegalDocument');
 const LegalAcceptance = require('../models/LegalAcceptance');
 const User = require('../models/User');
+const Wallet = require('../models/Wallet');
 const { generateAccessToken } = require('../utils/authTokens');
 const { computeHash } = require('../utils/legalHtml');
 const legalService = require('../services/legalDocument.service');
 const legalController = require('../controllers/legalDocumentController');
+const authController = require('../controllers/authController');
 const auditController = require('../controllers/auditController');
 const requireLegalCompliance = require('../middlewares/requireLegalCompliance');
 const { verifyJWT, verifyJWTOptional, checkRoles } = require('../middlewares/auth');
@@ -305,6 +308,118 @@ function test(name, fn) {
     // ------------------------------------------------------------
     console.log('\n--- C. validateSignupAcceptances (signup) ---');
     {
+        resetStore();
+
+        const eNoDocsEmpty = await expectReject(() => legalService.validateSignupAcceptances([]));
+        test('C0a. no mandatory documents + empty payload -> rejected fail-closed', () => {
+            assert.strictEqual(eNoDocsEmpty.status, 400);
+            assert.strictEqual(eNoDocsEmpty.code, 'LEGAL_ACCEPTANCE_REQUIRED');
+        });
+
+        const refundOnly = [{ documentType: 'refund_complaints', version: 1, contentHash: 'unused' }];
+        const eNoDocsRefund = await expectReject(() => legalService.validateSignupAcceptances(refundOnly));
+        test('C0b. no mandatory documents + refund only -> 503 LEGAL_SERVICE_UNAVAILABLE', () => {
+            assert.strictEqual(eNoDocsRefund.status, 503);
+            assert.strictEqual(eNoDocsRefund.code, 'LEGAL_SERVICE_UNAVAILABLE');
+        });
+
+        const unavailableMandatoryPayload = [
+            { documentType: 'terms', version: 1, contentHash: 'unavailable' },
+            { documentType: 'privacy', version: 1, contentHash: 'unavailable' }
+        ];
+        const eNoDocsMandatory = await expectReject(() =>
+            legalService.validateSignupAcceptances(unavailableMandatoryPayload));
+        test('C0c. no mandatory documents + terms/privacy payload -> 503 LEGAL_SERVICE_UNAVAILABLE', () => {
+            assert.strictEqual(eNoDocsMandatory.status, 503);
+            assert.strictEqual(eNoDocsMandatory.code, 'LEGAL_SERVICE_UNAVAILABLE');
+        });
+
+        const originalUserFindOne = User.findOne;
+        const originalUserCreate = User.create;
+        const originalWalletCreate = Wallet.create;
+        const originalAcceptanceInsertMany = LegalAcceptance.insertMany;
+        const originalStartSession = mongoose.startSession;
+        const originalHash = bcrypt.hash;
+        const originalConsoleError = console.error;
+        const writes = { users: 0, wallets: 0, acceptances: 0, sessions: 0 };
+        const registrationRes = makeRes();
+        try {
+            User.findOne = async () => null;
+            User.create = async () => { writes.users++; return []; };
+            Wallet.create = async () => { writes.wallets++; return []; };
+            LegalAcceptance.insertMany = async () => { writes.acceptances++; return []; };
+            mongoose.startSession = async () => { writes.sessions++; return fakeSession(); };
+            bcrypt.hash = async () => 'test-password-hash';
+            console.error = () => {};
+
+            await authController.register({
+                body: {
+                    name: 'Legal Fail Closed',
+                    email: 'legal-fail-closed@example.com',
+                    phone: '08010000000',
+                    password: 'Passw0rd!',
+                    legalAcceptances: refundOnly
+                },
+                ip: '127.0.0.1',
+                headers: { 'user-agent': 'legal-test' }
+            }, registrationRes);
+        } finally {
+            User.findOne = originalUserFindOne;
+            User.create = originalUserCreate;
+            Wallet.create = originalWalletCreate;
+            LegalAcceptance.insertMany = originalAcceptanceInsertMany;
+            mongoose.startSession = originalStartSession;
+            bcrypt.hash = originalHash;
+            console.error = originalConsoleError;
+        }
+        test('C0d. signup legal failure occurs before user, wallet, acceptance, or transaction writes', () => {
+            assert.strictEqual(registrationRes.statusCode, 503);
+            assert.strictEqual(registrationRes.body.code, 'LEGAL_SERVICE_UNAVAILABLE');
+            assert.deepStrictEqual(writes, { users: 0, wallets: 0, acceptances: 0, sessions: 0 });
+        });
+
+        const terms = await legalService.publish(
+            (await legalService.createDraft({ ...TOS_AGREE, createdBy: 'A1' }))._id,
+            { publishedBy: 'A1' }
+        );
+        const termsAcceptance = {
+            documentType: 'terms', version: terms.version,
+            contentHash: computeHash(terms.contentHtml), channel: 'web'
+        };
+        const eTermsOnlyAccepted = await expectReject(() =>
+            legalService.validateSignupAcceptances([termsAcceptance]));
+        const eTermsOnlyInformational = await expectReject(() =>
+            legalService.validateSignupAcceptances(refundOnly));
+        test('C0e. terms published without privacy -> 503 for every nonempty acceptance payload', () => {
+            assert.strictEqual(eTermsOnlyAccepted.status, 503);
+            assert.strictEqual(eTermsOnlyAccepted.code, 'LEGAL_SERVICE_UNAVAILABLE');
+            assert.strictEqual(eTermsOnlyInformational.status, 503);
+            assert.strictEqual(eTermsOnlyInformational.code, 'LEGAL_SERVICE_UNAVAILABLE');
+        });
+
+        resetStore();
+        const privacy = await legalService.publish(
+            (await legalService.createDraft({ ...PRIVACY_ACK, createdBy: 'A1' }))._id,
+            { publishedBy: 'A1' }
+        );
+        const privacyAcceptance = {
+            documentType: 'privacy', version: privacy.version,
+            contentHash: computeHash(privacy.contentHtml), channel: 'web'
+        };
+        const ePrivacyOnlyAccepted = await expectReject(() =>
+            legalService.validateSignupAcceptances([privacyAcceptance]));
+        const ePrivacyOnlyInformational = await expectReject(() =>
+            legalService.validateSignupAcceptances(refundOnly));
+        test('C0f. privacy published without terms -> 503 for every nonempty acceptance payload', () => {
+            assert.strictEqual(ePrivacyOnlyAccepted.status, 503);
+            assert.strictEqual(ePrivacyOnlyAccepted.code, 'LEGAL_SERVICE_UNAVAILABLE');
+            assert.strictEqual(ePrivacyOnlyInformational.status, 503);
+            assert.strictEqual(ePrivacyOnlyInformational.code, 'LEGAL_SERVICE_UNAVAILABLE');
+        });
+
+        resetStore();
+        await publishBaseline();
+
         const eEmpty = await expectReject(() => legalService.validateSignupAcceptances([]));
         test('C1. empty payload -> 400 LEGAL_ACCEPTANCE_REQUIRED', () => {
             assert.strictEqual(eEmpty.status, 400);
@@ -322,6 +437,22 @@ function test(name, fn) {
             assert.strictEqual(eMissPrivacy.status, 400);
             assert.strictEqual(eMissPrivacy.code, 'LEGAL_ACCEPTANCE_REQUIRED');
             assert.ok(eMissPrivacy.details.missing.includes('privacy'));
+        });
+
+        const privacyOnly = validPayload().filter(i => i.documentType === 'privacy');
+        const eMissTerms = await expectReject(() => legalService.validateSignupAcceptances(privacyOnly));
+        test('C3b. privacy-only payload -> 400 with terms missing', () => {
+            assert.strictEqual(eMissTerms.status, 400);
+            assert.strictEqual(eMissTerms.code, 'LEGAL_ACCEPTANCE_REQUIRED');
+            assert.ok(eMissTerms.details.missing.includes('terms'));
+        });
+
+        const amlOnly = [{ documentType: 'aml_kyc', version: 1, contentHash: 'unused' }];
+        const eAmlOnly = await expectReject(() => legalService.validateSignupAcceptances(amlOnly));
+        test('C3c. internal AML/KYC input cannot substitute for terms or privacy', () => {
+            assert.strictEqual(eAmlOnly.status, 400);
+            assert.strictEqual(eAmlOnly.code, 'LEGAL_ACCEPTANCE_REQUIRED');
+            assert.deepStrictEqual(eAmlOnly.details.missing.sort(), ['privacy', 'terms']);
         });
 
         const payloadWithRandom = [...validPayload(), { documentType: 'cookies', version: 1, contentHash: 'x' }];

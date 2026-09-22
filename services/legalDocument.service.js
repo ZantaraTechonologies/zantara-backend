@@ -279,9 +279,13 @@ class LegalDocumentService {
             if (doc) current[t] = doc;
         }
 
-        // Required set = published docs that are not informational ('none').
-        // Terms=agreement, Privacy=acknowledgement, Refund/Complaints=none.
-        const required = MANDATORY_DOCUMENT_TYPES.filter(t => current[t]);
+        const unavailable = MANDATORY_DOCUMENT_TYPES.filter(t => !current[t]);
+        if (unavailable.length) {
+            throw httpError(503, 'LEGAL_SERVICE_UNAVAILABLE',
+                'Registration is temporarily unavailable. Please try again later.');
+        }
+
+        const required = MANDATORY_DOCUMENT_TYPES;
         const missing = required.filter(t => !items.some(i => i && i.documentType === t));
         if (missing.length) {
             const e = httpError(400, 'LEGAL_ACCEPTANCE_REQUIRED',
