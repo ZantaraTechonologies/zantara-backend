@@ -7,6 +7,7 @@ const { sendToken, clearAuthCookie } = require('../utils/authUtils')
 const { TOKEN_PURPOSES, authVersionFilter, verifyPurposeToken } = require('../utils/authTokens')
 const passwordResetService = require('../services/passwordReset.service')
 const phoneVerificationService = require('../services/phoneVerification.service')
+const emailVerificationService = require('../services/emailVerification.service')
 const { sendEmail } = require('../utils/mailer')
 const { sendSMS } = require('../utils/sms')
 const notificationService = require('../services/notification.service')
@@ -626,14 +627,7 @@ const verifyOTP = async (req, res) => {
 
 const sendEmailOTP = async (req, res) => {
     try {
-        const user = await User.findById(req.user.id);
-        if (!user) return res.status(404).json({ message: 'User not found' });
-        if (!user.email) return res.status(400).json({ message: 'No email address associated with your account' });
-
-        const emailOtp = Math.floor(100000 + Math.random() * 900000).toString();
-        const emailOtpExpires = new Date(Date.now() + 10 * 60 * 1000);
-
-        await User.findByIdAndUpdate(user._id, { emailOtp, emailOtpExpires });
+        const { user, otp: emailOtp } = await emailVerificationService.issueEmailVerificationChallenge(req.user.id);
 
         const html = `
             <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
@@ -661,7 +655,9 @@ const sendEmailOTP = async (req, res) => {
             type: 'security'
         });
     } catch (error) {
-        res.status(500).json({ message: 'Error sending email OTP', error: error.message });
+        res.status(error.statusCode || 500).json({
+            message: error.statusCode ? error.message : 'Error sending email OTP'
+        });
     }
 };
 
@@ -670,22 +666,13 @@ const verifyEmailOTP = async (req, res) => {
         const { otp } = req.body;
         if (!otp) return res.status(400).json({ message: 'OTP is required' });
 
-        const user = await User.findById(req.user.id).select('+emailOtp');
-        if (!user) return res.status(404).json({ message: 'User not found' });
-
-        if (user.emailOtp !== otp || user.emailOtpExpires < Date.now()) {
-            return res.status(400).json({ message: 'Invalid or expired OTP' });
-        }
-
-        await User.findByIdAndUpdate(user._id, {
-            isEmailVerified: true,
-            emailOtp: null,
-            emailOtpExpires: null
-        });
+        await emailVerificationService.verifyEmailVerificationChallenge(req.user.id, String(otp));
 
         res.json({ success: true, message: 'Email verified successfully' });
     } catch (error) {
-        res.status(500).json({ message: 'Error verifying email OTP', error: error.message });
+        res.status(error.statusCode || 500).json({
+            message: error.statusCode ? 'Invalid or expired OTP' : 'Error verifying email OTP'
+        });
     }
 };
  

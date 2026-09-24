@@ -27,7 +27,9 @@ const {
     resetVerifyLimiter,
     resetCompleteLimiter,
     phoneOtpRequestLimiter,
-    phoneOtpVerifyLimiter
+    phoneOtpVerifyLimiter,
+    emailOtpRequestLimiter,
+    emailOtpVerifyLimiter
 } = require('../middlewares/limiter')
 const multer = require('multer')
 
@@ -76,8 +78,8 @@ router.post('/verify-pin', verifyJWT, pinLimiter, verifyPin)
 
 router.post('/send-otp', verifyJWT, phoneOtpRequestLimiter, sendOTP)
 router.post('/verify-otp', verifyJWT, phoneOtpVerifyLimiter, verifyOTP)
-router.post('/email/send-otp', verifyJWT, sendEmailOTP)
-router.post('/email/verify-otp', verifyJWT, verifyEmailOTP)
+router.post('/email/send-otp', verifyJWT, emailOtpRequestLimiter, sendEmailOTP)
+router.post('/email/verify-otp', verifyJWT, emailOtpVerifyLimiter, verifyEmailOTP)
 router.get('/referrals', verifyJWT, getReferralStats)
 router.post('/push-token', verifyJWT, savePushToken)
 

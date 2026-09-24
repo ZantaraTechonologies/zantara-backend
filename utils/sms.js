@@ -11,6 +11,17 @@ const axios = require('axios');
 const settingsService = require('../services/settings.service');
 const { maskPhone } = require('./notificationFormatter');
 
+const normalizeTermiiPhone = phone => {
+    const value = String(phone || '').trim();
+    const localMatch = value.match(/^0([789]\d{9})$/);
+    if (localMatch) return `234${localMatch[1]}`;
+
+    const internationalMatch = value.match(/^\+?234([789]\d{9})$/);
+    if (internationalMatch) return `234${internationalMatch[1]}`;
+
+    throw new Error('Unsupported Nigerian phone number format');
+};
+
 const sendSMS = async (phone, message, activityType = null) => {
     try {
         if (activityType) {
@@ -28,15 +39,11 @@ const sendSMS = async (phone, message, activityType = null) => {
         // Only a masked phone + content metadata are written to console.
         console.log(`[SMS Trace] To: ${maskPhone(phone)}, Sender: ${SENDER_ID}, Activity: ${activityType || 'general'}, Length: ${String(message).length}`);
 
+        const formattedPhone = normalizeTermiiPhone(phone);
+
         if (!TERMII_API_KEY || TERMII_API_KEY === 'mock') {
             console.log(`[SMS Mock] Termii API Key not set. Message not sent via SMS.`);
             return { success: true, delivered: false, message: 'SMS logged to console (Mock Mode)' };
-        }
-
-        // Format phone number to international format if needed (Termii prefers 234...)
-        let formattedPhone = phone;
-        if (formattedPhone.startsWith('0')) {
-            formattedPhone = '234' + formattedPhone.substring(1);
         }
 
         const payload = {
@@ -71,5 +78,5 @@ const sendSMS = async (phone, message, activityType = null) => {
     }
 };
 
-module.exports = { sendSMS };
+module.exports = { normalizeTermiiPhone, sendSMS };
 

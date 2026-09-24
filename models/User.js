@@ -59,7 +59,10 @@ const userSchema = new mongoose.Schema({
     isPhoneVerified: { type: Boolean, default: false },
     isEmailVerified: { type: Boolean, default: false },
     emailOtp: { type: String, select: false },
+    emailOtpEmail: { type: String, select: false },
     emailOtpExpires: Date,
+    emailOtpAttempts: { type: Number, select: false, min: 0 },
+    emailOtpRequestedAt: { type: Date, select: false },
     linkedAccounts: [{
         bankName: String,
         bankCode: String,
