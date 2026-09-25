@@ -1,4 +1,6 @@
 const Notification = require('../models/Notification');
+const SmsDelivery = require('../models/SmsDelivery');
+const Transaction = require('../models/Transaction');
 const User = require('../models/User');
 const { sendEmail } = require('../utils/mailer');
 const { sendSMS } = require('../utils/sms');
@@ -8,11 +10,17 @@ const {
     buildEmailShell,
     buildPurchaseSuccessContent,
     buildPurchaseFailureContent,
+    buildCredentialSmsBatches,
     formatNairaAmount,
     safeTransactionReference,
 } = require('../utils/notificationFormatter');
+const { decryptFulfillment } = require('../utils/fulfillment');
 const https = require('https');
 const { maskSecret, sanitizeText } = require('../utils/logSanitizer');
+
+const SMS_MAX_ATTEMPTS = 3;
+const SMS_STALE_AFTER_MS = 5 * 60 * 1000;
+const SMS_RECOVERY_BATCH_SIZE = 100;
 
 class NotificationService {
     /**
@@ -170,9 +178,224 @@ class NotificationService {
      */
     async sendSMS(phone, message, activityType = null) {
         try {
-            await sendSMS(phone, message, activityType);
+            return await sendSMS(phone, message, activityType);
         } catch (err) {
             console.error('SMS notification error:', err.message);
+            return { success: false };
+        }
+    }
+
+    async _claimCredentialSmsBatch({ userId, eventKey, reference, batchIndex, brandName = null, staleOnly = false, staleBefore = null }) {
+        const cutoff = staleBefore || new Date(Date.now() - SMS_STALE_AFTER_MS);
+        const retryState = staleOnly
+            ? { status: 'dispatching', updatedAt: { $lt: cutoff } }
+            : {
+                $or: [
+                    { status: 'failed' },
+                    { status: 'dispatching', updatedAt: { $lt: cutoff } },
+                ],
+            };
+        const delivery = await SmsDelivery.findOneAndUpdate({
+            userId,
+            eventKey,
+            attempts: { $lt: SMS_MAX_ATTEMPTS },
+            ...retryState,
+        }, {
+            $set: { status: 'dispatching', updatedAt: new Date() },
+            $inc: { attempts: 1 },
+        }, { new: true });
+        if (delivery || staleOnly) return delivery;
+
+        try {
+            return await SmsDelivery.create({
+                userId,
+                eventKey,
+                reference: safeTransactionReference(reference),
+                batchIndex,
+                brandName: brandName ? String(brandName) : null,
+                attempts: 1,
+                status: 'dispatching',
+            });
+        } catch (error) {
+            if (error?.code === 11000) return null;
+            throw error;
+        }
+    }
+
+    async _sendClaimedCredentialSmsBatch({ delivery, user, message, messages, activityType, eventKey, reference, brandName }) {
+        let result;
+        try {
+            result = await this.sendSMS(user.phone, message, activityType);
+        } catch (_) {
+            result = { success: false };
+        }
+        const failed = result?.success === false || result?.delivered === false;
+        const completion = await SmsDelivery.updateOne({
+            _id: delivery._id,
+            status: 'dispatching',
+            attempts: delivery.attempts,
+        }, {
+            $set: { status: failed ? 'failed' : 'delivered' },
+        }).catch(() => ({ modifiedCount: 0 }));
+
+        if (completion.modifiedCount !== 1) return false;
+        if (failed && Number(delivery.attempts) < SMS_MAX_ATTEMPTS) {
+            const retry = setTimeout(() => {
+                this._dispatchCredentialSmsBatches(user, messages, activityType, eventKey, reference, brandName)
+                    .catch(() => {});
+            }, 30000);
+            if (typeof retry.unref === 'function') retry.unref();
+        }
+        return !failed;
+    }
+
+    async _dispatchCredentialSmsBatches(user, messages, activityType, eventKey, reference, brandName = null) {
+        for (let index = 0; index < messages.length; index++) {
+            const batchIndex = index + 1;
+            const batchKey = `${eventKey}:sms:${batchIndex}`;
+            let delivery;
+            try {
+                delivery = await this._claimCredentialSmsBatch({
+                    userId: user._id,
+                    eventKey: batchKey,
+                    reference,
+                    batchIndex,
+                    brandName,
+                });
+            } catch (_) {
+                console.error(`[Notification] Credential SMS batch dispatch failed (${batchKey}).`);
+                return false;
+            }
+
+            if (!delivery) {
+                const existing = await SmsDelivery.findOne({ userId: user._id, eventKey: batchKey }).catch(() => null);
+                if (existing?.status === 'delivered') continue;
+                return false;
+            }
+
+            const delivered = await this._sendClaimedCredentialSmsBatch({
+                delivery,
+                user,
+                message: messages[index],
+                messages,
+                activityType,
+                eventKey,
+                reference,
+                brandName,
+            });
+            if (!delivered) return false;
+        }
+        return true;
+    }
+
+    async _recoverStaleCredentialSmsDelivery(candidate, staleBefore) {
+        const rejectCandidate = async () => {
+            await SmsDelivery.updateOne({
+                _id: candidate._id,
+                status: 'dispatching',
+                attempts: candidate.attempts,
+                updatedAt: { $lt: staleBefore },
+            }, {
+                $set: { status: 'failed' },
+            }).catch(() => {});
+            return false;
+        };
+        const transaction = await Transaction.findOne({
+            userId: candidate.userId,
+            refId: candidate.reference,
+            status: 'success',
+            isLoss: false,
+        });
+        if (!transaction) return rejectCandidate();
+
+        const reference = safeTransactionReference(transaction.refId);
+        const eventKey = `purchase_success:${reference}`;
+        if (candidate.eventKey !== `${eventKey}:sms:${candidate.batchIndex}`) return rejectCandidate();
+
+        if (candidate.batchIndex > 1) {
+            const previous = await SmsDelivery.findOne({
+                userId: candidate.userId,
+                eventKey: `${eventKey}:sms:${candidate.batchIndex - 1}`,
+            });
+            if (previous?.status !== 'delivered') return rejectCandidate();
+        }
+
+        const fulfillment = decryptFulfillment(transaction.fulfillment);
+        const storedItemCount = Number(transaction.fulfillment?.itemCount) || 0;
+        if (!fulfillment.complete || fulfillment.items.length === 0 || fulfillment.items.length !== storedItemCount) {
+            return rejectCandidate();
+        }
+        const user = await User.findById(candidate.userId);
+        if (!user?.phone) return rejectCandidate();
+        const brand = candidate.brandName
+            ? { siteName: candidate.brandName }
+            : await getNotificationBrand();
+        const messages = buildCredentialSmsBatches({
+            type: transaction.type,
+            serviceId: transaction.service,
+            reference,
+            details: transaction.details,
+            fulfillment,
+            brand,
+        });
+        const message = messages[candidate.batchIndex - 1];
+        if (!message) return rejectCandidate();
+
+        const delivery = await this._claimCredentialSmsBatch({
+            userId: candidate.userId,
+            eventKey: candidate.eventKey,
+            reference,
+            batchIndex: candidate.batchIndex,
+            brandName: brand.siteName,
+            staleOnly: true,
+            staleBefore,
+        });
+        if (!delivery) return false;
+
+        const delivered = await this._sendClaimedCredentialSmsBatch({
+            delivery,
+            user,
+            message,
+            messages,
+            activityType: 'purchase_success',
+            eventKey,
+            reference,
+            brandName: brand.siteName,
+        });
+        if (!delivered) return false;
+
+        await this._dispatchCredentialSmsBatches(
+            user,
+            messages,
+            'purchase_success',
+            eventKey,
+            reference,
+            brand.siteName
+        );
+        return true;
+    }
+
+    async recoverStaleCredentialSmsDeliveries() {
+        if (this._credentialSmsRecoveryRunning) return { skipped: true, recovered: 0 };
+        this._credentialSmsRecoveryRunning = true;
+        const staleBefore = new Date(Date.now() - SMS_STALE_AFTER_MS);
+        try {
+            const candidates = await SmsDelivery.find({
+                status: 'dispatching',
+                attempts: { $lt: SMS_MAX_ATTEMPTS },
+                updatedAt: { $lt: staleBefore },
+            }).sort({ reference: 1, batchIndex: 1 }).limit(SMS_RECOVERY_BATCH_SIZE);
+            let recovered = 0;
+            for (const candidate of candidates) {
+                try {
+                    if (await this._recoverStaleCredentialSmsDelivery(candidate, staleBefore)) recovered++;
+                } catch (_) {
+                    console.error('[SMS-RECOVERY] Stale credential SMS recovery failed.');
+                }
+            }
+            return { skipped: false, recovered };
+        } finally {
+            this._credentialSmsRecoveryRunning = false;
         }
     }
 
@@ -194,7 +417,7 @@ class NotificationService {
      *   - Without `eventKey`, behavior is byte-for-byte identical to the
      *     legacy path.
      */
-    async notify(user, { title, message, type, metadata, emailHtml, emailSubject, smsMessage, activityType, eventKey }) {
+    async notify(user, { title, message, type, metadata, emailHtml, emailSubject, smsMessage, smsMessages, smsBrandName, activityType, eventKey }) {
         // 1. In-App + Push. The in-app write is the dedup gate for eventKey'd
         //    events; push is always fire-and-forget inside sendInApp().
         let createdHeader = true;
@@ -207,6 +430,20 @@ class NotificationService {
 
         // Already delivered through every channel — safe no-op.
         if (!createdHeader) {
+            if (user.phone && Array.isArray(smsMessages) && smsMessages.length > 0 && eventKey) {
+                const existingEvent = await Notification.findOne({ userId: user._id, eventKey }).lean().catch(() => null);
+                if (existingEvent) {
+                    this._dispatchCredentialSmsBatches(
+                        user,
+                        smsMessages,
+                        activityType,
+                        eventKey,
+                        metadata?.transactionId,
+                        smsBrandName
+                    )
+                        .catch(() => {});
+                }
+            }
             return { deduplicated: true };
         }
 
@@ -220,6 +457,17 @@ class NotificationService {
         if (user.phone && smsMessage) {
             this.sendSMS(user.phone, smsMessage, activityType)
                 .catch(err => console.error('[Notification] SMS delivery error:', err.message));
+        }
+        if (user.phone && Array.isArray(smsMessages) && smsMessages.length > 0 && eventKey) {
+            this._dispatchCredentialSmsBatches(
+                user,
+                smsMessages,
+                activityType,
+                eventKey,
+                metadata?.transactionId,
+                smsBrandName
+            )
+                .catch(() => {});
         }
         // notify() returns here — immediately after in-app write, without
         // waiting for email or SMS to complete.
@@ -294,8 +542,21 @@ class NotificationService {
      *   - Deduplicated by eventKey `purchase_success:<reference>`.
      *   - Raw provider/service codes are never surfaced (formatter contract).
      */
-    async notifyPurchaseSuccess(user, { type, serviceId, amount, reference, details, greetingName }) {
+    async notifyPurchaseSuccess(user, { type, serviceId, amount, reference, details, fulfillment, greetingName }) {
         const brand = await getNotificationBrand();
+        const safeReference = safeTransactionReference(reference);
+        const hasCredentialFulfillment = fulfillment?.complete
+            && Array.isArray(fulfillment.items)
+            && fulfillment.items.length > 0;
+        const existingBatch = hasCredentialFulfillment
+            ? await SmsDelivery.findOne({
+                userId: user._id,
+                eventKey: `purchase_success:${safeReference}:sms:1`,
+            }).catch(() => null)
+            : null;
+        const credentialBrand = existingBatch?.brandName
+            ? { ...brand, siteName: existingBatch.brandName }
+            : brand;
         const at = new Date();
         const content = buildPurchaseSuccessContent({
             type,
@@ -303,21 +564,32 @@ class NotificationService {
             amount,
             reference,
             details,
+            fulfillment,
             brand,
             greetingName,
             at
+        });
+        content.smsMessages = buildCredentialSmsBatches({
+            type,
+            serviceId,
+            reference,
+            details,
+            fulfillment,
+            brand: credentialBrand,
         });
 
         return await this.notify(user, {
             title: content.title,
             message: content.message,
             smsMessage: content.smsMessage,
+            smsMessages: content.smsMessages,
+            smsBrandName: credentialBrand.siteName,
             emailSubject: content.emailSubject,
             emailHtml: content.emailHtml,
             type: 'transaction',
             activityType: 'purchase_success',
             metadata: { transactionId: reference },
-            eventKey: `purchase_success:${safeTransactionReference(reference)}`
+            eventKey: `purchase_success:${safeReference}`
         });
     }
 

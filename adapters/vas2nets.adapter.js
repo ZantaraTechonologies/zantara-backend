@@ -1,6 +1,7 @@
 const axios = require('axios');
 const BaseAdapter = require('./base.adapter');
 const { PROVIDER_OUTCOMES } = require('../utils/providerOutcome');
+const { normalizeFulfillment } = require('../utils/fulfillment');
 
 const SUCCESS_CODES = new Set(['000', '200']);
 const PENDING_CODES = new Set(['099']);
@@ -139,13 +140,15 @@ class Vas2NetsAdapter extends BaseAdapter {
         const isSuccess = outcome === PROVIDER_OUTCOMES.SUCCESS;
         const isPending = outcome === PROVIDER_OUTCOMES.PENDING;
         const isDefinitiveFailure = outcome === PROVIDER_OUTCOMES.DEFINITIVE_FAILURE;
+        const fulfillment = normalizeFulfillment(data);
         return {
             success: isSuccess,
             status: isSuccess ? 'success' : isPending ? 'pending' : isDefinitiveFailure ? 'failed' : 'unknown',
             outcome,
             message: data.message || (isSuccess ? 'Success' : 'Request failed'),
             transactionId: data.transactionId || data.requestId,
-            token: data.token || data.purchased_code,
+            token: fulfillment.items[0]?.code,
+            fulfillment,
             raw: data
         };
     }

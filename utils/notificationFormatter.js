@@ -72,6 +72,10 @@ function getServiceDisplayName(type, serviceId, details) {
     const rawLower = raw.toLowerCase();
     const t = String(type || '').toLowerCase();
 
+    if (details && typeof details.productName === 'string' && details.productName.trim()) {
+        return details.productName.replace(/[\r\n]+/g, ' ').trim();
+    }
+
     let network = null;
     if (details && typeof details.network === 'string' && details.network.trim()) {
         network = details.network.trim();
@@ -265,7 +269,7 @@ function buildPlanLine(details, type) {
  * Builds the complete customer-facing payload for a successful purchase.
  * Returns { title, message, smsMessage, emailSubject, emailHtml }.
  */
-function buildPurchaseSuccessContent({ type, serviceId, amount, reference, details, brand, greetingName, at }) {
+function buildPurchaseSuccessContent({ type, serviceId, amount, reference, details, fulfillment, brand, greetingName, at }) {
     const service = getServiceDisplayName(type, serviceId, details);
     const ref = safeTransactionReference(reference);
     const when = formatNotificationDateTimeWAT(at);
@@ -281,7 +285,10 @@ function buildPurchaseSuccessContent({ type, serviceId, amount, reference, detai
         when
     ].filter(Boolean).join(' ');
 
-    const smsMessage = `${service} purchase successful. ${amountLine}. Ref: ${ref}.`;
+    const smsMessages = buildCredentialSmsBatches({ type, serviceId, reference, details, fulfillment, brand });
+    const smsMessage = smsMessages.length === 0
+        ? `${service} purchase successful. ${amountLine}. Ref: ${ref}.`
+        : undefined;
 
     const bodyParts = [
         greetingName ? `<p>Hello ${escapeHtml(greetingName)},</p>` : '',
@@ -296,9 +303,52 @@ function buildPurchaseSuccessContent({ type, serviceId, amount, reference, detai
         title: `${service} Purchase Successful`,
         message,
         smsMessage,
+        smsMessages,
         emailSubject: `${service} Purchase Successful`,
         emailHtml: buildEmailShell(brand, { title: `${service} Purchase Successful`, bodyHtml: bodyParts })
     };
+}
+
+function buildCredentialSmsBatches({ type, serviceId, reference, details, fulfillment, brand, maxLength = 150 }) {
+    const items = fulfillment?.complete && Array.isArray(fulfillment.items)
+        ? fulfillment.items.filter(item => item && typeof item.code === 'string' && item.code.trim())
+        : [];
+    const normalizedType = String(type || '').toLowerCase();
+    if (items.length === 0 || !['electricity', 'pin', 'exam_pin'].includes(normalizedType)) return [];
+
+    const brandName = String(brand?.siteName || 'Zantara').replace(/[\r\n]+/g, ' ').trim() || 'Zantara';
+    const service = getServiceDisplayName(type, serviceId, details);
+    const ref = safeTransactionReference(reference);
+    const credentialLabel = normalizedType === 'electricity' ? 'Token' : 'PIN';
+
+    if (items.length === 1) {
+        const item = items[0];
+        const serial = item.serial ? ` Serial: ${item.serial}.` : '';
+        return [`${brandName}: ${service} purchase successful. ${credentialLabel}: ${item.code}.${serial} Ref: ${ref}.`];
+    }
+
+    const entries = items.map((item, index) => {
+        const serial = item.serial ? ` Serial: ${item.serial}.` : '';
+        return `${index + 1}/${items.length} ${credentialLabel}: ${item.code}.${serial}`;
+    });
+    const baseHeader = `${brandName}: ${service}. Ref: ${ref}.`;
+    const batches = [];
+    let current = [];
+
+    for (const entry of entries) {
+        const candidate = [...current, entry].join(' ');
+        if (current.length > 0 && baseHeader.length + candidate.length + 24 > maxLength) {
+            batches.push(current);
+            current = [entry];
+        } else {
+            current.push(entry);
+        }
+    }
+    if (current.length > 0) batches.push(current);
+
+    return batches.map((batch, index) => (
+        `${brandName}: ${service} (${index + 1}/${batches.length}). Ref: ${ref}. ${batch.join(' ')}`
+    ));
 }
 
 /**
@@ -384,6 +434,7 @@ module.exports = {
     maskIdentifier,
     buildEmailShell,
     buildPurchaseSuccessContent,
+    buildCredentialSmsBatches,
     buildPurchaseFailureContent,
     buildFundingSuccessContent,
     GENERIC_FAILURE_MESSAGE,

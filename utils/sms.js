@@ -55,7 +55,7 @@ const sendSMS = async (phone, message, activityType = null) => {
             api_key: TERMII_API_KEY
         };
 
-        const response = await axios.post('https://api.ng.termii.com/api/sms/send', payload);
+        const response = await axios.post('https://api.ng.termii.com/api/sms/send', payload, { timeout: 30000 });
         
         // Log only response metadata (never the echoed message content)
         console.log(`[SMS Success] Termii status: ${response.status}, message_id: ${response.data?.message_id || response.data?.code || 'n/a'}`);

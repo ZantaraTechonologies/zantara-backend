@@ -1,5 +1,10 @@
 const mongoose = require('mongoose')
 
+const fulfillmentItemSchema = new mongoose.Schema({
+    code: { type: String, required: true },
+    serial: { type: String, default: null },
+}, { _id: false });
+
 const transactionSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     transactionId: { type: String, unique: true }, // Added for professional FT... IDs
@@ -33,6 +38,12 @@ const transactionSchema = new mongoose.Schema({
         default: 'not_dispatched'
     },
     providerEvidence: { type: mongoose.Schema.Types.Mixed },
+    fulfillment: {
+        items: { type: [fulfillmentItemSchema], default: undefined },
+        expectedQuantity: { type: Number, default: 0 },
+        itemCount: { type: Number, default: 0 },
+        complete: { type: Boolean, default: false },
+    },
     lastProviderResponseAt: { type: Date },
     lastRequeryAt: { type: Date },
     resolutionState: {

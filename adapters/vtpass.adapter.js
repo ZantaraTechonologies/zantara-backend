@@ -1,6 +1,7 @@
 const axios = require('axios');
 const BaseAdapter = require('./base.adapter');
 const { PROVIDER_OUTCOMES } = require('../utils/providerOutcome');
+const { normalizeFulfillment } = require('../utils/fulfillment');
 
 /**
  * VTPass Adapter
@@ -27,12 +28,12 @@ class VTPassAdapter extends BaseAdapter {
 
     /** POST to /pay */
     async _pay(payload) {
-        console.log(`[VTPASS] Pay Request:`, payload);
+        const startedAt = Date.now();
         const res = await axios.post(`${this.baseUrl}/pay`, payload, {
             headers: this._authHeaders(),
             timeout: 30000,
         });
-        console.log(`[VTPASS] Pay Response:`, res.data);
+        console.log(`[VTPASS] Pay completed ref=${payload.request_id || 'n/a'} status=${String(res.data?.code || 'unknown')} durationMs=${Date.now() - startedAt}`);
         return res.data;
     }
 
@@ -88,7 +89,7 @@ class VTPassAdapter extends BaseAdapter {
 
     /** POST merchant-verify (meter / smartcard / account number) */
     async verifyMerchant({ billersCode, serviceID, type }) {
-        console.log(`[VTPASS] Verification Request:`, { billersCode, serviceID, type });
+        const startedAt = Date.now();
         const res = await axios.post(`${this.baseUrl}/merchant-verify`, {
             billersCode,
             serviceID,
@@ -97,7 +98,7 @@ class VTPassAdapter extends BaseAdapter {
             headers: this._authHeaders(),
             timeout: 15000,
         });
-        console.log(`[VTPASS] Verification Response:`, res.data);
+        console.log(`[VTPASS] Verification completed service=${serviceID || 'unknown'} status=${String(res.data?.code || 'unknown')} durationMs=${Date.now() - startedAt}`);
         return res.data;
     }
 
@@ -255,8 +256,8 @@ class VTPassAdapter extends BaseAdapter {
                 : PROVIDER_OUTCOMES.UNKNOWN;
         const status = isSuccess ? 'success' : isPending ? 'pending' : 'unknown';
 
-        const rawToken = data?.purchased_code || data?.token || data?.Pin || (data?.tokens?.[0]);
-        const cleanToken = typeof rawToken === 'string' ? rawToken.replace(/^(Token|Pin)\s*:\s*/i, '') : rawToken;
+        const fulfillment = normalizeFulfillment(data);
+        const cleanToken = fulfillment.items[0]?.code;
 
         // --- Hybrid Accounting Extraction ---
         const transaction = data?.content?.transactions;
@@ -287,6 +288,7 @@ class VTPassAdapter extends BaseAdapter {
             message: data?.response_description || data?.content?.errors?.error || 'Transaction processed',
             transactionId: data?.content?.transactions?.transactionId || data?.requestId,
             token: cleanToken,
+            fulfillment,
             // Financials for Hybrid Accounting
             financials: vendorCost !== null ? {
                 vendorCost,

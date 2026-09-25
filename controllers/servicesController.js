@@ -9,6 +9,8 @@ const { sendResponse } = require('../utils/response')
 const pricingService = require('../services/pricing.service')
 const procurementService = require('../services/procurement.service')
 const mongoose = require('mongoose')
+const { decryptFulfillment } = require('../utils/fulfillment')
+const { decryptSecret, isEncrypted } = require('../utils/crypto')
 
 const sendPurchaseOutcome = (res, result, successMessage, failureMessage) => {
     if (result.status === 'pending') {
@@ -524,37 +526,14 @@ const purchaseExamPin = async (req, res) => {
 
         if (!result.success) return sendPurchaseOutcome(res, result, '', 'Service provider currently unavailable')
 
-        // Special handling for PIN storage
-        try {
-            await Pin.create({
-                userId,
-                service: variation_code,
-                code: result.data.token,
-                refId: result.data.transactionId,
-                status: 'delivered'
-            })
-        } catch (error) {
-            await Transaction.updateOne(
-                { _id: result.transactionId, status: 'success' },
-                { $set: { resolutionError: 'PIN_INVENTORY_PERSISTENCE_FAILED' } }
-            ).catch(() => {});
-            return sendResponse(res, {
-                status: 202,
-                success: false,
-                message: 'Provider confirmed the purchase; PIN delivery is pending reconciliation.',
-                data: {
-                    status: 'pending',
-                    providerOutcome: 'success',
-                    reference: result.reference,
-                    transactionId: result.transactionId,
-                },
-            });
-        }
+        const fulfillment = result.data.fulfillment || { items: [] };
 
         return sendResponse(res, {
             message: 'PIN purchased successfully',
             data: {
-                pin: result.data.token,
+                pin: fulfillment.items[0]?.code || result.data.token,
+                pins: fulfillment.items.map(item => ({ code: item.code, serial: item.serial || null })),
+                fulfillment,
                 reference: result.data.transactionId
             }
         })
@@ -564,8 +543,50 @@ const purchaseExamPin = async (req, res) => {
 }
 
 const getPurchasedPins = async (req, res) => {
-    const pins = await Pin.find({ userId: req.user._id }).sort({ createdAt: -1 })
-    return sendResponse(res, { data: { pins } })
+    const userId = req.user._id || req.user.id;
+    const transactions = await Transaction.find({
+        userId,
+        type: 'pin',
+        status: 'success',
+        'fulfillment.complete': true,
+    }).sort({ createdAt: -1 });
+    const authoritativePins = transactions.flatMap(transaction => {
+        const fulfillment = decryptFulfillment(transaction.fulfillment);
+        if (!fulfillment.complete) return [];
+        return fulfillment.items.map((item, index) => ({
+            _id: index === 0 ? transaction._id : `${transaction._id}:${index}`,
+            userId: transaction.userId,
+            service: transaction.details?.variation_code || transaction.service,
+            code: item.code,
+            serial: item.serial || null,
+            refId: transaction.transactionId,
+            status: 'delivered',
+            createdAt: transaction.createdAt,
+            updatedAt: transaction.updatedAt,
+        }));
+    });
+
+    const legacyDocuments = await Pin.find({ userId }).sort({ createdAt: -1 });
+    const authoritativeRefs = new Set(transactions.flatMap(transaction => [
+        String(transaction.refId),
+        String(transaction.transactionId),
+    ]));
+    const legacyPins = legacyDocuments
+        .map(document => typeof document.toObject === 'function' ? document.toObject() : document)
+        .filter(document => !authoritativeRefs.has(String(document.refId)))
+        .map(document => {
+            const code = decryptSecret(document.code);
+            const serial = decryptSecret(document.serial);
+            if (!code || isEncrypted(code)) return null;
+            return {
+                ...document,
+                code,
+                serial: serial && !isEncrypted(serial) ? serial : null,
+            };
+        })
+        .filter(Boolean);
+
+    return sendResponse(res, { data: { pins: [...authoritativePins, ...legacyPins] } })
 }
 
 const checkTransaction = async (req, res) => {

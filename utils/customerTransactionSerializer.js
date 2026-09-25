@@ -11,6 +11,8 @@
  * - Raw provider responses are never included.
  */
 
+const { decryptFulfillment } = require('./fulfillment');
+
 const BLOCKED_FIELDS = [
     'costPrice',
     'estimatedCostPrice',
@@ -58,9 +60,10 @@ const ALLOWED_TOP_FIELDS = [
 const SAFE_DETAILS_BY_TYPE = {
     airtime: ['phone', 'network'],
     data: ['phone', 'serviceID', 'variation_code'],
-    electricity: ['meter_number', 'meter_type', 'phone'],
+    electricity: ['meter_number', 'meter_type', 'phone', 'productName'],
     cable: ['serviceID', 'billersCode', 'variation_code'],
-    exam_pin: ['serviceID', 'variation_code', 'quantity', 'billersCode'],
+    exam_pin: ['serviceID', 'variation_code', 'quantity', 'billersCode', 'productName'],
+    pin: ['serviceID', 'variation_code', 'quantity', 'billersCode', 'productName'],
     wallet_funding: [],
     funding: [],
     transfer_out: ['recipientName', 'recipientPhone', 'remarks'],
@@ -136,11 +139,14 @@ function extractElectricityToken(response) {
 
     const candidates = [
         response.token,
+        response.purchased_code,
         response.mainToken,
         response.data && response.data.token,
         response.data && response.data.mainToken,
         response.content && response.content.transactions && response.content.transactions[0] && response.content.transactions[0].token,
         response.content && response.content.transactions && response.content.transactions[0] && response.content.transactions[0].main_token,
+        response.content && response.content.transactions && !Array.isArray(response.content.transactions) && response.content.transactions.token,
+        response.content && response.content.transactions && !Array.isArray(response.content.transactions) && response.content.transactions.main_token,
     ];
 
     for (const c of candidates) {
@@ -173,9 +179,12 @@ function serializeCustomerTransaction(doc) {
     };
 
     const safeDetails = sanitizeDetails(plain.details, type);
+    const fulfillment = decryptFulfillment(plain.fulfillment);
 
-    if (type === 'electricity') {
-        const token = extractElectricityToken(plain.response);
+    if (type === 'electricity' && plain.status === 'success') {
+        const token = fulfillment.complete && fulfillment.items.length > 0
+            ? fulfillment.items[0].code
+            : extractElectricityToken(plain.response);
         if (token) {
             if (safeDetails) {
                 safeDetails.token = token;
@@ -183,6 +192,19 @@ function serializeCustomerTransaction(doc) {
                 result.details = { token };
             }
         }
+    }
+
+    if ((type === 'pin' || type === 'exam_pin') && plain.status === 'success' && fulfillment.complete && fulfillment.items.length > 0) {
+        const target = safeDetails || {};
+        target.fulfillment = fulfillment.items;
+        result.details = target;
+    }
+
+    if (type === 'electricity' && plain.status === 'success' && fulfillment.complete && fulfillment.items.length > 0) {
+        const target = safeDetails || {};
+        target.fulfillment = fulfillment.items;
+        target.token = fulfillment.items[0].code;
+        result.details = target;
     }
 
     if (safeDetails) {

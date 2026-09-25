@@ -819,7 +819,7 @@ async function run() {
         assert.strictEqual(dispatchedPayload.variation_code, 'selected-pin-product');
     });
 
-    await test('exam PIN post-success local persistence failure remains unresolved, not falsely failed', async () => {
+    await test('exam PIN success no longer depends on separate legacy Pin persistence', async () => {
         purchaseService.processPurchase = async () => ({
             success: true,
             status: 'success',
@@ -836,10 +836,9 @@ async function run() {
             user: { id: String(userId), roles: ['user'] },
             body: { serviceID: 'waec', variation_code: service.code, amount: 100, quantity: 1, phone: user.phone, pin: '1234' },
         }, res);
-        assert.strictEqual(res.statusCode, 202);
-        assert.strictEqual(res.body.success, false);
-        assert.strictEqual(res.body.data.status, 'pending');
-        assert.strictEqual(res.body.data.reference, 'PIN-LOCAL-REF');
+        assert.strictEqual(res.statusCode, 200);
+        assert.strictEqual(res.body.success, true);
+        assert.strictEqual(res.body.data.pin, '1234-5678');
         assert.strictEqual(walletCredits.length, 0);
     });
 

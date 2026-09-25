@@ -38,6 +38,11 @@ function getSecretKeyBuffer() {
     return crypto.createHash('sha256').update(keyEnv).digest();
 }
 
+function validateEncryptionConfiguration() {
+    if (process.env.NODE_ENV === 'production') getSecretKeyBuffer();
+    return true;
+}
+
 /**
  * Checks if a string is encrypted using the zantara format.
  */
@@ -98,5 +103,6 @@ function decryptSecret(value) {
 module.exports = {
     encryptSecret,
     decryptSecret,
-    isEncrypted
+    isEncrypted,
+    validateEncryptionConfiguration,
 };

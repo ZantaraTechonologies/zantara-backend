@@ -18,8 +18,26 @@ const {
 } = require('../utils/pricingLogger');
 const { resolvePinQuantity } = require('../utils/pinQuantity');
 const { PROVIDER_OUTCOMES, normalizeProviderOutcome } = require('../utils/providerOutcome');
+const {
+    normalizeFulfillment,
+    encryptFulfillment,
+    decryptFulfillment,
+    redactProviderEvidence,
+    expectedFulfillmentQuantity,
+} = require('../utils/fulfillment');
 
 class PurchaseService {
+    _serializeResultData(transaction, evidence = transaction?.providerEvidence || {}) {
+        const fulfillment = decryptFulfillment(transaction?.fulfillment);
+        return serializePurchaseResult({
+            ...evidence,
+            ...(fulfillment.complete ? { fulfillment } : {}),
+        }, {
+            reference: transaction?.refId,
+            transactionId: transaction?.transactionId,
+        });
+    }
+
     _pendingResult(transaction, outcome, message) {
         return {
             success: false,
@@ -37,17 +55,63 @@ class PurchaseService {
         };
     }
 
+    _retryCredentialNotification(transaction) {
+        const fulfillment = decryptFulfillment(transaction?.fulfillment);
+        if (!fulfillment.complete || fulfillment.items.length === 0) return;
+
+        User.findById(transaction.userId).then(user => {
+            if (!user) return;
+            notificationService.notifyPurchaseSuccess(user, {
+                type: transaction.type,
+                serviceId: transaction.service,
+                amount: transaction.amount,
+                reference: transaction.refId,
+                details: transaction.details,
+                fulfillment,
+                greetingName: user.name,
+            }).catch(error => {
+                console.error('[Notification Background Error] Credential notification retry failed:', error?.message);
+            });
+        }).catch(error => {
+            console.error('[Notification Background Error] Credential notification customer lookup failed:', error?.message);
+        });
+    }
+
     async _recordProviderEvidence(transaction, response, isRequery = false) {
         const normalized = normalizeProviderOutcome(response);
+        const receivedFulfillment = normalizeFulfillment(normalized);
+        const existingFulfillment = decryptFulfillment(transaction.fulfillment);
+        const expectedQuantity = expectedFulfillmentQuantity(transaction);
+        const receivedIsComplete = expectedQuantity === 0 || receivedFulfillment.items.length === expectedQuantity;
+        const fulfillment = existingFulfillment.complete && !receivedIsComplete
+            ? existingFulfillment
+            : receivedFulfillment.items.length > 0
+                ? receivedFulfillment
+                : existingFulfillment;
+        const uniqueItemCount = new Set(
+            fulfillment.items.map(item => `${item.code}\u0000${item.serial || ''}`)
+        ).size;
+        const fulfillmentComplete = expectedQuantity === 0
+            || (fulfillment.items.length === expectedQuantity && uniqueItemCount === expectedQuantity);
+        const encryptedFulfillment = (expectedQuantity > 0 || fulfillment.items.length > 0)
+            ? encryptFulfillment(fulfillment, { expectedQuantity, complete: fulfillmentComplete })
+            : undefined;
+        const { token, fulfillment: ignoredFulfillment, ...evidenceWithoutFulfillment } = normalized;
+        const safeEvidence = redactProviderEvidence(evidenceWithoutFulfillment, {
+            items: [...existingFulfillment.items, ...receivedFulfillment.items],
+        });
         const now = new Date();
         const update = {
             providerOutcome: normalized.outcome,
             dispatchState: 'dispatched',
-            providerEvidence: normalized,
-            response: normalized.raw,
+            providerEvidence: safeEvidence,
+            response: safeEvidence.raw,
             lastProviderResponseAt: now,
-            resolutionError: null,
+            resolutionError: normalized.outcome === PROVIDER_OUTCOMES.SUCCESS && !fulfillmentComplete
+                ? 'FULFILLMENT_QUANTITY_MISMATCH'
+                : null,
         };
+        if (encryptedFulfillment) update.fulfillment = encryptedFulfillment;
         if (normalized.transactionId) update.providerRef = normalized.transactionId;
         if (isRequery) update.lastRequeryAt = now;
 
@@ -75,6 +139,9 @@ class PurchaseService {
                 status: 'pending',
                 isLoss: false,
                 providerOutcome: { $in: replaceableOutcomes[normalized.outcome] },
+                ...(normalized.outcome === PROVIDER_OUTCOMES.SUCCESS && expectedQuantity > 0 && !fulfillmentComplete
+                    ? { 'fulfillment.complete': { $ne: true } }
+                    : {}),
             },
             { $set: update }
         );
@@ -89,7 +156,7 @@ class PurchaseService {
         return normalizeProviderOutcome(latest.providerEvidence);
     }
 
-    async _finalizeSuccessfulPurchase(transactionId) {
+    async _finalizeSuccessfulPurchase(transactionId, { requireFulfillment = false } = {}) {
         const session = await mongoose.startSession();
         session.startTransaction();
         let referralNotificationIntent = null;
@@ -104,6 +171,7 @@ class PurchaseService {
                     isLoss: false,
                     providerOutcome: PROVIDER_OUTCOMES.SUCCESS,
                     resolutionState: { $ne: 'finalizing' },
+                    ...(requireFulfillment ? { 'fulfillment.complete': true } : {}),
                 },
                 { $set: { resolutionState: 'finalizing', resolutionError: null } },
                 { new: true, session }
@@ -119,10 +187,7 @@ class PurchaseService {
                         providerOutcome: PROVIDER_OUTCOMES.SUCCESS,
                         transactionId: existing._id,
                         reference: existing.refId,
-                        data: serializePurchaseResult(existing.providerEvidence || {}, {
-                            reference: existing.refId,
-                            transactionId: existing.transactionId,
-                        }),
+                        data: this._serializeResultData(existing),
                     };
                 }
                 return this._pendingResult(existing || { _id: transactionId }, existing?.providerOutcome || PROVIDER_OUTCOMES.SUCCESS);
@@ -196,6 +261,7 @@ class PurchaseService {
                 amount: transaction.amount,
                 reference: transaction.refId,
                 details: transaction.details,
+                fulfillment: decryptFulfillment(transaction.fulfillment),
                 greetingName: user.name,
             }).catch(error => {
                 console.error('[Notification Background Error] Success notification failed:', error?.message);
@@ -205,10 +271,7 @@ class PurchaseService {
                 success: true,
                 status: 'success',
                 providerOutcome: PROVIDER_OUTCOMES.SUCCESS,
-                data: serializePurchaseResult(response, {
-                    reference: transaction.refId,
-                    transactionId: transaction.transactionId,
-                }),
+                data: this._serializeResultData(transaction, response),
                 transactionId: transaction._id,
                 reference: transaction.refId,
             };
@@ -229,16 +292,14 @@ class PurchaseService {
         if (!transaction) throw new Error('Transaction not found');
 
         if (transaction.status === 'success') {
+            this._retryCredentialNotification(transaction);
             return {
                 success: true,
                 status: 'success',
                 providerOutcome: PROVIDER_OUTCOMES.SUCCESS,
                 transactionId: transaction._id,
                 reference: transaction.refId,
-                data: serializePurchaseResult(transaction.providerEvidence || {}, {
-                    reference: transaction.refId,
-                    transactionId: transaction.transactionId,
-                }),
+                data: this._serializeResultData(transaction),
             };
         }
         if (transaction.status === 'failed' || transaction.isLoss) {
@@ -255,16 +316,14 @@ class PurchaseService {
         const normalized = await this._recordProviderEvidence(transaction, response, isRequery);
 
         if (transaction.status === 'success') {
+            this._retryCredentialNotification(transaction);
             return {
                 success: true,
                 status: 'success',
                 providerOutcome: PROVIDER_OUTCOMES.SUCCESS,
                 transactionId: transaction._id,
                 reference: transaction.refId,
-                data: serializePurchaseResult(transaction.providerEvidence || {}, {
-                    reference: transaction.refId,
-                    transactionId: transaction.transactionId,
-                }),
+                data: this._serializeResultData(transaction),
             };
         }
         if (transaction.status === 'failed' || transaction.isLoss) {
@@ -279,8 +338,18 @@ class PurchaseService {
         }
 
         if (normalized.outcome === PROVIDER_OUTCOMES.SUCCESS) {
+            const expectedQuantity = expectedFulfillmentQuantity(transaction);
+            if (expectedQuantity > 0 && !transaction.fulfillment?.complete) {
+                return this._pendingResult(
+                    transaction,
+                    PROVIDER_OUTCOMES.SUCCESS,
+                    'Provider confirmed fulfillment; credential delivery is pending reconciliation.'
+                );
+            }
             try {
-                return await this._finalizeSuccessfulPurchase(transaction._id);
+                return await this._finalizeSuccessfulPurchase(transaction._id, {
+                    requireFulfillment: expectedQuantity > 0,
+                });
             } catch (error) {
                 return this._pendingResult(
                     transaction,
@@ -439,7 +508,13 @@ class PurchaseService {
                 dispatchState: 'not_dispatched',
                 resolutionState: 'unresolved',
                 status: 'pending',
-                details: { ...details, originalAmount: amount, request_id: reference, quantity },
+                details: {
+                    ...details,
+                    ...(['pin', 'electricity'].includes(type) ? { productName: service.name } : {}),
+                    originalAmount: amount,
+                    request_id: reference,
+                    quantity,
+                },
                 pricingSnapshot,
             });
 
@@ -498,10 +573,7 @@ class PurchaseService {
                         providerOutcome: PROVIDER_OUTCOMES.SUCCESS,
                         transactionId: latest._id,
                         reference: latest.refId,
-                        data: serializePurchaseResult(latest.providerEvidence || {}, {
-                            reference: latest.refId,
-                            transactionId: latest.transactionId,
-                        }),
+                        data: this._serializeResultData(latest),
                     };
                 }
                 if (latest?.status === 'failed' || latest?.isLoss) {

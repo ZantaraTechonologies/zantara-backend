@@ -16,6 +16,8 @@
  *   returns a controlled DTO (never the original object).
  */
 
+const { normalizeFulfillment } = require('./fulfillment');
+
 /**
  * Verified blocklist used by the customer purchase/pricing DTO builders.
  * A recursive `containsForbiddenFields` helper (intended for development and
@@ -57,6 +59,7 @@ const PURCHASE_SAFE_FIELDS = [
     'requestId',
     'providerTransactionId',
     'token',
+    'fulfillment',
 ];
 
 /** Recursively collect any forbidden keys present on an object graph. */
@@ -98,6 +101,9 @@ function _cleanToken(value) {
  */
 function extractCustomerToken(response) {
     if (!response || typeof response !== 'object') return undefined;
+
+    const fulfillment = normalizeFulfillment(response);
+    if (fulfillment.items.length > 0) return fulfillment.items[0].code;
 
     const candidates = [
         response.token,
@@ -160,6 +166,9 @@ function serializePurchaseResult(response, ctx) {
 
     const token = extractCustomerToken(source);
     if (token !== undefined) dto.token = token;
+
+    const fulfillment = normalizeFulfillment(source);
+    if (fulfillment.items.length > 0) dto.fulfillment = fulfillment;
 
     return dto;
 }

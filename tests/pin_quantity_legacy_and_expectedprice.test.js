@@ -277,7 +277,13 @@ async function test(name, fn) {
             amount: 1000,
             pin: '1234',
             details: { request_id: 'REF-Q11', serviceID: 'waec-registration', variation_code: 'WAEC_REG_500', phone: '08012345678' },
-            providerCall: async () => { providerCalled = true; return { success: true, status: 'success', message: 'ok', transactionId: 'VTP-Q11', raw: { code: '000' } }; },
+            providerCall: async () => {
+                providerCalled = true;
+                return {
+                    success: true, status: 'success', message: 'ok', transactionId: 'VTP-Q11',
+                    fulfillment: { items: [{ code: 'PIN-Q11' }] }, raw: { code: '000' },
+                };
+            },
         });
 
         assert.strictEqual(result.finalDebug, undefined); // not part of API
@@ -320,7 +326,13 @@ async function test(name, fn) {
             pin: '1234',
             expectedPrice: 1000,
             details: { request_id: 'REF-Q12c', serviceID: 'waec-registration', variation_code: 'WAEC_REG_500', phone: '08012345678', quantity: 'abc' },
-            providerCall: async () => { providerCalls++; return { success: true, status: 'success', message: 'ok', transactionId: 'VTP-Q12c', raw: { code: '000' } }; },
+            providerCall: async () => {
+                providerCalls++;
+                return {
+                    success: true, status: 'success', message: 'ok', transactionId: 'VTP-Q12c',
+                    fulfillment: { items: [{ code: 'PIN-Q12C' }] }, raw: { code: '000' },
+                };
+            },
         });
 
         assert.strictEqual(result.success, true, 'garbage batch is treated as 1 card, not amplified');
@@ -348,7 +360,16 @@ async function test(name, fn) {
             pin: '1234',
             expectedPrice,
             details: { request_id: 'REF-B', serviceID: 'waec-registration', variation_code: 'WAEC_REG_500', phone: '08012345678', quantity },
-            providerCall: async () => { providerCalls++; return { success: true, status: 'success', message: 'ok', transactionId: 'VTP-B', raw: { code: '000' } }; },
+            providerCall: async () => {
+                providerCalls++;
+                return {
+                    success: true, status: 'success', message: 'ok', transactionId: 'VTP-B',
+                    fulfillment: {
+                        items: Array.from({ length: resolvePinQuantity(quantity) }, (_, index) => ({ code: `PIN-B-${index + 1}` })),
+                    },
+                    raw: { code: '000' },
+                };
+            },
         });
 
         if (expectThrow) {

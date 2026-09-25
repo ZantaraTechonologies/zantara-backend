@@ -7,6 +7,10 @@ const { sanitizeUrl } = require('./utils/logSanitizer');
 const { createGracefulShutdown, registerShutdownSignals } = require('./utils/gracefulShutdown');
 const cors = require('cors');
 require('dotenv').config();
+const { validateEncryptionConfiguration } = require('./utils/crypto');
+
+// Fail before binding the HTTP port if the permanent production key is unsafe.
+validateEncryptionConfiguration();
 
 const app = express();
 

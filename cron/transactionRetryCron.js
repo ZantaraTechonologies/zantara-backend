@@ -1,5 +1,6 @@
 const cron = require('node-cron')
 const paymentGatewayService = require('../services/paymentGateway.service')
+const notificationService = require('../services/notification.service')
 
 cron.schedule('*/5 * * * *', async () => {
     // VTU purchases are never resubmitted automatically. Ambiguous fulfillment
@@ -13,6 +14,12 @@ cron.schedule('*/5 * * * *', async () => {
         await paymentGatewayService.recoverStrandedSettlements()
     } catch (sweepErr) {
         console.error('[SETTLEMENT-RECOVERY] Sweep run failed', sweepErr.message)
+    }
+
+    try {
+        await notificationService.recoverStaleCredentialSmsDeliveries()
+    } catch (sweepErr) {
+        console.error('[SMS-RECOVERY] Sweep run failed', sweepErr.message)
     }
 
     console.log('Retry task completed')

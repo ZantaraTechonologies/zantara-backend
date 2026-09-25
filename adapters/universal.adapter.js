@@ -1,6 +1,7 @@
 const axios = require('axios');
 const BaseAdapter = require('./base.adapter');
 const { PROVIDER_OUTCOMES } = require('../utils/providerOutcome');
+const { normalizeFulfillment } = require('../utils/fulfillment');
 
 /**
  * Safely extracts a value from an object using a dot-separated path (e.g. 'data.user.balance').
@@ -391,8 +392,9 @@ class UniversalAdapter extends BaseAdapter {
             transactionId = data.reference || data.transactionId || data.id || data.order_id || data.request_id;
         }
 
-        // Token (electricity / pin)
-        const token = data.token || data.purchased_code || data.pin || data.token_code || data.data?.token || data.data?.pin;
+        // Fulfillment (electricity tokens / exam PINs)
+        const fulfillment = normalizeFulfillment(data);
+        const token = fulfillment.items[0]?.code;
 
         return {
             success: outcome === PROVIDER_OUTCOMES.SUCCESS,
@@ -401,6 +403,7 @@ class UniversalAdapter extends BaseAdapter {
             message: String(message),
             transactionId: transactionId ? String(transactionId) : undefined,
             token: token ? String(token) : undefined,
+            fulfillment,
             raw: data
         };
     }
