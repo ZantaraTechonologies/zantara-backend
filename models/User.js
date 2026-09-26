@@ -73,8 +73,17 @@ const userSchema = new mongoose.Schema({
     virtualAccounts: [{
         bankName: String,
         accountName: String,
-        accountNumber: String
+        accountNumber: String,
+        provider: String,
+        gatewayId: String,
+        accountReference: String,
     }],
+    virtualAccountGatewaySnapshots: {
+        type: Map,
+        of: mongoose.Schema.Types.Mixed,
+        select: false,
+        default: undefined,
+    },
     lastLogin: { type: Date, default: Date.now },
     pushToken: { type: String, default: null } // Expo Push Token for push notifications
 }, { timestamps: true })

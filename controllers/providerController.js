@@ -1,5 +1,6 @@
 const Provider = require('../models/Provider');
 const ProviderOffer = require('../models/ProviderOffer');
+const Transaction = require('../models/Transaction');
 const providerService = require('../services/provider.service');
 const { encryptSecret } = require('../utils/crypto');
 const { serializeProvider, sanitizeMetadata, validateMetadata } = require('../utils/providerSerializer');
@@ -80,6 +81,33 @@ const updateProvider = async (req, res) => {
         let isCredentialRotated = false;
         let isStatusChanged = false;
 
+        const routingConfigChanged = (
+            (name && name.trim() !== provider.name)
+            || (adapterType && adapterType !== provider.adapterType)
+            || (baseUrl && baseUrl.trim() !== provider.baseUrl)
+            || publicKey !== undefined
+            || metadata !== undefined
+            || (apiKey && typeof apiKey === 'string' && apiKey.trim() !== '')
+            || (secretKey && typeof secretKey === 'string' && secretKey.trim() !== '')
+        );
+        if (routingConfigChanged) {
+            const historicalPending = await Transaction.countDocuments({
+                status: 'pending',
+                isLoss: false,
+                providerConfigSnapshot: { $exists: false },
+                $or: [
+                    { providerId: id },
+                    { provider: provider.name },
+                ],
+            });
+            if (historicalPending > 0) {
+                return res.status(409).json({
+                    success: false,
+                    message: `Cannot change provider routing while ${historicalPending} historical transaction(s) remain unresolved.`
+                });
+            }
+        }
+
         if (baseUrl) {
             validateBaseUrl(baseUrl);
             provider.baseUrl = baseUrl.trim();
@@ -158,6 +186,21 @@ const deleteProvider = async (req, res) => {
             return res.status(400).json({
                 success: false,
                 message: `Cannot delete provider '${provider.name}' because it has ${activeOffersCount} service offer mapping(s). Please remove or reassign those offers first.`
+            });
+        }
+
+        const unresolvedTransactions = await Transaction.countDocuments({
+            status: 'pending',
+            isLoss: false,
+            $or: [
+                { providerId: id },
+                { provider: provider.name },
+            ],
+        });
+        if (unresolvedTransactions > 0) {
+            return res.status(400).json({
+                success: false,
+                message: `Cannot delete provider '${provider.name}' because it has ${unresolvedTransactions} unresolved transaction(s).`
             });
         }
 

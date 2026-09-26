@@ -11,10 +11,10 @@ class PaystackAdapter extends BasePaymentAdapter {
         this.webhookSecret = this.webhookSecret || this.secretKey;
     }
 
-    async initializePayment({ user, amount, channel, reference, callbackUrl, metadata = {}, isDirectTransfer = false }) {
-        if (!user || !user.email) throw new Error('PaystackAdapter: customer email is required');
+    async initializePayment({ user, amount, channel, channels, reference, callbackUrl, metadata = {}, isDirectTransfer = false }) {
+        if (!user || !user.email) throw this._definitiveInitializationError('PaystackAdapter: customer email is required');
         const kobo = Math.round(Number(amount) * 100);
-        if (!kobo || kobo < 1) throw new Error('PaystackAdapter: invalid amount');
+        if (!kobo || kobo < 1) throw this._definitiveInitializationError('PaystackAdapter: invalid amount');
 
         const headers = {
             Authorization: `Bearer ${this.secretKey}`,
@@ -48,7 +48,7 @@ class PaystackAdapter extends BasePaymentAdapter {
                     raw: data
                 };
             }
-            throw new Error(response.data?.message || 'Failed to initialize Paystack direct transfer');
+            throw this._definitiveInitializationError(response.data?.message || 'Failed to initialize Paystack direct transfer');
         }
 
         const body = {
@@ -63,15 +63,15 @@ class PaystackAdapter extends BasePaymentAdapter {
             callback_url: callbackUrl || `${process.env.CLIENT_BASE_URL || 'http://localhost:5173'}/paystack/return`
         };
 
-        if (channel) {
-            body.channels = [channel];
+        if (channel || (Array.isArray(channels) && channels.length > 0)) {
+            body.channels = channel ? [channel] : channels;
         }
 
         const response = await axios.post(`${this.baseUrl}/transaction/initialize`, body, { headers, timeout: 20000 });
         const resData = response.data;
 
         if (!resData || !resData.status) {
-            throw new Error(resData?.message || 'Paystack payment initialization failed');
+            throw this._definitiveInitializationError(resData?.message || 'Paystack payment initialization failed');
         }
 
         return {

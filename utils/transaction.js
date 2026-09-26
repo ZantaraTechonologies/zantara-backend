@@ -1,4 +1,6 @@
 const Transaction = require('../models/Transaction')
+const { generateTransactionId } = require('./generateID')
+const { createWithIdentifierRetry } = require('./identifierRetry')
 
 /**
  * Log a transaction into the database.
@@ -23,16 +25,26 @@ async function logTransaction({
     transactionId
 }) {
     try {
-        await Transaction.create({
+        const create = resolvedTransactionId => Transaction.create({
             userId,
-            transactionId: transactionId || refId || `TXN-${Date.now()}`,
+            transactionId: resolvedTransactionId,
             refId,
             type,
             service,
             amount,
             status,
             response
-        })
+        });
+        if (transactionId) {
+            await create(transactionId);
+        } else {
+            await createWithIdentifierRetry({
+                label: 'Transaction log',
+                fields: ['transactionId'],
+                generate: () => ({ transactionId: generateTransactionId() }),
+                create: identifiers => create(identifiers.transactionId)
+            });
+        }
     } catch (err) {
         console.error('Transaction logging failed:', err.message)
         // Optional: save error to your logs collection

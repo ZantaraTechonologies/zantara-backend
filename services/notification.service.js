@@ -302,13 +302,18 @@ class NotificationService {
         };
         const transaction = await Transaction.findOne({
             userId: candidate.userId,
-            refId: candidate.reference,
+            $or: [
+                { transactionId: candidate.reference },
+                { refId: candidate.reference },
+            ],
             status: 'success',
             isLoss: false,
         });
         if (!transaction) return rejectCandidate();
 
-        const reference = safeTransactionReference(transaction.refId);
+        const reference = safeTransactionReference(
+            transaction.providerRequestId ? transaction.transactionId : transaction.refId
+        );
         const eventKey = `purchase_success:${reference}`;
         if (candidate.eventKey !== `${eventKey}:sms:${candidate.batchIndex}`) return rejectCandidate();
 

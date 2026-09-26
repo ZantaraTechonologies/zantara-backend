@@ -1,12 +1,5 @@
-const axios = require('axios');
-const crypto = require('crypto');
 const TransactionStatus = require('../models/TransactionStatus');
-const Transaction = require('../models/Transaction');
-const Wallet = require('../models/Wallet');
-const { logTransaction } = require('../utils/transaction');
-const { initializePayment } = require('../utils/paystack');
-const investmentService = require('../services/investment.service');
-const { parseInvestmentMoney } = require('../utils/investmentValidation');
+const paymentGatewayService = require('../services/paymentGateway.service');
 
 // Optional helper for robust metadata parsing
 const parseMetadata = (metadata) => {
@@ -17,132 +10,52 @@ const parseMetadata = (metadata) => {
     return metadata;
 };
 
-// Optional helper endpoint (not used by /wallet/fund flow)
-// Allows channels/reference to be passed if needed.
+// Optional helper endpoint (not used by /wallet/fund flow).
 const payment = async (req, res) => {
     let txType = 'funding';
     try {
-        const { amount, channels, reference, metadata, isDirectTransfer } = req.body;
-        const secret = process.env.PAYSTACK_SECRET_KEY;
-        const parsedAmount = parseInvestmentMoney(amount, { label: 'Funding amount' });
-        if (parsedAmount.naira < 50) throw new Error('Minimum funding amount is ₦50.00');
-        const amountKobo = parsedAmount.kobo;
-        
-        // Always generate a reference if not provided
-        const finalReference = reference || `REF-${crypto.randomBytes(4).toString('hex').toUpperCase()}-${Date.now()}`;
-
-        // Authoritative share price snapshot: read the CURRENT server-side price
-        // when an investment-buy payment is being initialized. The fullfillment
-        // callback MUST use this snapshot instead of re-reading the price later,
-        // which eliminates the TOCTOU race that caused wrong share counts when
-        // the price moved between init and callback.
-        //
-        // FAIL-CLOSED: for a NEW investment_buy payment the authoritative share
-        // price MUST be obtained and validated BEFORE the TransactionStatus is
-        // created and BEFORE the gateway is initialized. If the price cannot be
-        // loaded, is missing, non-finite or <= 0, initialization is aborted so
-        // no payment record is created and no money can be taken.
-        txType = (metadata && metadata.type) || 'funding';
-        let sharePriceSnapshot = null;
-        if (txType === 'investment_buy') {
-            const settings = await investmentService.getInvestmentSettings();
-            if (!settings.investmentEnabled) {
-                const err = new Error('Share purchase is temporarily unavailable. Please try again later.');
-                err.code = 'INVALID_INVESTMENT_CONFIGURATION';
-                throw err;
-            }
-            const sharePrice = parseInvestmentMoney(settings.sharePrice, { label: 'Share price' });
-            if (amountKobo % sharePrice.kobo !== 0) {
-                const err = new Error('Investment amount must purchase a whole number of shares.');
-                err.code = 'INVALID_INVESTMENT_AMOUNT';
-                throw err;
-            }
-            const qty = amountKobo / sharePrice.kobo;
-            if (qty < settings.minSharesPerPurchase || qty > settings.maxSharesPerUser || qty > settings.totalSharesAvailable) {
-                const err = new Error('Investment amount is outside the permitted share limits.');
-                err.code = 'INVALID_INVESTMENT_AMOUNT';
-                throw err;
-            }
-            let sharesOwned;
-            try {
-                sharesOwned = await investmentService.getAuthoritativeShareBalance(req.user.id);
-            } catch (error) {
-                const err = new Error('Investment account share balance requires manual reconciliation.');
-                err.code = 'INVALID_INVESTMENT_CONFIGURATION';
-                throw err;
-            }
-            if (sharesOwned + qty > settings.maxSharesPerUser) {
-                const err = new Error('Investment amount exceeds the permitted per-user share limit.');
-                err.code = 'INVALID_INVESTMENT_AMOUNT';
-                throw err;
-            }
-            sharePriceSnapshot = sharePrice.naira;
-        }
-
-        const makeTxStatus = (channels) => ({
-            refId: finalReference,
-            userId: req.user.id,
-            type: txType,
-            amountKobo: amountKobo,
-            expectedCurrency: 'NGN',
-            channels,
-            status: 'pending',
-            provider: 'paystack',
-            service: 'Paystack',
-            ...(sharePriceSnapshot != null ? { sharePrice: sharePriceSnapshot } : {})
+        const { amount, channels, metadata: rawMetadata, isDirectTransfer } = req.body;
+        const metadata = parseMetadata(rawMetadata);
+        txType = metadata.type || 'funding';
+        const channel = isDirectTransfer
+            ? 'bank_transfer'
+            : (Array.isArray(channels) && channels.length === 1 ? channels[0] : undefined);
+        const init = await paymentGatewayService.initializeFunding({
+            gatewayCode: 'paystack',
+            channel,
+            channels: Array.isArray(channels) ? channels : undefined,
+            user: { _id: req.user.id, email: req.user.email, name: req.user.name },
+            amount,
+            metadata,
+            isDirectTransfer: Boolean(isDirectTransfer),
         });
 
         if (isDirectTransfer) {
-            // Use Charge API to get direct bank transfer details
-            const response = await axios.post(`${process.env.PAYSTACK_BASE_URL}/charge`, {
-                email: req.user.email,
-                amount: amountKobo,
-                reference: finalReference, // REQUIRED to prevent "Charge attempted" error
-                metadata: {
-                    ...(metadata || {}),
-                    userId: req.user.id,
-                    refId: finalReference
-                },
-                bank_transfer: { account_expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() }
-            }, {
-                headers: { Authorization: `Bearer ${secret}` }
+            return res.json({
+                success: true,
+                reference: init.reference,
+                account_number: init.accountNumber,
+                bank_name: init.bankName || 'Bank',
+                account_name: init.accountName || 'Zantara Technologies',
+                amount: init.amount,
             });
-
-            if (response.data.status) {
-                const data = response.data.data;
-                
-                // Create status record
-                await TransactionStatus.create(makeTxStatus(['bank_transfer']));
-
-                return res.json({
-                    success: true,
-                    reference: finalReference,
-                    account_number: data.account_number,
-                    bank_name: data.bank?.name || 'Bank',
-                    account_name: data.account_name || 'Zantara Technologies',
-                    amount: amountKobo / 100
-                });
-            }
-            throw new Error(response.data.message || 'Failed to initialize direct transfer');
         }
 
-        // Standard Initialize for all other channels (Card, USSD, etc)
-        const init = await initializePayment(
-            req.user.email,
-            parsedAmount.naira,
-            { ...(metadata || {}), userId: req.user.id, refId: finalReference },
-            finalReference,
-            channels
-        );
-
-        await TransactionStatus.create(makeTxStatus(channels || ['card', 'bank_transfer']));
-
         res.json({ 
-            authorization_url: init.data.authorization_url, 
-            reference: finalReference,
+            authorization_url: init.authorizationUrl,
+            reference: init.reference,
         });
     } catch (err) {
         console.error('Paystack Error:', err.response?.data || err.message);
+
+        if (err.code === 'PAYMENT_INITIALIZATION_AMBIGUOUS') {
+            return res.status(202).json({
+                message: err.message,
+                code: err.code,
+                status: 'pending',
+                reference: err.reference,
+            });
+        }
 
         // Controlled application errors (e.g. fail-closed investment
         // initialization) return a safe client message without exposing
@@ -157,8 +70,6 @@ const payment = async (req, res) => {
         res.status(500).json({ error: 'Paystack error: ' + (err.response?.data?.message || err.message) });
     }
 };
-
-const paymentGatewayService = require('../services/paymentGateway.service');
 
 const verifyTransaction = async (req, res) => {
     try {

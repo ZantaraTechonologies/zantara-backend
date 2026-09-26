@@ -1,27 +1,28 @@
 // controllers/flutterwaveController.js
-const TransactionStatus = require('../models/TransactionStatus');
-const Wallet = require('../models/Wallet');
-const { logTransaction } = require('../utils/transaction');
-const { initializePayment } = require('../utils/flutterwave');
+const paymentGatewayService = require('../services/paymentGateway.service');
 
 const payment = async (req, res) => {
     try {
         const { amount } = req.body;
-        const reference = `FLW_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
-
-        const init = await initializePayment(
-            req.user.email,
+        const init = await paymentGatewayService.initializeFunding({
+            gatewayCode: 'flutterwave',
+            user: { _id: req.user.id, email: req.user.email },
             amount,
-            { userId: req.user.id },
-            reference
-        );
-        res.json({ authorization_url: init.data.authorization_url, reference: init.data.reference });
+            metadata: { userId: req.user.id },
+        });
+        res.json({ authorization_url: init.authorizationUrl, reference: init.reference });
     } catch (err) {
+        if (err.code === 'PAYMENT_INITIALIZATION_AMBIGUOUS') {
+            return res.status(202).json({
+                message: err.message,
+                code: err.code,
+                status: 'pending',
+                reference: err.reference,
+            });
+        }
         res.status(500).json({ error: 'Flutterwave error: ' + err.message });
     }
 };
-
-const paymentGatewayService = require('../services/paymentGateway.service');
 
 const webhook = async (req, res) => {
     try {

@@ -397,7 +397,7 @@ async function run() {
     };
     const offer = {
         _id: new mongoose.Types.ObjectId(), serviceId: service._id,
-        providerId: { _id: new mongoose.Types.ObjectId(), name: 'VTPass', status: 'active' },
+        providerId: { _id: new mongoose.Types.ObjectId(), name: 'VTPass', status: 'active', adapterType: 'vtpass' },
         providerCode: 'waec-pin', providerServiceCode: 'waec', status: true,
     };
     let committed = false;
@@ -426,7 +426,9 @@ async function run() {
     Expense.create = async () => [];
     referral.processLifetimeCommission = async () => 0;
     notificationService.notifyPurchaseSuccess = async (_user, payload) => {
-        const transaction = transactions.find(item => item.refId === payload.reference);
+        const transaction = transactions.find(item => (
+            item.transactionId === payload.reference || item.refId === payload.reference
+        ));
         assert.strictEqual(committed, true);
         assert.ok(transaction.fulfillment.items.every(item => item.code.startsWith('enc:v1:')));
         notificationPayload = payload;

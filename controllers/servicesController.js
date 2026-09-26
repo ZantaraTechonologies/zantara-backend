@@ -3,7 +3,6 @@ const providerService = require('../services/provider.service')
 const Pin = require('../models/Pin')
 const Service = require('../models/Service')
 const Transaction = require('../models/Transaction')
-const { generateVTPassRequestId } = require('../utils/generateID')
 const { verifyMeterWithProvider } = require('../utils/vtuService')
 const { sendResponse } = require('../utils/response')
 const pricingService = require('../services/pricing.service')
@@ -11,6 +10,16 @@ const procurementService = require('../services/procurement.service')
 const mongoose = require('mongoose')
 const { decryptFulfillment } = require('../utils/fulfillment')
 const { decryptSecret, isEncrypted } = require('../utils/crypto')
+
+const getSelectedProviderAdapter = selection => providerService.getAdapterInstance(
+    selection.provider,
+    {
+        providerId: selection.providerId,
+        adapterType: selection.providerAdapterType,
+        configSnapshot: selection.providerConfigSnapshot,
+        credentialSnapshot: selection.providerCredentialSnapshot,
+    }
+)
 
 const sendPurchaseOutcome = (res, result, successMessage, failureMessage) => {
     if (result.status === 'pending') {
@@ -81,7 +90,7 @@ const purchaseAirtime = async (req, res) => {
             pin,
             details: { phone: finalPhone, network: finalNetwork, roles: req.user.roles },
             expectedPrice,
-            providerPreflight: selection => providerService.getAdapterInstance(selection.provider),
+            providerPreflight: getSelectedProviderAdapter,
             providerCall: (refId, resolvedCost, selection) => {
                 return selection.adapter.purchaseAirtime({
                     request_id: refId,
@@ -138,7 +147,7 @@ const purchaseData = async (req, res) => {
             pin,
             expectedPrice,
             details: { phone: finalPhone, serviceID: finalServiceID, variation_code, roles: req.user.roles },
-            providerPreflight: selection => providerService.getAdapterInstance(selection.provider),
+            providerPreflight: getSelectedProviderAdapter,
             providerCall: (refId, resolvedCost, selection) => selection.adapter.purchaseData({
                 request_id: refId,
                 serviceID: selection.providerServiceCode,
@@ -398,8 +407,8 @@ const payElectricityBill = async (req, res) => {
             amount,
             pin,
             expectedPrice,
-            details: { request_id: generateVTPassRequestId(), meter_number: finalMeterNumber, meter_type: finalMeterType, phone: finalPhone, roles: req.user.roles },
-            providerPreflight: selection => providerService.getAdapterInstance(selection.provider),
+            details: { meter_number: finalMeterNumber, meter_type: finalMeterType, phone: finalPhone, roles: req.user.roles },
+            providerPreflight: getSelectedProviderAdapter,
             providerCall: (refId, resolvedCost, selection) => selection.adapter.purchaseElectricity({
                 request_id: refId,
                 serviceID: selection.providerServiceCode,
@@ -453,8 +462,8 @@ const rechargeCable = async (req, res) => {
             amount,
             pin,
             expectedPrice,
-            details: { request_id: generateVTPassRequestId(), serviceID: finalServiceID, billersCode: finalBillersCode, variation_code, roles: req.user.roles },
-            providerPreflight: selection => providerService.getAdapterInstance(selection.provider),
+            details: { serviceID: finalServiceID, billersCode: finalBillersCode, variation_code, roles: req.user.roles },
+            providerPreflight: getSelectedProviderAdapter,
             providerCall: (refId, resolvedCost, selection) => selection.adapter.purchaseCable({
                 request_id: refId,
                 serviceID: selection.providerServiceCode,
@@ -511,8 +520,8 @@ const purchaseExamPin = async (req, res) => {
             amount, // UNIT face value per card; the engine scales pins by quantity
             pin,
             expectedPrice,
-            details: { request_id: generateVTPassRequestId(), serviceID, variation_code, quantity: purchasedQuantity, phone, billersCode, roles: req.user.roles },
-            providerPreflight: selection => providerService.getAdapterInstance(selection.provider),
+            details: { serviceID, variation_code, quantity: purchasedQuantity, phone, billersCode, roles: req.user.roles },
+            providerPreflight: getSelectedProviderAdapter,
             providerCall: (refId, resolvedCost, selection) => selection.adapter.purchaseExamPin({
                 request_id: refId,
                 serviceID: selection.providerServiceCode,
@@ -597,10 +606,13 @@ const checkTransaction = async (req, res) => {
 
     try {
         // Verification: Ensure the transaction exists and belongs to the user
-        const localTx = await Transaction.findOne({
+        const localTxQuery = Transaction.findOne({
             $or: [{ refId: refId }, { transactionId: refId }],
             userId: req.user.id
         })
+        const localTx = typeof localTxQuery?.select === 'function'
+            ? await localTxQuery.select('+providerCredentialSnapshot')
+            : await localTxQuery
 
         if (!localTx) {
             return sendResponse(res, { status: 404, success: false, message: 'Transaction record not found in local database' })
@@ -631,7 +643,16 @@ const checkTransaction = async (req, res) => {
 
         let providerResult;
         try {
-            providerResult = await providerService.queryTransaction(localTx.refId, localTx.provider)
+            providerResult = await providerService.queryTransaction(
+                localTx.providerRequestId || localTx.refId,
+                localTx.provider,
+                {
+                    providerId: localTx.providerId || localTx.pricingSnapshot?.providerId,
+                    adapterType: localTx.providerAdapterType,
+                    configSnapshot: localTx.providerConfigSnapshot,
+                    credentialSnapshot: localTx.providerCredentialSnapshot,
+                }
+            )
         } catch (error) {
             providerResult = {
                 success: false,

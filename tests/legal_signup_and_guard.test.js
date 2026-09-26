@@ -884,19 +884,16 @@ function test(name, fn) {
     // ------------------------------------------------------------
     console.log('\n--- J. Flutterwave initialize guard behavior ---');
     {
-        // Stub the HTTP layer the real handler reaches (axios.post), so the
-        // compliant path exercises the true flutterwaveController.payment() +
-        // utils/flutterwave.initializePayment() end to end without a network call.
-        const axios = require('axios');
-        const originalPost = axios.post;
+        // Stub the unified payment boundary reached by the real legacy handler.
+        const paymentGatewayService = require('../services/paymentGateway.service');
+        const originalInitializeFunding = paymentGatewayService.initializeFunding;
         let gatewayCalls = 0;
-        axios.post = async (url, body, config) => {
+        paymentGatewayService.initializeFunding = async options => {
             gatewayCalls++;
             return {
-                data: {
-                    status: 'success',
-                    data: { link: 'https://checkout.flutterwave.com/flw-ok' }
-                }
+                authorizationUrl: 'https://checkout.flutterwave.com/flw-ok',
+                reference: 'FLUTTERWAVE-23456789ABCDEFGH',
+                provider: options.gatewayCode,
             };
         };
         const flwController = require('../controllers/flutterwaveController');
@@ -947,7 +944,7 @@ function test(name, fn) {
             assert.ok(okRes.body.reference);
         });
 
-        axios.post = originalPost;
+        paymentGatewayService.initializeFunding = originalInitializeFunding;
     }
 
     // ------------------------------------------------------------

@@ -10,12 +10,12 @@ class FlutterwaveAdapter extends BasePaymentAdapter {
         this.webhookSecret = this.webhookSecret || process.env.FLUTTERWAVE_HASH || '';
     }
 
-    async initializePayment({ user, amount, channel, reference, callbackUrl, metadata = {} }) {
+    async initializePayment({ user, amount, channel, channels, reference, callbackUrl, metadata = {} }) {
         if (!user || !user.email) {
-            throw new Error('FlutterwaveAdapter: customer email is required');
+            throw this._definitiveInitializationError('FlutterwaveAdapter: customer email is required');
         }
         if (!amount || Number(amount) < 1) {
-            throw new Error('FlutterwaveAdapter: invalid amount');
+            throw this._definitiveInitializationError('FlutterwaveAdapter: invalid amount');
         }
 
         const config = {
@@ -49,6 +49,10 @@ class FlutterwaveAdapter extends BasePaymentAdapter {
         if (channel === 'card') body.payment_options = 'card';
         else if (channel === 'bank_transfer') body.payment_options = 'account,banktransfer';
         else if (channel === 'ussd') body.payment_options = 'ussd';
+        else if (Array.isArray(channels) && channels.length > 0) {
+            const mapped = { card: 'card', bank_transfer: 'account,banktransfer', ussd: 'ussd' };
+            body.payment_options = channels.map(item => mapped[item]).filter(Boolean).join(',');
+        }
 
         const response = await axios.post(`${this.baseUrl}/payments`, body, config);
         const resData = response.data;
@@ -62,7 +66,7 @@ class FlutterwaveAdapter extends BasePaymentAdapter {
             };
         }
 
-        throw new Error(resData?.message || 'Flutterwave payment initialization failed');
+        throw this._definitiveInitializationError(resData?.message || 'Flutterwave payment initialization failed');
     }
 
     async verifyPayment(reference) {

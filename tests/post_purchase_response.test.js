@@ -116,6 +116,9 @@ async function runPostPurchaseResponseTests() {
         quantity: 1,
     });
     procurementService.selectBestOffer = async () => mockOffer;
+    // Keep each timing assertion isolated from delivery work started by an
+    // earlier case; individual tests override this when exercising failures.
+    notificationService.notify = async () => {};
 
     // Mock mongoose session transaction
     mongoose.startSession = async () => ({

@@ -13,6 +13,7 @@ const Transaction = require('../models/Transaction');
 const paymentGatewayService = require('../services/paymentGateway.service');
 const walletService = require('../services/wallet.service');
 const notificationService = require('../services/notification.service');
+const investmentService = require('../services/investment.service');
 
 // ───────────────────────────────────────────────────────────────────────────────
 //  WEBHOOK FAILED → SUCCESS RECOVERY REGRESSION SUITE
@@ -57,6 +58,7 @@ async function runWebhookRecoveryTests() {
     let walletCredits = [];
     let mockAudits = [];
     let axiosVerifyCount = 0;
+    let investmentFulfillments = [];
 
     // Save originals
     const origAxiosGet = axios.get;
@@ -74,6 +76,7 @@ async function runWebhookRecoveryTests() {
     const origWalletCredit = walletService.credit;
     const origNotifySendInApp = notificationService.sendInApp;
     const origNotifyFundingSuccess = notificationService.sendFundingSuccess;
+    const origFulfillSharePurchase = investmentService.fulfillSharePurchase;
 
     const matchesValue = (actual, expected) => {
         if (expected && typeof expected === 'object' && !Array.isArray(expected)) {
@@ -133,6 +136,7 @@ async function runWebhookRecoveryTests() {
         walletCredits = [];
         mockAudits = [];
         axiosVerifyCount = 0;
+        investmentFulfillments = [];
         paymentGatewayService.getGateway = origGetGateway;
     };
 
@@ -311,6 +315,11 @@ async function runWebhookRecoveryTests() {
 
     notificationService.sendInApp = async () => ({ success: true });
     notificationService.sendFundingSuccess = async () => ({ success: true });
+    investmentService.fulfillSharePurchase = async (userId, quantity, reference, _flag, session, sharePrice) => {
+        assert.ok(session, 'Investment fulfillment must participate in the settlement session');
+        investmentFulfillments.push({ userId, quantity, reference, sharePrice });
+        return { success: true };
+    };
 
     const makeWebhookRequest = (refId, eventId, { signature = null } = {}) => {
         const payload = {
@@ -377,6 +386,31 @@ async function runWebhookRecoveryTests() {
             assert.strictEqual(again.status, 200);
             assert.strictEqual(walletCredits.length, 1, 'Second distinct event on success record must not re-credit');
             assert.strictEqual(mockTransactions[0].status, 'success');
+        });
+
+        await test('20b. Authenticated success recovers ambiguous investment_buy exactly once', async () => {
+            resetState();
+            storeGatewayMock();
+            seedFunding('REF-INV-AMB', {
+                type: 'investment_buy',
+                status: 'pending',
+                initializationOutcome: 'ambiguous',
+                sharePrice: 1000,
+            });
+            axios.get = async () => { axiosVerifyCount++; return { data: paystackVerified('REF-INV-AMB') }; };
+
+            const first = await paymentGatewayService.routeWebhook('paystack', makeWebhookRequest('REF-INV-AMB', 111000031));
+            assert.strictEqual(first.status, 200);
+            assert.strictEqual(mockTransactions[0].status, 'success');
+            assert.strictEqual(investmentFulfillments.length, 1);
+            assert.deepStrictEqual(investmentFulfillments[0], {
+                userId: 'u-test', quantity: 5, reference: 'REF-INV-AMB', sharePrice: 1000
+            });
+            assert.strictEqual(walletCredits.length, 0, 'Investment settlement must not credit the wallet');
+
+            const duplicate = await paymentGatewayService.routeWebhook('paystack', makeWebhookRequest('REF-INV-AMB', 111000031));
+            assert.strictEqual(duplicate.status, 200);
+            assert.strictEqual(investmentFulfillments.length, 1, 'Webhook replay must not fulfill shares twice');
         });
 
         await test('21. Client verify CANNOT resurrect a failed transaction (no recovery, no credit)', async () => {
@@ -549,6 +583,7 @@ async function runWebhookRecoveryTests() {
         walletService.credit = origWalletCredit;
         notificationService.sendInApp = origNotifySendInApp;
         notificationService.sendFundingSuccess = origNotifyFundingSuccess;
+        investmentService.fulfillSharePurchase = origFulfillSharePurchase;
     }
 
     console.log('\n----------------------------------------------------');

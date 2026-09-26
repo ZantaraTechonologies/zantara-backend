@@ -3,6 +3,7 @@
 const PaymentGateway = require('../models/PaymentGateway');
 const TransactionStatus = require('../models/TransactionStatus');
 const WebhookEvent = require('../models/WebhookEvent');
+const User = require('../models/User');
 const paymentGatewayService = require('../services/paymentGateway.service');
 const { sanitizePaymentGateway, sanitizePaymentGatewayForClient } = require('../utils/paymentGatewaySerializer');
 const { encryptSecret, isEncrypted } = require('../utils/crypto');
@@ -317,6 +318,50 @@ const updateGateway = async (req, res) => {
         const previousEnv = gateway.environment;
         const previousStatus = gateway.status;
 
+        const verificationConfigChanged = (
+            (adapterType && adapterType.toLowerCase() !== gateway.adapterType)
+            || baseUrl !== undefined
+            || publicKey !== undefined
+            || (secretKey && typeof secretKey === 'string' && secretKey.trim() !== '')
+            || (webhookSecret && typeof webhookSecret === 'string' && webhookSecret.trim() !== '')
+            || (environment && environment !== gateway.environment)
+            || metadata !== undefined
+        );
+        if (verificationConfigChanged) {
+            const unresolvedPayments = await TransactionStatus.countDocuments({
+                provider: gateway.code,
+                status: { $in: ['pending', 'processing', 'settlement_pending', 'reconciliation_required'] }
+            });
+            if (unresolvedPayments > 0) {
+                return res.status(409).json({
+                    success: false,
+                    message: `Cannot change gateway verification settings while ${unresolvedPayments} payment(s) remain unresolved.`
+                });
+            }
+        }
+
+        const virtualAccountConfigChanged = gateway.code === 'monnify' && (
+            (adapterType && adapterType.toLowerCase() !== gateway.adapterType)
+            || baseUrl !== undefined
+            || publicKey !== undefined
+            || (environment && environment !== gateway.environment)
+            || metadata !== undefined
+        );
+        if (virtualAccountConfigChanged) {
+            const virtualAccountUsers = await User.countDocuments({
+                $or: [
+                    { virtualAccounts: { $elemMatch: { provider: 'monnify' } } },
+                    { 'virtualAccounts.0': { $exists: true }, 'virtualAccounts.provider': { $exists: false } },
+                ]
+            });
+            if (virtualAccountUsers > 0) {
+                return res.status(409).json({
+                    success: false,
+                    message: `Cannot change Monnify account routing while ${virtualAccountUsers} user(s) have reserved accounts.`
+                });
+            }
+        }
+
         if (name && name.trim() !== '') gateway.name = name.trim();
         if (adapterType) {
             if (!SUPPORTED_ADAPTER_CODES.includes(adapterType.toLowerCase())) {
@@ -606,15 +651,25 @@ const deleteGateway = async (req, res) => {
             return res.status(404).json({ success: false, message: 'Payment gateway not found' });
         }
 
-        const [txCount, whCount] = await Promise.all([
+        const [txCount, whCount, virtualAccountUsers] = await Promise.all([
             TransactionStatus.countDocuments({ provider: gateway.code }),
-            WebhookEvent.countDocuments({ provider: gateway.code })
+            WebhookEvent.countDocuments({ provider: gateway.code }),
+            gateway.code === 'monnify'
+                ? User.countDocuments({ 'virtualAccounts.0': { $exists: true } })
+                : Promise.resolve(0)
         ]);
 
-        if (txCount > 0 || whCount > 0) {
+        if (txCount > 0 || whCount > 0 || virtualAccountUsers > 0) {
             return res.status(400).json({
                 success: false,
-                message: `Cannot delete gateway '${gateway.name}' because it is bound to historical financial records (${txCount} transactions, ${whCount} webhooks). Deactivate the gateway instead.`
+                message: `Cannot delete gateway '${gateway.name}' because it is bound to historical financial records (${txCount} transactions, ${whCount} webhooks, ${virtualAccountUsers} virtual-account users). Deactivate the gateway instead.`
+            });
+        }
+
+        if (paymentGatewayService._getLegacyGatewayFallback(gateway.code)) {
+            return res.status(400).json({
+                success: false,
+                message: `Cannot delete gateway '${gateway.name}' while its legacy environment credentials remain configured. Deactivate it or remove those credentials first.`
             });
         }
 

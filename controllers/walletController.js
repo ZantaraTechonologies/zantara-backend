@@ -2,10 +2,7 @@ const Wallet = require('../models/Wallet')
 const User = require('../models/User')
 const Transaction = require('../models/Transaction')
 const mongoose = require('mongoose')
-
-const { logTransaction } = require('../utils/transaction')
-// We can use a simple timestamp ref or import generator if available
-const generateRef = () => 'MAN-' + Date.now() + Math.floor(Math.random() * 1000)
+const { generateTransactionId } = require('../utils/generateID')
 
 const walletService = require('../services/wallet.service')
 
@@ -59,17 +56,11 @@ const redeemEarnings = async (req, res) => {
 
         const refId = 'RED-' + Date.now();
 
-        // 1. Debit Referral Balance
-        user.referralBalance -= amountNum;
-        await user.save({ session });
-
-        // 2. Credit Main Wallet
-        await walletService.credit(userId, amountNum, refId, 'referral_redemption', null, session);
-
-        // 3. Log Transaction
+        // Reserve the globally unique transaction identity before any wallet
+        // mutation. The enclosing MongoDB transaction keeps the write atomic.
         await Transaction.create([{
             userId,
-            transactionId: refId,
+            transactionId: generateTransactionId(),
             refId,
             type: 'referral_redeem',
             service: 'Referral',
@@ -77,6 +68,13 @@ const redeemEarnings = async (req, res) => {
             status: 'success',
             details: { message: 'Referral earnings redemption' }
         }], { session });
+
+        // 1. Debit Referral Balance
+        user.referralBalance -= amountNum;
+        await user.save({ session });
+
+        // 2. Credit Main Wallet
+        await walletService.credit(userId, amountNum, refId, 'referral_redemption', null, session);
 
         await session.commitTransaction();
         session.endSession();
@@ -169,33 +167,32 @@ const transferMoney = async (req, res) => {
 
         const reference = 'TRF-' + Date.now();
 
-        // 4. Atomic Debit & Credit
-        await walletService.debit(senderId, totalDebit, reference, 'wallet_transfer_out', null, session);
-        await walletService.credit(receiver._id, amountNum, reference, 'wallet_transfer_in', null, session);
-
-        // 5. Transaction Logs
+        // Reserve both customer transaction identities before wallet entries.
+        // A duplicate-key failure therefore aborts before financial writes run.
         await Transaction.create([{
             userId: senderId,
-            transactionId: reference + '-S',
-            refId: reference,
+            transactionId: generateTransactionId(),
+            refId: reference + '-S',
             type: 'transfer_out',
             service: 'Local Transfer',
             amount: amountNum,
             fee: fee,
             status: 'success',
             details: { recipientName: receiver.name, recipientPhone: receiver.phone, remarks }
-        }], { session });
-
-        await Transaction.create([{
+        }, {
             userId: receiver._id,
-            transactionId: reference + '-R',
-            refId: reference,
+            transactionId: generateTransactionId(),
+            refId: reference + '-R',
             type: 'transfer_in',
             service: 'Local Transfer',
             amount: amountNum,
             status: 'success',
             details: { senderName: sender.name, senderPhone: sender.phone, remarks }
         }], { session });
+
+        // 4. Atomic Debit & Credit
+        await walletService.debit(senderId, totalDebit, reference, 'wallet_transfer_out', null, session);
+        await walletService.credit(receiver._id, amountNum, reference, 'wallet_transfer_in', null, session);
 
         await session.commitTransaction();
         session.endSession();

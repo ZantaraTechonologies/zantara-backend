@@ -16,6 +16,12 @@ class BasePaymentAdapter {
         this.metadata = gatewayConfig.metadata || {};
     }
 
+    _definitiveInitializationError(message) {
+        const error = new Error(message);
+        error.gatewayInitializationOutcome = 'definitive_failure';
+        return error;
+    }
+
     /**
      * Initializes a payment session with the gateway.
      * @param {Object} params

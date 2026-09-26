@@ -20,7 +20,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
         }
 
         if (!this.apiKey || !this.secretKey) {
-            throw new Error('MonnifyAdapter: API key and Secret key are required for authentication');
+            throw this._definitiveInitializationError('MonnifyAdapter: API key and Secret key are required for authentication');
         }
 
         const auth = Buffer.from(`${this.apiKey}:${this.secretKey}`).toString('base64');
@@ -36,15 +36,15 @@ class MonnifyAdapter extends BasePaymentAdapter {
             return this.cachedToken;
         }
 
-        throw new Error(response.data?.responseMessage || 'Monnify Authentication Failed');
+        throw this._definitiveInitializationError(response.data?.responseMessage || 'Monnify Authentication Failed');
     }
 
-    async initializePayment({ user, amount, channel, reference, callbackUrl, metadata = {} }) {
+    async initializePayment({ user, amount, channel, channels, reference, callbackUrl, metadata = {} }) {
         if (!user || (!user.email && !user.phone)) {
-            throw new Error('MonnifyAdapter: customer email or phone is required');
+            throw this._definitiveInitializationError('MonnifyAdapter: customer email or phone is required');
         }
         if (!amount || Number(amount) < 1) {
-            throw new Error('MonnifyAdapter: invalid amount');
+            throw this._definitiveInitializationError('MonnifyAdapter: invalid amount');
         }
 
         const token = await this.getAccessToken();
@@ -52,6 +52,11 @@ class MonnifyAdapter extends BasePaymentAdapter {
         let paymentMethods = ['CARD', 'ACCOUNT_TRANSFER'];
         if (channel === 'card') paymentMethods = ['CARD'];
         if (channel === 'bank_transfer') paymentMethods = ['ACCOUNT_TRANSFER'];
+        if (channel === 'virtual_account') paymentMethods = ['ACCOUNT_TRANSFER'];
+        if (!channel && Array.isArray(channels) && channels.length > 0) {
+            const mapped = { card: 'CARD', bank_transfer: 'ACCOUNT_TRANSFER', virtual_account: 'ACCOUNT_TRANSFER' };
+            paymentMethods = [...new Set(channels.map(item => mapped[item]).filter(Boolean))];
+        }
 
         const body = {
             amount: Number(amount),
@@ -84,7 +89,54 @@ class MonnifyAdapter extends BasePaymentAdapter {
             };
         }
 
-        throw new Error(response.data?.responseMessage || 'Monnify payment initialization failed');
+        throw this._definitiveInitializationError(response.data?.responseMessage || 'Monnify payment initialization failed');
+    }
+
+    async createReservedAccount(user) {
+        if (!user?.email && !user?.phone) {
+            throw new Error('Monnify Reserved: Email or phone is required');
+        }
+        const token = await this.getAccessToken();
+        const accountReference = `VIRTUAL_${user._id}`;
+        const response = await axios.post(
+            `${this.baseUrl}/api/v1/bank-transfer/reserved-accounts`,
+            {
+                accountReference,
+                accountName: user.name || 'Customer',
+                currencyCode: 'NGN',
+                contractCode: this.contractCode,
+                customerEmail: user.email || `${user.phone}@zantara.com`,
+                customerName: user.name || 'Customer',
+                getAllAvailableBanks: true,
+            },
+            { headers: { Authorization: `Bearer ${token}` }, timeout: 20000 }
+        );
+        if (!response.data?.requestSuccessful) {
+            throw new Error(response.data?.responseMessage || 'Monnify reserved account creation failed');
+        }
+        return {
+            status: true,
+            accounts: response.data.responseBody?.accounts || [],
+            accountReference: response.data.responseBody?.accountReference,
+        };
+    }
+
+    async getReservedAccount(accountReference) {
+        const token = await this.getAccessToken();
+        const response = await axios.get(
+            `${this.baseUrl}/api/v1/bank-transfer/reserved-accounts/${encodeURIComponent(accountReference)}`,
+            { headers: { Authorization: `Bearer ${token}` }, timeout: 20000 }
+        );
+        if (!response.data?.requestSuccessful) {
+            throw new Error(response.data?.responseMessage || 'Monnify reserved account lookup failed');
+        }
+        const body = response.data.responseBody || {};
+        const accounts = Array.isArray(body.accounts)
+            ? body.accounts
+            : body.accountNumber
+                ? [{ bankCode: body.bankCode, bankName: body.bankName, accountNumber: body.accountNumber }]
+                : [];
+        return { status: true, accounts, accountReference: body.accountReference };
     }
 
     async verifyPayment(reference) {

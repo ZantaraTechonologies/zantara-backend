@@ -297,7 +297,7 @@ async function assertCategoryProviderBinding(category) {
         user: { id: String(userId) },
     }, requeryRes);
     assert.deepStrictEqual(requeryArgs, {
-        reference: transactions[0].refId,
+        reference: transactions[0].providerRequestId,
         provider: 'SelectedProvider',
     });
 }
@@ -519,7 +519,8 @@ async function run() {
         assert.strictEqual(calledSelection.provider, 'SelectedProvider');
         assert.strictEqual(calledSelection.providerCode, 'selected-airtime');
         assert.strictEqual(transactions[0].provider, 'SelectedProvider');
-        assert.strictEqual(transactions[0].refId, calledSelection.reference);
+        assert.strictEqual(transactions[0].providerRequestId, calledSelection.reference);
+        assert.notStrictEqual(transactions[0].refId, calledSelection.reference);
     });
 
     await test('mixed-case canonical service cannot bypass authoritative offer selection', async () => {

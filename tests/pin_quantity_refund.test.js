@@ -83,7 +83,7 @@ const PIN_SERVICE = {
 const PIN_OFFER = {
     _id: OID(),
     serviceId: PIN_SERVICE._id,
-    providerId: { _id: OID(), name: 'VTPass' },
+    providerId: { _id: OID(), name: 'VTPass', adapterType: 'vtpass' },
     providerCode: 'waec',
     providerServiceCode: 'waec-registration',
     costPrice: 900,
@@ -234,19 +234,20 @@ async function test(name, fn) {
         assert.strictEqual(result.success, false, 'purchase must report failure');
 
         // 2) The committed debit was the full 2-card total.
-        const debit = walletDebits.find(d => d.ref === 'REF-R1');
+        const debit = walletDebits[0];
         assert.ok(debit, 'debit must have been recorded');
         assert.strictEqual(debit.amount, 2000, 'debit must be the total 2 * 1000');
 
         // 3) The persisted transaction.amount is the authority the refund uses.
-        const tx = mockTxs.find(t => String(t.refId) === 'REF-R1');
+        const tx = mockTxs[0];
         assert.ok(tx, 'transaction must exist');
+        assert.strictEqual(debit.ref, tx.refId, 'debit must use the generated internal reference');
         assert.strictEqual(tx.amount, 2000, 'transaction.amount must be 2000');
 
         // 4) Refund credits EXACTLY the debited total.
         assert.strictEqual(walletCredits.length, 1, 'exactly one refund credit');
         assert.strictEqual(walletCredits[0].amount, 2000, 'refund = debit = 2000');
-        assert.strictEqual(walletCredits[0].ref, 'REFUND_REF-R1');
+        assert.strictEqual(walletCredits[0].ref, `REFUND_${tx.refId}`);
 
         // 5) Net customer financial effect is zero.
         assert.strictEqual(debit.amount - walletCredits[0].amount, 0, 'net = 0');
@@ -278,7 +279,7 @@ async function test(name, fn) {
 
         // Replay the refund (as a monitor/cron would): the isLoss claim is now
         // taken, so processRefund must return alreadyRefunded with ZERO credit.
-        const tx = mockTxs.find(t => String(t.refId) === 'REF-R2');
+        const tx = mockTxs[0];
         const replayResult = await refundService.processRefund(tx._id, 'Retry');
 
         assert.strictEqual(walletCredits.length, 1, 'replay must NOT create a second credit');
@@ -302,13 +303,13 @@ async function test(name, fn) {
             providerCall,
         });
 
-        const tx = mockTxs.find(t => String(t.refId) === 'REF-R3');
+        const tx = mockTxs[0];
         const [rA, rB] = await Promise.all([
             refundService.processRefund(tx._id, 'A'),
             refundService.processRefund(tx._id, 'B'),
         ]);
 
-        const creditsForThisTx = walletCredits.filter(c => c.ref === 'REFUND_REF-R3').length;
+        const creditsForThisTx = walletCredits.filter(c => c.ref === `REFUND_${tx.refId}`).length;
         assert.ok(creditsForThisTx <= 1, `concurrent replays produced ${creditsForThisTx} credits (must be <= 1)`);
         assert.strictEqual(walletCredits.length, 1, 'exactly one credit in total');
     });
@@ -330,7 +331,7 @@ async function test(name, fn) {
             providerCall,
         });
 
-        const tx = mockTxs.find(t => String(t.refId) === 'REF-R4');
+        const tx = mockTxs[0];
         assert.strictEqual(walletCredits.length, 1);
         assert.ok(walletCredits[0].amount <= tx.amount, 'refund <= transaction.amount');
         assert.strictEqual(walletCredits[0].amount, 2000);

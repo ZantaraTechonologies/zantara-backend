@@ -12,7 +12,7 @@ const { sendEmail } = require('../utils/mailer')
 const { sendSMS } = require('../utils/sms')
 const notificationService = require('../services/notification.service')
 const ActivityLog = require('../models/ActivityLog')
-const { createReservedAccount } = require('../utils/monnify')
+const paymentGatewayService = require('../services/paymentGateway.service')
 const LegalAcceptance = require('../models/LegalAcceptance')
 const legalService = require('../services/legalDocument.service')
 const { maskSecret } = require('../utils/logSanitizer')
@@ -136,13 +136,23 @@ const register = async (req, res) => {
 
         // Auto-generate Virtual Accounts (Monnify) — must NOT run inside transaction
         try {
-            const vaResult = await createReservedAccount(user);
-            if (vaResult.status && vaResult.accounts) {
+            const gateway = await paymentGatewayService.getGateway('monnify');
+            if (!gateway || gateway.status !== 'active') throw new Error('Monnify gateway is not active');
+            const adapter = paymentGatewayService.getAdapterInstance(gateway);
+            const vaResult = await adapter.createReservedAccount(user);
+            if (vaResult.status && vaResult.accounts?.length > 0) {
+                const accountReference = vaResult.accountReference || `VIRTUAL_${user._id}`;
                 user.virtualAccounts = vaResult.accounts.map(acc => ({
                     bankName: acc.bankName,
                     accountName: acc.accountName,
-                    accountNumber: acc.accountNumber
+                    accountNumber: acc.accountNumber,
+                    provider: 'monnify',
+                    gatewayId: String(gateway._id),
+                    accountReference,
                 }));
+                user.virtualAccountGatewaySnapshots = {
+                    [accountReference]: paymentGatewayService._snapshotGatewayConfig(gateway),
+                };
                 await user.save();
                 console.log(`Virtual accounts auto-generated for ${phone}`);
             }

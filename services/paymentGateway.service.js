@@ -5,19 +5,21 @@ const crypto = require('crypto');
 const PaymentGateway = require('../models/PaymentGateway');
 const TransactionStatus = require('../models/TransactionStatus');
 const Transaction = require('../models/Transaction');
+const User = require('../models/User');
 const WebhookEvent = require('../models/WebhookEvent');
 const WalletLedger = require('../models/WalletLedger');
 const walletService = require('./wallet.service');
 const notificationService = require('./notification.service');
 const investmentService = require('./investment.service');
 const { parseInvestmentMoney } = require('../utils/investmentValidation');
-const { generateReference } = require('../utils/generateID');
-const { decryptSecret, isEncrypted } = require('../utils/crypto');
+const { generatePaymentReference } = require('../utils/generateID');
+const { createWithIdentifierRetry } = require('../utils/identifierRetry');
+const { decryptSecret, encryptSecret, isEncrypted } = require('../utils/crypto');
 
 const PaystackAdapter = require('../adapters/payment/paystack.adapter');
 const MonnifyAdapter = require('../adapters/payment/monnify.adapter');
 const FlutterwaveAdapter = require('../adapters/payment/flutterwave.adapter');
-const { SUPPORTED_ADAPTER_CODES } = require('../adapters/payment/paymentAdapterRegistry');
+const { SUPPORTED_ADAPTER_CODES, getAdapterSpec } = require('../adapters/payment/paymentAdapterRegistry');
 
 const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60 * 1000;
 const SETTLEMENT_LEASE_MS = 15 * 60 * 1000;
@@ -60,6 +62,34 @@ class PaymentGatewayService {
         return doc;
     }
 
+    _snapshotGatewayConfig(gateway) {
+        const protect = value => {
+            if (!value) return '';
+            return isEncrypted(value) ? value : encryptSecret(value);
+        };
+        return {
+            name: gateway.name,
+            code: gateway.code,
+            adapterType: gateway.adapterType,
+            status: gateway.status,
+            environment: gateway.environment,
+            publicKey: gateway.publicKey || '',
+            secretKey: protect(gateway.secretKey),
+            webhookSecret: protect(gateway.webhookSecret),
+            baseUrl: gateway.baseUrl,
+            supportedChannels: gateway.supportedChannels || [],
+            metadata: gateway.metadata || {},
+        };
+    }
+
+    _isDefinitiveInitializationError(error) {
+        if (error?.gatewayInitializationOutcome === 'definitive_failure') return true;
+        if (error?.code === 'PAYMENT_GATEWAY_ADAPTER_UNSUPPORTED') return true;
+        const status = Number(error?.response?.status);
+        if (!Number.isInteger(status) || status < 400 || status >= 500) return false;
+        return ![408, 409, 425, 429].includes(status);
+    }
+
     /**
      * Legacy environment fallback for Paystack if no database records exist yet.
      * DEPRECATED: Will be removed once all gateways are fully DB-managed.
@@ -86,6 +116,45 @@ class PaymentGatewayService {
         };
     }
 
+    _getLegacyGatewayFallback(code) {
+        const normalizedCode = String(code || '').toLowerCase();
+        if (normalizedCode === 'paystack') return this._getLegacyPaystackFallback();
+        if (normalizedCode === 'monnify' && process.env.MONNIFY_API_KEY && process.env.MONNIFY_SECRET_KEY) {
+            return {
+                _id: 'legacy-env-monnify',
+                name: 'Monnify',
+                code: 'monnify',
+                adapterType: 'monnify',
+                status: 'active',
+                environment: process.env.MONNIFY_ENV || 'test',
+                isDefault: false,
+                publicKey: process.env.MONNIFY_API_KEY,
+                secretKey: process.env.MONNIFY_SECRET_KEY,
+                webhookSecret: process.env.MONNIFY_WEBHOOK_SECRET || process.env.MONNIFY_SECRET_KEY,
+                baseUrl: process.env.MONNIFY_BASE_URL || 'https://sandbox.monnify.com',
+                supportedChannels: ['card', 'bank_transfer'],
+                metadata: { contractCode: process.env.MONNIFY_CONTRACT_CODE || '' }
+            };
+        }
+        if (normalizedCode === 'flutterwave' && process.env.FLUTTERWAVE_SECRET_KEY) {
+            return {
+                _id: 'legacy-env-flutterwave',
+                name: 'Flutterwave',
+                code: 'flutterwave',
+                adapterType: 'flutterwave',
+                status: 'active',
+                environment: process.env.FLUTTERWAVE_ENV || 'test',
+                isDefault: false,
+                publicKey: process.env.FLUTTERWAVE_PUBLIC_KEY || '',
+                secretKey: process.env.FLUTTERWAVE_SECRET_KEY,
+                webhookSecret: process.env.FLUTTERWAVE_HASH || '',
+                baseUrl: process.env.FLUTTERWAVE_BASE_URL || 'https://api.flutterwave.com/v3',
+                supportedChannels: ['card', 'bank_transfer', 'ussd']
+            };
+        }
+        return null;
+    }
+
     // ─────────────────────────────────────────────────────────
     // GATEWAY RETRIEVAL
     // ─────────────────────────────────────────────────────────
@@ -97,9 +166,7 @@ class PaymentGatewayService {
         const count = await PaymentGateway.countDocuments();
         if (count === 0) {
             // Legacy fallback: only if no DB records exist
-            const fallback = this._getLegacyPaystackFallback();
-            if (fallback && fallback.code === code) return fallback;
-            return null;
+            return this._getLegacyGatewayFallback(code);
         }
 
         const gateway = await PaymentGateway.findOne({ code: code.toLowerCase() });
@@ -185,7 +252,7 @@ class PaymentGatewayService {
     /**
      * Initializes wallet funding through the resolved gateway.
      */
-    async initializeFunding({ gatewayCode, channel, user, amount, callbackUrl, metadata = {}, isDirectTransfer = false }) {
+    async initializeFunding({ gatewayCode, channel, channels: requestedChannels, user, amount, callbackUrl, metadata = {}, isDirectTransfer = false }) {
         let parsedAmount;
         try {
             parsedAmount = parseInvestmentMoney(amount, { label: 'Funding amount' });
@@ -227,6 +294,22 @@ class PaymentGatewayService {
                     throw err;
                 }
             }
+            if (Array.isArray(requestedChannels) && gateway.supportedChannels?.length > 0) {
+                const unsupported = requestedChannels.filter(item => !gateway.supportedChannels.includes(item));
+                if (unsupported.length > 0) {
+                    const err = new Error(`Channel '${unsupported[0]}' is not supported by ${gateway.name}`);
+                    err.code = 'PAYMENT_CHANNEL_UNSUPPORTED';
+                    throw err;
+                }
+            }
+            const adapterChannels = getAdapterSpec(gateway.adapterType || gateway.code)?.supportedChannels || [];
+            const requested = channel ? [channel] : (Array.isArray(requestedChannels) ? requestedChannels : []);
+            const unsupportedByAdapter = requested.filter(item => !adapterChannels.includes(item));
+            if (unsupportedByAdapter.length > 0) {
+                const err = new Error(`Channel '${unsupportedByAdapter[0]}' is not supported by ${gateway.name}`);
+                err.code = 'PAYMENT_CHANNEL_UNSUPPORTED';
+                throw err;
+            }
         } else if (channel) {
             // 2. Channel-based Gateway Selection — the highest-priority active gateway
             //    supporting the requested channel (priority asc, createdAt asc).
@@ -251,13 +334,12 @@ class PaymentGatewayService {
 
         console.log(`[PaymentGateway] Initializing funding via ${gateway.code} for user ${user._id || user.id}`);
 
-        // 3. Unique Reference Generation
-        const reference = gateway.code === 'paystack'
-            ? generateReference()
-            : `${gateway.code.toUpperCase()}_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
-
         const amountKobo = parsedAmount.kobo;
-        const channels = channel ? [channel] : (gateway.supportedChannels && gateway.supportedChannels.length ? gateway.supportedChannels : ['card', 'bank_transfer', 'ussd']);
+        const channels = channel
+            ? [channel]
+            : (Array.isArray(requestedChannels) && requestedChannels.length > 0)
+                ? [...new Set(requestedChannels)]
+                : (gateway.supportedChannels && gateway.supportedChannels.length ? gateway.supportedChannels : ['card', 'bank_transfer', 'ussd']);
 
         // Authoritative share price snapshot for investment-buy payments: read the
         // CURRENT server-side price at INIT time. Fulfillment must bind to this
@@ -313,43 +395,85 @@ class PaymentGatewayService {
             sharePriceSnapshot = sharePrice.naira;
         }
 
-        // 4. Persist Pending TransactionStatus Record — gateway permanently bound here
-        await TransactionStatus.create({
-            refId: reference,
-            userId: user._id || user.id,
-            type: txType,
-            status: 'pending',
-            amountKobo,
-            amount: rawAmount,
-            expectedCurrency: 'NGN',
-            channels,
-            provider: gateway.code,
-            service: gateway.name,
-            ...(sharePriceSnapshot != null ? { sharePrice: sharePriceSnapshot } : {})
+        // Persist and reserve the reference before the gateway sees it. Duplicate
+        // retries cannot repeat an external initialization or financial side effect.
+        const reference = await createWithIdentifierRetry({
+            label: 'Payment',
+            fields: ['refId'],
+            generate: () => ({ refId: generatePaymentReference(gateway.code) }),
+            create: async ({ refId }) => {
+                await TransactionStatus.create({
+                    refId,
+                    userId: user._id || user.id,
+                    type: txType,
+                    status: 'pending',
+                    amountKobo,
+                    amount: rawAmount,
+                    expectedCurrency: 'NGN',
+                    channels,
+                    provider: gateway.code,
+                    service: gateway.name,
+                    gatewayConfigSnapshot: this._snapshotGatewayConfig(gateway),
+                    initializationOutcome: 'pending',
+                    ...(sharePriceSnapshot != null ? { sharePrice: sharePriceSnapshot } : {})
+                });
+                return refId;
+            },
         });
 
         // 5. Delegate to Adapter
-        const adapter = this.getAdapterInstance(gateway);
         // Resolve the effective callback URL exactly as the adapter will (the
         // adapter defaults to CLIENT_BASE_URL/<gateway>/return). The mobile
         // WebView needs this host to distinguish the definitive final RETURN
         // navigation from intermediate 3DS/issuer/card-auth navigation.
         const effectiveCallbackUrl = callbackUrl
             || `${process.env.CLIENT_BASE_URL || 'http://localhost:5173'}/${gateway.code}/return`;
-        const initResult = await adapter.initializePayment({
-            user,
-            amount: rawAmount,
-            channel,
-            reference,
-            callbackUrl,
-            metadata: {
-                ...metadata,
-                userId: user._id || user.id,
-                refId: reference,
-                gateway: gateway.code
-            },
-            isDirectTransfer
-        });
+        let initResult;
+        try {
+            const adapter = this.getAdapterInstance(gateway);
+            initResult = await adapter.initializePayment({
+                user,
+                amount: rawAmount,
+                channel,
+                channels,
+                reference,
+                callbackUrl,
+                metadata: {
+                    ...metadata,
+                    userId: user._id || user.id,
+                    refId: reference,
+                    gateway: gateway.code
+                },
+                isDirectTransfer
+            });
+        } catch (error) {
+            const definitive = this._isDefinitiveInitializationError(error);
+            try {
+                await TransactionStatus.updateOne(
+                    { refId: reference, status: 'pending' },
+                    {
+                        $set: {
+                            status: definitive ? 'failed' : 'pending',
+                            initializationOutcome: definitive ? 'definitive_failure' : 'ambiguous',
+                            errorMessage: error.message,
+                            lastAttempt: new Date()
+                        }
+                    }
+                );
+            } catch (statusError) {
+                console.error(`[PAYMENT-INIT-STATUS-ERROR] Reference=${reference}: ${statusError.message}`);
+            }
+            if (!definitive) {
+                const ambiguous = new Error('Payment initialization is awaiting gateway confirmation. Do not retry this reference.');
+                ambiguous.code = 'PAYMENT_INITIALIZATION_AMBIGUOUS';
+                ambiguous.status = 'pending';
+                ambiguous.reference = reference;
+                ambiguous.provider = gateway.code;
+                ambiguous.cause = error;
+                throw ambiguous;
+            }
+            throw error;
+        }
 
         return {
             success: true,
@@ -747,7 +871,15 @@ class PaymentGatewayService {
                 }
 
                 const existingAudit = await Transaction.findOne({ transactionId: refId }).session(session);
-                if (!existingAudit) {
+                if (existingAudit) {
+                    const sameUser = String(existingAudit.userId) === String(transactionStatus.userId);
+                    const sameAmount = Number(existingAudit.amount) === Number(amountNaira);
+                    if (!sameUser || existingAudit.type !== 'funding' || !sameAmount || existingAudit.refId !== refId) {
+                        const error = new Error(`Funding audit identity conflict for '${refId}'`);
+                        error.code = 'SETTLEMENT_EVIDENCE_INVALID';
+                        throw error;
+                    }
+                } else {
                     await Transaction.create([{
                         userId: transactionStatus.userId,
                         transactionId: refId,
@@ -895,7 +1027,10 @@ class PaymentGatewayService {
             return { status: 'not_found', message: 'Reference is required' };
         }
 
-        const transaction = await TransactionStatus.findOne({ refId: reference });
+        const transactionQuery = TransactionStatus.findOne({ refId: reference });
+        const transaction = typeof transactionQuery?.select === 'function'
+            ? await transactionQuery.select('+gatewayConfigSnapshot')
+            : await transactionQuery;
         if (!transaction) {
             return { status: 'not_found', message: 'Transaction record not found' };
         }
@@ -930,7 +1065,9 @@ class PaymentGatewayService {
 
         // Resolve the specific gateway bound to this transaction (never trust frontend)
         const gatewayCode = transaction.provider || 'paystack';
-        const gateway = await this.getGateway(gatewayCode);
+        const gateway = transaction.gatewayConfigSnapshot
+            ? this._hydrateGatewayCredentials(transaction.gatewayConfigSnapshot)
+            : await this.getGateway(gatewayCode);
 
         if (!gateway) {
             return {
@@ -1056,30 +1193,108 @@ class PaymentGatewayService {
         return !!result;
     }
 
+    _parseWebhookPayload(body) {
+        if (!Buffer.isBuffer(body)) return body;
+        return JSON.parse(body.toString('utf8'));
+    }
+
+    _extractWebhookReference(providerCode, payload) {
+        const code = String(providerCode || '').toLowerCase();
+        const candidate = code === 'paystack'
+            ? payload?.data?.reference
+            : code === 'flutterwave'
+                ? payload?.data?.tx_ref
+                : code === 'monnify'
+                    ? (payload?.eventData?.paymentReference || payload?.eventData?.transactionReference)
+                    : null;
+        const value = String(candidate || '');
+        const prefix = code.toUpperCase();
+        return new RegExp(`^${prefix}-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{16}$`).test(value)
+            ? value
+            : null;
+    }
+
+    _extractVirtualAccountReference(providerCode, payload) {
+        if (String(providerCode || '').toLowerCase() !== 'monnify') return null;
+        const data = payload?.eventData || {};
+        const value = String(data.accountReference || data.destinationAccountReference || '');
+        return /^VIRTUAL_[a-f\d]{24}$/i.test(value) ? value : null;
+    }
+
     /**
      * Routes and processes incoming webhooks for a specific gateway.
      */
     async routeWebhook(providerCode, req) {
-        const gateway = await this.getGateway(providerCode);
-        if (!gateway) {
-            console.error(`[Webhook Error] No gateway found for provider: ${providerCode}`);
-            return { status: 404, message: 'Gateway not found' };
+        let gateway = await this.getGateway(providerCode);
+        let adapter = gateway ? this.getAdapterInstance(gateway) : null;
+        let payload;
+        let isValid = adapter ? adapter.verifyWebhookSignature(req.headers, req.body) : false;
+
+        // A gateway can be rotated immediately after initialization. For new
+        // generated references, retry signature verification with the encrypted
+        // configuration snapshot bound to that payment.
+        if (!isValid) {
+            try {
+                payload = this._parseWebhookPayload(req.body);
+            } catch (error) {
+                return gateway
+                    ? { status: 400, message: 'Malformed JSON payload' }
+                    : { status: 404, message: 'Gateway not found' };
+            }
+            const reference = this._extractWebhookReference(providerCode, payload);
+            if (reference) {
+                const transactionQuery = TransactionStatus.findOne({ refId: reference, provider: providerCode });
+                const transaction = typeof transactionQuery?.select === 'function'
+                    ? await transactionQuery.select('+gatewayConfigSnapshot')
+                    : await transactionQuery;
+                if (transaction?.gatewayConfigSnapshot) {
+                    const snapshotGateway = this._hydrateGatewayCredentials(transaction.gatewayConfigSnapshot);
+                    const snapshotAdapter = this.getAdapterInstance(snapshotGateway);
+                    if (snapshotAdapter.verifyWebhookSignature(req.headers, req.body)) {
+                        gateway = snapshotGateway;
+                        adapter = snapshotAdapter;
+                        isValid = true;
+                    }
+                }
+            }
+            if (!isValid) {
+                const virtualAccountReference = this._extractVirtualAccountReference(providerCode, payload);
+                if (virtualAccountReference) {
+                    const userQuery = User.findOne({
+                        'virtualAccounts.accountReference': virtualAccountReference,
+                    });
+                    const user = typeof userQuery?.select === 'function'
+                        ? await userQuery.select('+virtualAccountGatewaySnapshots')
+                        : await userQuery;
+                    const snapshot = user?.virtualAccountGatewaySnapshots instanceof Map
+                        ? user.virtualAccountGatewaySnapshots.get(virtualAccountReference)
+                        : user?.virtualAccountGatewaySnapshots?.[virtualAccountReference];
+                    if (snapshot) {
+                        const snapshotGateway = this._hydrateGatewayCredentials(snapshot);
+                        const snapshotAdapter = this.getAdapterInstance(snapshotGateway);
+                        if (snapshotAdapter.verifyWebhookSignature(req.headers, req.body)) {
+                            gateway = snapshotGateway;
+                            adapter = snapshotAdapter;
+                            isValid = true;
+                        }
+                    }
+                }
+            }
         }
 
-        const adapter = this.getAdapterInstance(gateway);
-
-        // 1. Verify Signature first — reject unauthenticated requests before any DB work
-        const isValid = adapter.verifyWebhookSignature(req.headers, req.body);
         if (!isValid) {
+            if (!gateway) {
+                console.error(`[Webhook Error] No gateway found for provider: ${providerCode}`);
+                return { status: 404, message: 'Gateway not found' };
+            }
             console.error(`[PAYMENT-SECURITY-ALERT] Invalid webhook signature for provider: ${providerCode}`);
             return { status: 401, message: 'Invalid webhook signature' };
         }
 
         // 2. Parse payload
-        let payload = req.body;
-        if (Buffer.isBuffer(payload)) {
+        if (payload === undefined) {
             try {
-                payload = JSON.parse(payload.toString('utf8'));
+                payload = this._parseWebhookPayload(req.body);
             } catch (e) {
                 console.error('[Webhook Error] Failed to parse JSON buffer:', e.message);
                 return { status: 400, message: 'Malformed JSON payload' };
@@ -1095,7 +1310,10 @@ class PaymentGatewayService {
         // 5. Process Successful Payment Event
         if (normalized.status === 'success') {
             const refId = normalized.reference;
-            let transaction = await TransactionStatus.findOne({ refId });
+            const transactionQuery = TransactionStatus.findOne({ refId });
+            let transaction = typeof transactionQuery?.select === 'function'
+                ? await transactionQuery.select('+gatewayConfigSnapshot')
+                : await transactionQuery;
 
             // Only a provider-assigned Monnify virtual-account reference may establish
             // ownership when a transfer has no pre-existing local transaction record.
@@ -1114,7 +1332,8 @@ class PaymentGatewayService {
                     expectedCurrency: normalized.currency,
                     channels: ['bank_transfer'],
                     provider: providerCode,
-                    service: gateway.name
+                    service: gateway.name,
+                    gatewayConfigSnapshot: this._snapshotGatewayConfig(gateway),
                 });
             }
 
@@ -1122,7 +1341,11 @@ class PaymentGatewayService {
                 // Secondary server-side verification before wallet credit (never trust webhook alone)
                 let serverVerify;
                 try {
-                    serverVerify = await adapter.verifyPayment(refId);
+                    const verificationGateway = transaction.gatewayConfigSnapshot
+                        ? this._hydrateGatewayCredentials(transaction.gatewayConfigSnapshot)
+                        : gateway;
+                    const verificationAdapter = this.getAdapterInstance(verificationGateway);
+                    serverVerify = await verificationAdapter.verifyPayment(refId);
                 } catch (verifyErr) {
                     // A transport/adapter exception cannot authoritatively establish
                     // payment failure. Keep the transaction recoverable.

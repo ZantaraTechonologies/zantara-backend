@@ -20,40 +20,64 @@ class ProviderService {
      * Decrypts credentials in memory immediately before adapter instantiation.
      * @param {string} providerName 
      */
-    async getAdapterInstance(providerName) {
+    async getAdapterInstance(providerName, identity = {}) {
         if (!providerName || typeof providerName !== 'string' || !providerName.trim()) {
             throw new Error('Provider is required');
         }
         const name = providerName.trim().toLowerCase();
         const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        
-        // 1. Fetch config from Database
-        const providerConfig = await Provider.findOne({ name: { $regex: new RegExp(`^${escapedName}$`, 'i') } });
-        
-        if (!providerConfig) {
-            throw new Error(`Provider configuration not found for: ${providerName}`);
-        }
-        if (providerConfig.status !== 'active') {
-            throw new Error(`Provider is unavailable: ${providerName}`);
+        const configSnapshot = identity.configSnapshot?.toObject
+            ? identity.configSnapshot.toObject()
+            : identity.configSnapshot;
+        const credentialSnapshot = identity.credentialSnapshot?.toObject
+            ? identity.credentialSnapshot.toObject()
+            : identity.credentialSnapshot;
+        const snapshotComplete = Boolean(
+            identity.adapterType
+            && this.adapterClasses[identity.adapterType]
+            && typeof configSnapshot?.baseUrl === 'string'
+            && configSnapshot.baseUrl.trim()
+            && typeof credentialSnapshot?.apiKey === 'string'
+            && credentialSnapshot.apiKey.trim()
+        );
+
+        // Complete persisted identity is authoritative for historical recovery.
+        // Incomplete/legacy records may use only the exact live provider identity.
+        let providerConfig = null;
+        if (!snapshotComplete) {
+            providerConfig = identity.providerId
+                ? await Provider.findById(identity.providerId)
+                : await Provider.findOne({ name: { $regex: new RegExp(`^${escapedName}$`, 'i') } });
+            if (!providerConfig) {
+                throw new Error(`Provider configuration not found and persisted snapshot is incomplete for: ${providerName}`);
+            }
+            if (identity.adapterType && providerConfig.adapterType !== identity.adapterType) {
+                throw new Error(`Provider configuration is incompatible with persisted adapter identity: ${providerName}`);
+            }
+            if (providerConfig.status !== 'active' && !identity.allowInactive) {
+                throw new Error(`Provider is unavailable: ${providerName}`);
+            }
         }
 
-        // 2. Resolve Class
-        const AdapterClass = this.adapterClasses[providerConfig.adapterType];
+        const adapterType = identity.adapterType || providerConfig.adapterType;
+        const AdapterClass = this.adapterClasses[adapterType];
         if (!AdapterClass) {
-            throw new Error(`Unsupported provider adapter: ${providerConfig.adapterType}`);
+            throw new Error(`Unsupported provider adapter: ${adapterType}`);
         }
-        
-        // 3. Decrypt credentials in memory for adapter instantiation
-        const decryptedApiKey = decryptSecret(providerConfig.apiKey);
-        const decryptedSecretKey = decryptSecret(providerConfig.secretKey);
 
-        // 4. Instantiate with decrypted credentials
+        const decryptedApiKey = decryptSecret(credentialSnapshot?.apiKey ?? providerConfig?.apiKey);
+        const decryptedSecretKey = decryptSecret(credentialSnapshot?.secretKey ?? providerConfig?.secretKey);
+
         return new AdapterClass({
-            baseUrl: providerConfig.baseUrl,
+            baseUrl: configSnapshot?.baseUrl ?? providerConfig?.baseUrl,
             apiKey: decryptedApiKey,
             secretKey: decryptedSecretKey,
-            publicKey: providerConfig.publicKey,
-            metadata: providerConfig.metadata
+            publicKey: configSnapshot && Object.prototype.hasOwnProperty.call(configSnapshot, 'publicKey')
+                ? configSnapshot.publicKey
+                : providerConfig?.publicKey,
+            metadata: configSnapshot && Object.prototype.hasOwnProperty.call(configSnapshot, 'metadata')
+                ? configSnapshot.metadata
+                : providerConfig?.metadata
         });
     }
 
@@ -82,11 +106,15 @@ class ProviderService {
         return adapter.purchaseExamPin(data);
     }
 
-    async queryTransaction(refId, providerName) {
+    async queryTransaction(refId, providerName, identity = {}) {
         if (!providerName || typeof providerName !== 'string' || !providerName.trim()) {
             throw new Error('Provider is required for transaction requery');
         }
-        const adapter = await this.getAdapterInstance(providerName.trim());
+        const adapter = await this.getAdapterInstance(providerName.trim(), {
+            ...identity,
+            // Disabling new sales must not strand already-debited pending purchases.
+            allowInactive: true,
+        });
         return adapter.queryTransaction(refId);
     }
 

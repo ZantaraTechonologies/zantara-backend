@@ -393,7 +393,7 @@ async function runInvestmentInitFailClosedTests() {
                 10000,
                 `TransactionStatus.sharePrice MUST equal the authoritative server value (10000), got ${txCreated[0].sharePrice}`
             );
-            assert.strictEqual(psInitCalls.length, 1, 'gateway (Paystack) initialization MUST be allowed for a valid price');
+            assert.strictEqual(gatewayInitCalls.length, 1, 'gateway (Paystack) initialization MUST be allowed for a valid price');
         });
 
         await test('P-B. legacy Paystack controller: getInvestmentSettings throws → rejected (400), no record, gateway NOT initialized', async () => {
@@ -413,7 +413,7 @@ async function runInvestmentInitFailClosedTests() {
                 'client must receive a safe generic message, never internal settings/db details'
             );
             assert.strictEqual(txCreated.length, 0, 'ZERO investment TransactionStatus records may be created');
-            assert.strictEqual(psInitCalls.length, 0, 'gateway initialization MUST NOT be called');
+            assert.strictEqual(gatewayInitCalls.length, 0, 'gateway initialization MUST NOT be called');
         });
 
         await test('P-C. legacy Paystack controller: sharePrice missing → rejected (400), no record, gateway NOT initialized', async () => {
@@ -426,7 +426,7 @@ async function runInvestmentInitFailClosedTests() {
 
             assert.strictEqual(calls.statusCode, 400, 'missing sharePrice must fail closed');
             assert.strictEqual(txCreated.length, 0, 'no TransactionStatus may be created for a missing sharePrice');
-            assert.strictEqual(psInitCalls.length, 0, 'gateway initialization MUST NOT be called');
+            assert.strictEqual(gatewayInitCalls.length, 0, 'gateway initialization MUST NOT be called');
         });
 
         await test('P-D. legacy Paystack controller: sharePrice = 0 → rejected (400), no record, gateway NOT initialized', async () => {
@@ -439,7 +439,7 @@ async function runInvestmentInitFailClosedTests() {
 
             assert.strictEqual(calls.statusCode, 400, 'sharePrice = 0 must fail closed');
             assert.strictEqual(txCreated.length, 0, 'no TransactionStatus may be created for sharePrice = 0');
-            assert.strictEqual(psInitCalls.length, 0, 'gateway initialization MUST NOT be called');
+            assert.strictEqual(gatewayInitCalls.length, 0, 'gateway initialization MUST NOT be called');
         });
 
         await test('P-E. legacy Paystack controller: sharePrice < 0 → rejected (400), no record, gateway NOT initialized', async () => {
@@ -452,7 +452,7 @@ async function runInvestmentInitFailClosedTests() {
 
             assert.strictEqual(calls.statusCode, 400, 'negative sharePrice must fail closed');
             assert.strictEqual(txCreated.length, 0, 'no TransactionStatus may be created for a negative sharePrice');
-            assert.strictEqual(psInitCalls.length, 0, 'gateway initialization MUST NOT be called');
+            assert.strictEqual(gatewayInitCalls.length, 0, 'gateway initialization MUST NOT be called');
         });
 
         await test('P-F. legacy Paystack controller: sharePrice NaN/non-finite → rejected (400), no record, gateway NOT initialized', async () => {
@@ -465,7 +465,7 @@ async function runInvestmentInitFailClosedTests() {
 
             assert.strictEqual(calls.statusCode, 400, 'non-finite sharePrice must fail closed');
             assert.strictEqual(txCreated.length, 0, 'no TransactionStatus may be created for a non-finite sharePrice');
-            assert.strictEqual(psInitCalls.length, 0, 'gateway initialization MUST NOT be called');
+            assert.strictEqual(gatewayInitCalls.length, 0, 'gateway initialization MUST NOT be called');
         });
 
         await test('P-G. legacy Paystack controller: ordinary funding stays functional when investment settings are unavailable', async () => {
@@ -490,7 +490,7 @@ async function runInvestmentInitFailClosedTests() {
             assert.strictEqual(txCreated.length, 1, 'funding TransactionStatus must be created');
             assert.strictEqual(txCreated[0].type, 'funding', 'must remain a funding record');
             assert.strictEqual(txCreated[0].sharePrice, undefined, 'funding records must NOT carry a sharePrice snapshot');
-            assert.strictEqual(psInitCalls.length, 1, 'gateway initialization must proceed for funding');
+            assert.strictEqual(gatewayInitCalls.length, 1, 'gateway initialization must proceed for funding');
         });
 
         await test('P-H. legacy Paystack controller: disabled investments cannot initialize a charge', async () => {
@@ -500,7 +500,7 @@ async function runInvestmentInitFailClosedTests() {
             await paystackController.payment(controllerInitReq(), makeRes(calls));
             assert.strictEqual(calls.statusCode, 400);
             assert.strictEqual(txCreated.length, 0);
-            assert.strictEqual(psInitCalls.length, 0);
+            assert.strictEqual(gatewayInitCalls.length, 0);
         });
 
         await test('P-I. legacy Paystack controller: non-whole-share amount cannot initialize a charge', async () => {
@@ -512,7 +512,7 @@ async function runInvestmentInitFailClosedTests() {
             await paystackController.payment(req, makeRes(calls));
             assert.strictEqual(calls.statusCode, 400);
             assert.strictEqual(txCreated.length, 0);
-            assert.strictEqual(psInitCalls.length, 0);
+            assert.strictEqual(gatewayInitCalls.length, 0);
         });
 
         await test('P-J. legacy Paystack controller: a capped investor cannot initialize a charge', async () => {
@@ -524,7 +524,7 @@ async function runInvestmentInitFailClosedTests() {
             await paystackController.payment(req, makeRes(calls));
             assert.strictEqual(calls.statusCode, 400);
             assert.strictEqual(txCreated.length, 0);
-            assert.strictEqual(psInitCalls.length, 0);
+            assert.strictEqual(gatewayInitCalls.length, 0);
         });
 
         await test('P-K. legacy Paystack controller: a string-backed share balance cannot initialize a charge', async () => {
@@ -535,7 +535,7 @@ async function runInvestmentInitFailClosedTests() {
             await paystackController.payment(controllerInitReq(), makeRes(calls));
             assert.strictEqual(calls.statusCode, 400);
             assert.strictEqual(txCreated.length, 0);
-            assert.strictEqual(psInitCalls.length, 0);
+            assert.strictEqual(gatewayInitCalls.length, 0);
         });
     } finally {
         // ─── RESTORE ───────────────────────────────────────────────

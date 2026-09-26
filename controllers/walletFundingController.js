@@ -7,8 +7,9 @@ const MIN_AMOUNT = 50; // ₦
 function normalizeChannel(input) {
     if (!input) return null;
     if (Array.isArray(input)) {
-        const found = input.find(c => ALLOWED_CHANNELS.includes(String(c)));
-        return found || null;
+        const normalized = input.map(String);
+        if (normalized.length === 0 || normalized.some(c => !ALLOWED_CHANNELS.includes(c))) return null;
+        return normalized[0];
     }
     return ALLOWED_CHANNELS.includes(String(input)) ? String(input) : null;
 }
@@ -22,7 +23,14 @@ const fundWallet = async (req, res) => {
             return res.status(400).json({ message: `Minimum amount is ₦${MIN_AMOUNT}` });
         }
 
-        const channel = normalizeChannel(req.body?.channel || req.body?.channels);
+        const requestedChannel = req.body?.channel || req.body?.channels;
+        const channel = normalizeChannel(requestedChannel);
+        if (requestedChannel && !channel) {
+            return res.status(400).json({
+                message: 'Unsupported payment channel',
+                code: 'PAYMENT_CHANNEL_UNSUPPORTED'
+            });
+        }
         const user = req.user;
         const callbackUrl = req.body?.callback_url;
 
@@ -52,6 +60,15 @@ const fundWallet = async (req, res) => {
         });
     } catch (err) {
         console.error('Funding init error:', err.message);
+        if (err.code === 'PAYMENT_INITIALIZATION_AMBIGUOUS') {
+            return res.status(202).json({
+                message: err.message,
+                code: err.code,
+                status: 'pending',
+                reference: err.reference,
+                provider: err.provider
+            });
+        }
         const status = err.code === 'PAYMENT_GATEWAY_NOT_FOUND' ? 404
             : (['PAYMENT_GATEWAY_INACTIVE', 'PAYMENT_GATEWAY_MAINTENANCE', 'PAYMENT_CHANNEL_UNSUPPORTED'].includes(err.code) ? 400 : 500);
         return res.status(status).json({

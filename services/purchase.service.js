@@ -5,7 +5,8 @@ const Wallet = require('../models/Wallet');
 const walletService = require('./wallet.service');
 const refundService = require('./refund.service');
 const pinService = require('./pin.service');
-const { generateTransactionId, generateReference } = require('../utils/generateID');
+const { generateTransactionId, generateReference, generateProviderRequestId } = require('../utils/generateID');
+const { createWithIdentifierRetry } = require('../utils/identifierRetry');
 const notificationService = require('./notification.service');
 const Expense = require('../models/Expense');
 const { serializePurchaseResult } = require('../utils/customerResponseSerializer');
@@ -25,6 +26,12 @@ const {
     redactProviderEvidence,
     expectedFulfillmentQuantity,
 } = require('../utils/fulfillment');
+
+const customerPurchaseReference = transaction => {
+    return transaction?.providerRequestId
+        ? transaction.transactionId
+        : transaction?.refId;
+};
 
 class PurchaseService {
     _serializeResultData(transaction, evidence = transaction?.providerEvidence || {}) {
@@ -65,7 +72,7 @@ class PurchaseService {
                 type: transaction.type,
                 serviceId: transaction.service,
                 amount: transaction.amount,
-                reference: transaction.refId,
+                reference: customerPurchaseReference(transaction),
                 details: transaction.details,
                 fulfillment,
                 greetingName: user.name,
@@ -259,7 +266,7 @@ class PurchaseService {
                 type: transaction.type,
                 serviceId: transaction.service,
                 amount: transaction.amount,
-                reference: transaction.refId,
+                reference: customerPurchaseReference(transaction),
                 details: transaction.details,
                 fulfillment: decryptFulfillment(transaction.fulfillment),
                 greetingName: user.name,
@@ -371,7 +378,7 @@ class PurchaseService {
                     type: transaction.type,
                     serviceId: transaction.service,
                     amount: transaction.amount,
-                    reference: transaction.refId,
+                    reference: customerPurchaseReference(transaction),
                     reason: normalized,
                     refunded: true,
                     greetingName: customer.name,
@@ -399,6 +406,7 @@ class PurchaseService {
         let transaction;
         let user;
         let reference;
+        let providerRequestId;
         let walletDebited = false;
         let dispatchMayHaveOccurred = false;
 
@@ -432,6 +440,19 @@ class PurchaseService {
 
             const selection = {
                 provider: currentProvider,
+                providerId: offer.providerId._id,
+                providerAdapterType: offer.providerId.adapterType,
+                providerConfigSnapshot: {
+                    baseUrl: offer.providerId.baseUrl,
+                    publicKey: offer.providerId.publicKey,
+                    metadata: offer.providerId.metadata instanceof Map
+                        ? Object.fromEntries(offer.providerId.metadata)
+                        : (offer.providerId.metadata || {}),
+                },
+                providerCredentialSnapshot: {
+                    apiKey: offer.providerId.apiKey,
+                    secretKey: offer.providerId.secretKey,
+                },
                 providerCode: offer.providerCode,
                 providerServiceCode,
                 providerOfferId: offer._id,
@@ -487,36 +508,49 @@ class PurchaseService {
                 throw new Error(`Transaction amount exceeds your Tier ${user.kycLevel || 1} limit.`);
             }
 
-            reference = details.request_id || generateReference();
-            transaction = await Transaction.create({
-                userId,
-                transactionId: generateTransactionId(),
-                refId: reference,
-                type,
-                service: service.code,
-                amount: finalAmount,
-                costPrice,
-                estimatedCostPrice: costPrice,
-                salePrice: amount,
-                agentPrice: finalAmount,
-                profit,
-                estimatedProfit: profit,
-                userRole: user.role && user.role !== 'user' ? user.role : (user.accountType || user.role),
-                provider: currentProvider,
-                providerOfferId: offer._id,
-                providerOutcome: PROVIDER_OUTCOMES.UNKNOWN,
-                dispatchState: 'not_dispatched',
-                resolutionState: 'unresolved',
-                status: 'pending',
-                details: {
-                    ...details,
-                    ...(['pin', 'electricity'].includes(type) ? { productName: service.name } : {}),
-                    originalAmount: amount,
-                    request_id: reference,
-                    quantity,
-                },
-                pricingSnapshot,
+            transaction = await createWithIdentifierRetry({
+                label: 'Purchase',
+                fields: ['transactionId', 'refId', 'providerRequestId'],
+                generate: () => ({
+                    transactionId: generateTransactionId(),
+                    refId: generateReference(),
+                    providerRequestId: generateProviderRequestId(selection.providerAdapterType),
+                }),
+                create: identifiers => Transaction.create({
+                    userId,
+                    ...identifiers,
+                    type,
+                    service: service.code,
+                    amount: finalAmount,
+                    costPrice,
+                    estimatedCostPrice: costPrice,
+                    salePrice: amount,
+                    agentPrice: finalAmount,
+                    profit,
+                    estimatedProfit: profit,
+                    userRole: user.role && user.role !== 'user' ? user.role : (user.accountType || user.role),
+                    provider: currentProvider,
+                    providerId: offer.providerId._id,
+                    providerAdapterType: selection.providerAdapterType,
+                    providerConfigSnapshot: selection.providerConfigSnapshot,
+                    providerCredentialSnapshot: selection.providerCredentialSnapshot,
+                    providerOfferId: offer._id,
+                    providerOutcome: PROVIDER_OUTCOMES.UNKNOWN,
+                    dispatchState: 'not_dispatched',
+                    resolutionState: 'unresolved',
+                    status: 'pending',
+                    details: {
+                        ...details,
+                        ...(['pin', 'electricity'].includes(type) ? { productName: service.name } : {}),
+                        originalAmount: amount,
+                        request_id: identifiers.providerRequestId,
+                        quantity,
+                    },
+                    pricingSnapshot,
+                }),
             });
+            reference = transaction.refId;
+            providerRequestId = transaction.providerRequestId;
 
             await walletService.debit(userId, finalAmount, reference, `${type}_purchase`, transaction._id);
             walletDebited = true;
@@ -530,7 +564,7 @@ class PurchaseService {
 
             let response;
             try {
-                response = await providerCall(reference, costPrice, selection);
+                response = await providerCall(providerRequestId, costPrice, selection);
             } catch (error) {
                 response = {
                     success: false,
