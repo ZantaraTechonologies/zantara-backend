@@ -17,6 +17,38 @@ function isExactKey(index, expected) {
         });
 }
 
+function isNamespaceNotFound(error) {
+    return error?.code === 26
+        || error?.codeName === 'NamespaceNotFound'
+        || /\bns does not exist\b/i.test(String(error?.message || ''));
+}
+
+function emptyDataReport() {
+    return {
+        invalidIdentity: {
+            missingProvider: 0,
+            nullProvider: 0,
+            nonStringProvider: 0,
+            blankProvider: 0,
+            missingEventId: 0,
+            nullEventId: 0,
+            nonStringEventId: 0,
+            blankEventId: 0
+        },
+        duplicatePairs: [],
+        unexpectedProviders: []
+    };
+}
+
+async function readIndexes(collection) {
+    try {
+        return { collectionExists: true, indexes: await collection.indexes() };
+    } catch (error) {
+        if (isNamespaceNotFound(error)) return { collectionExists: false, indexes: [] };
+        throw error;
+    }
+}
+
 async function inspectData(collection) {
     const [missingProvider, nullProvider, nonStringProvider, blankProvider] = await Promise.all([
         collection.countDocuments({ provider: { $exists: false } }),
@@ -85,6 +117,63 @@ function assertCompatible(report) {
     }
 }
 
+async function migrateCollection(collection, { apply, log = console.log } = {}) {
+    const initialState = await readIndexes(collection);
+    const { collectionExists, indexes } = initialState;
+    const legacyUniqueIndexes = indexes.filter(index => index.unique && isExactKey(index, { eventId: 1 }));
+    const compoundIndex = indexes.find(index => isExactKey(index, { provider: 1, eventId: 1 }));
+
+    if (compoundIndex && !compoundIndex.unique) {
+        throw new Error(`Index ${compoundIndex.name} exists but is not unique`);
+    }
+
+    const report = collectionExists ? await inspectData(collection) : emptyDataReport();
+    if (!collectionExists) {
+        log(`Collection ${COLLECTION_NAME} does not exist; treating it as empty.`);
+    }
+    log(JSON.stringify({
+        mode: apply ? 'apply' : 'validation-only',
+        collection: COLLECTION_NAME,
+        collectionExists,
+        currentIndexes: indexes.map(index => ({ name: index.name, key: index.key, unique: !!index.unique })),
+        legacyUniqueIndexes: legacyUniqueIndexes.map(index => index.name),
+        targetIndexPresent: !!compoundIndex,
+        ...report
+    }, null, 2));
+
+    assertCompatible(report);
+
+    if (!apply) {
+        log('Validation passed. No indexes were changed. Re-run with --apply and the explicit confirmation variable during an approved deployment window.');
+        return;
+    }
+
+    if (!compoundIndex) {
+        await collection.createIndex(
+            { provider: 1, eventId: 1 },
+            { unique: true, name: COMPOUND_INDEX_NAME }
+        );
+        log(`Created unique index ${COMPOUND_INDEX_NAME}.`);
+    }
+
+    // Create the narrower provider-scoped guarantee before removing the old
+    // global constraint so there is never an unindexed identity window.
+    for (const index of legacyUniqueIndexes) {
+        await collection.dropIndex(index.name);
+        log(`Dropped legacy global unique index ${index.name}.`);
+    }
+
+    const finalState = await readIndexes(collection);
+    const finalCompound = finalState.indexes.find(index => index.unique && isExactKey(index, { provider: 1, eventId: 1 }));
+    const remainingLegacy = finalState.indexes.filter(index => index.unique && isExactKey(index, { eventId: 1 }));
+    const freshIndexHasRequiredName = collectionExists || finalCompound?.name === COMPOUND_INDEX_NAME;
+    if (!finalState.collectionExists || !finalCompound || !freshIndexHasRequiredName || remainingLegacy.length > 0) {
+        throw new Error('Post-migration index verification failed');
+    }
+
+    log('Webhook event identity index migration completed and verified.');
+}
+
 async function run() {
     const mongoUri = process.env.MONGO_URI;
     if (!mongoUri) throw new Error('MONGO_URI is required');
@@ -97,54 +186,7 @@ async function run() {
     await mongoose.connect(mongoUri, { autoIndex: false });
     try {
         const collection = mongoose.connection.collection(COLLECTION_NAME);
-        const indexes = await collection.indexes();
-        const legacyUniqueIndexes = indexes.filter(index => index.unique && isExactKey(index, { eventId: 1 }));
-        const compoundIndex = indexes.find(index => isExactKey(index, { provider: 1, eventId: 1 }));
-
-        if (compoundIndex && !compoundIndex.unique) {
-            throw new Error(`Index ${compoundIndex.name} exists but is not unique`);
-        }
-
-        const report = await inspectData(collection);
-        console.log(JSON.stringify({
-            mode: apply ? 'apply' : 'validation-only',
-            collection: COLLECTION_NAME,
-            currentIndexes: indexes.map(index => ({ name: index.name, key: index.key, unique: !!index.unique })),
-            legacyUniqueIndexes: legacyUniqueIndexes.map(index => index.name),
-            targetIndexPresent: !!compoundIndex,
-            ...report
-        }, null, 2));
-
-        assertCompatible(report);
-
-        if (!apply) {
-            console.log('Validation passed. No indexes were changed. Re-run with --apply and the explicit confirmation variable during an approved deployment window.');
-            return;
-        }
-
-        if (!compoundIndex) {
-            await collection.createIndex(
-                { provider: 1, eventId: 1 },
-                { unique: true, name: COMPOUND_INDEX_NAME }
-            );
-            console.log(`Created unique index ${COMPOUND_INDEX_NAME}.`);
-        }
-
-        // Create the narrower provider-scoped guarantee before removing the old
-        // global constraint so there is never an unindexed identity window.
-        for (const index of legacyUniqueIndexes) {
-            await collection.dropIndex(index.name);
-            console.log(`Dropped legacy global unique index ${index.name}.`);
-        }
-
-        const finalIndexes = await collection.indexes();
-        const finalCompound = finalIndexes.find(index => index.unique && isExactKey(index, { provider: 1, eventId: 1 }));
-        const remainingLegacy = finalIndexes.filter(index => index.unique && isExactKey(index, { eventId: 1 }));
-        if (!finalCompound || remainingLegacy.length > 0) {
-            throw new Error('Post-migration index verification failed');
-        }
-
-        console.log('Webhook event identity index migration completed and verified.');
+        await migrateCollection(collection, { apply });
     } finally {
         await mongoose.disconnect();
     }
@@ -157,4 +199,12 @@ if (require.main === module) {
     });
 }
 
-module.exports = { inspectData, assertCompatible, isExactKey };
+module.exports = {
+    inspectData,
+    assertCompatible,
+    isExactKey,
+    isNamespaceNotFound,
+    emptyDataReport,
+    readIndexes,
+    migrateCollection
+};
