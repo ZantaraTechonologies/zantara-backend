@@ -26,7 +26,7 @@ class CatalogController {
                 ...cat,
                 types: types.filter(t => t.categoryId.toString() === cat._id.toString()).map(t => ({
                     ...t,
-                    brands: brands.filter(b => b.typeId.toString() === t._id.toString()).map(b => ({
+                    brands: brands.filter(b => Array.isArray(b.typeIds) && b.typeIds.some(typeId => typeId.toString() === t._id.toString())).map(b => ({
                         ...b,
                         services: services.filter(s => 
                             s.brandId && s.brandId.toString() === b._id.toString() &&
