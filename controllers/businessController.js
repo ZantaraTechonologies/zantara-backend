@@ -32,7 +32,7 @@ exports.getOverview = async (req, res) => {
         const dateFilter = { createdAt: { $gte: start, $lte: end } };
         
         // Operational services ONLY (excludes shares, funding, etc.)
-        const operationalTypes = ['airtime', 'data', 'tv', 'cable', 'electricity', 'pin'];
+        const operationalTypes = ['airtime', 'data', 'tv', 'cable', 'electricity', 'pin', 'broadband'];
 
         // 2. Aggregate Operational Stats (VTU Sales)
         const stats = await Transaction.aggregate([
@@ -201,7 +201,7 @@ exports.getBusinessWallet = async (req, res) => {
 exports.getCostLedger = async (req, res) => {
     try {
         const { type, provider, startDate, endDate } = req.query;
-        let filter = { status: 'success', type: { $in: ['airtime', 'data', 'tv', 'electricity', 'pin', 'dividend_credit'] } };
+        let filter = { status: 'success', type: { $in: ['airtime', 'data', 'tv', 'electricity', 'pin', 'broadband', 'dividend_credit'] } };
 
         if (type) filter.type = type;
         if (provider) filter.provider = provider;
@@ -268,7 +268,7 @@ exports.getProfitAnalytics = async (req, res) => {
         const matchStage = { 
             $match: { 
                 status: 'success', 
-                type: { $in: ['airtime', 'data', 'tv', 'cable', 'electricity', 'pin'] },
+                type: { $in: ['airtime', 'data', 'tv', 'cable', 'electricity', 'pin', 'broadband'] },
                 ...dateFilter
             }
         };

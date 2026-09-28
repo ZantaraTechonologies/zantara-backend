@@ -1,6 +1,6 @@
 const assert = require('assert');
 const { encryptSecret, decryptSecret, isEncrypted } = require('../utils/crypto');
-const { serializeProvider, sanitizeMetadata, isForbiddenMetadataKey } = require('../utils/providerSerializer');
+const { serializeProvider, sanitizeMetadata, validateMetadata, isForbiddenMetadataKey } = require('../utils/providerSerializer');
 
 async function runTests() {
     console.log('====================================================');
@@ -112,6 +112,57 @@ async function runTests() {
         assert.strictEqual(sanitized.purchaseUrl, '/buy-data');
         assert.strictEqual(sanitized.authHeaderValue, 'Bearer {{apiKey}}');
         assert.strictEqual(sanitized.password, undefined, 'Direct raw password key must be stripped from metadata');
+    });
+
+    test('6. Serializer strips embedded URL credentials from legacy provider data', () => {
+        const serialized = serializeProvider({
+            name: 'Legacy',
+            baseUrl: 'https://user:password@provider.example/api',
+            metadata: { purchaseUrl: 'https://user:password@provider.example/buy' }
+        });
+        assert.strictEqual(serialized.baseUrl, 'https://provider.example/api');
+        assert.strictEqual(serialized.metadata.purchaseUrl, undefined);
+    });
+
+    test('7. Authentication templates require an exact approved grammar', () => {
+        for (const template of ['{{apiKey}}', 'Bearer {{apiKey}}', 'Basic {{secretKey}}']) {
+            assert.strictEqual(validateMetadata({ authHeaderValue: template }).authHeaderValue, template);
+        }
+        for (const unsafe of [
+            ' {{apiKey}}',
+            '{{apiKey}} ',
+            '{{apiKey}}\r',
+            '{{apiKey}}\n',
+            'Bearer {{apiKey}}\r\n',
+            '\tBearer {{apiKey}}',
+            'Bearer {{apiKey}} literal-secret',
+            'literal-secret {{apiKey}}',
+            'literal-secret',
+            '{{unknownKey}}',
+            'Bearer {{apiKey}}\r\nX-Injected: true',
+            '{{apiKey}}{{secretKey}}',
+            'prefix {{apiKey}}',
+            '{{apiKey}'
+        ]) {
+            assert.throws(() => validateMetadata({ authHeaderValue: unsafe }), /authHeaderValue|placeholder/i);
+            assert.strictEqual(sanitizeMetadata({ authHeaderValue: unsafe }).authHeaderValue, undefined);
+        }
+    });
+
+    test('8. Provider serialization never exposes malformed auth literals or credentials', () => {
+        const malicious = 'Bearer {{apiKey}} literal-secret';
+        const serialized = serializeProvider({
+            name: 'Legacy',
+            baseUrl: 'https://provider.example',
+            apiKey: encryptSecret('credential-value'),
+            secretKey: encryptSecret('secret-value'),
+            metadata: { authHeaderValue: malicious }
+        });
+        assert.strictEqual(serialized.metadata.authHeaderValue, undefined);
+        const output = JSON.stringify(serialized);
+        assert.ok(!output.includes('literal-secret'));
+        assert.ok(!output.includes('credential-value'));
+        assert.ok(!output.includes('secret-value'));
     });
 
     // ----------------------------------------------------

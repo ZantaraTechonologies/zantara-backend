@@ -80,6 +80,14 @@ const emailOtpVerifyLimiter = rateLimit({
     legacyHeaders: false
 })
 
+const broadbandVerificationLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    message: 'Too many Broadband verification attempts. Please try again later.',
+    standardHeaders: true,
+    legacyHeaders: false
+})
+
 module.exports = {
     loginLimiter,
     pinLimiter,
@@ -90,7 +98,8 @@ module.exports = {
     phoneOtpRequestLimiter,
     phoneOtpVerifyLimiter,
     emailOtpRequestLimiter,
-    emailOtpVerifyLimiter
+    emailOtpVerifyLimiter,
+    broadbandVerificationLimiter
 }
 // const rateLimit = require("express-rate-limit");
 

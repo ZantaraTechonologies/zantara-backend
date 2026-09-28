@@ -38,6 +38,15 @@ const providerSchema = new mongoose.Schema({
     lastBalanceCheck: { 
         type: Date 
     },
+    routingVersion: {
+        type: Number,
+        min: 1,
+        validate: {
+            validator: Number.isSafeInteger,
+            message: 'Provider routing version must be a positive integer'
+        },
+        default: 1
+    },
     metadata: {
         type: mongoose.Schema.Types.Mixed,
         default: {}

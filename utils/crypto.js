@@ -39,7 +39,7 @@ function getSecretKeyBuffer() {
 }
 
 function validateEncryptionConfiguration() {
-    if (process.env.NODE_ENV === 'production') getSecretKeyBuffer();
+    if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') getSecretKeyBuffer();
     return true;
 }
 
@@ -72,7 +72,7 @@ function encryptSecret(text) {
  * Decrypts an AES-256-GCM encrypted string.
  * Returns legacy plaintext unchanged for backward compatibility.
  */
-function decryptSecret(value) {
+function decryptSecret(value, { silent = false } = {}) {
     if (!value || typeof value !== 'string') return value;
     if (!isEncrypted(value)) return value; // Legacy plaintext fallback
 
@@ -95,14 +95,28 @@ function decryptSecret(value) {
 
         return decrypted;
     } catch (err) {
-        console.error('[Crypto] Decryption failed:', err.message);
+        if (!silent) console.error('[Crypto] Decryption failed:', err.message);
         return value;
     }
+}
+
+/**
+ * Decrypts only authenticated Zantara ciphertext. Unlike decryptSecret(), this
+ * never accepts legacy plaintext and returns null when authentication fails.
+ */
+function decryptSecretStrict(value) {
+    if (!isEncrypted(value)) return null;
+    const decrypted = decryptSecret(value, { silent: true });
+    if (typeof decrypted !== 'string' || !decrypted || decrypted === value || isEncrypted(decrypted)) {
+        return null;
+    }
+    return decrypted;
 }
 
 module.exports = {
     encryptSecret,
     decryptSecret,
+    decryptSecretStrict,
     isEncrypted,
     validateEncryptionConfiguration,
 };

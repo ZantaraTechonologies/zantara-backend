@@ -1,4 +1,6 @@
 const Service = require('../models/Service');
+const ProviderOffer = require('../models/ProviderOffer');
+const broadbandReadiness = require('../services/broadbandReadiness.service');
 
 /**
  * GET /api/admin/services
@@ -26,10 +28,12 @@ exports.getAdminServices = async (req, res) => {
  */
 exports.createService = async (req, res) => {
     try {
-        const service = await Service.create(req.body);
+        const service = new Service(req.body);
+        await broadbandReadiness.assertActiveService(service);
+        await service.save();
         res.status(201).json({ success: true, data: service });
     } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
+        res.status(400).json({ success: false, message: error.message });
     }
 };
 
@@ -40,12 +44,25 @@ exports.createService = async (req, res) => {
 exports.updateService = async (req, res) => {
     try {
         const { id } = req.params;
+        const existing = await Service.findById(id);
+        if (!existing) return res.status(404).json({ success: false, message: 'Service not found' });
+
+        if (existing.category === 'broadband' || req.body.category === 'broadband') {
+            const removesExistingRoute = existing.category === 'broadband' && existing.status
+                && (req.body.status === false
+                    || (req.body.category !== undefined && req.body.category !== 'broadband')
+                    || (req.body.identityId !== undefined
+                        && String(req.body.identityId) !== String(existing.identityId)));
+            if (removesExistingRoute) await broadbandReadiness.assertActiveServiceRemoval(existing);
+            existing.set(req.body);
+            await broadbandReadiness.assertActiveService(existing);
+            await existing.save();
+            return res.json({ success: true, data: existing, message: 'Service updated successfully' });
+        }
         const service = await Service.findByIdAndUpdate(id, req.body, { new: true });
-        if (!service) return res.status(404).json({ success: false, message: 'Service not found' });
-        
         res.json({ success: true, data: service, message: 'Service updated successfully' });
     } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
+        res.status(400).json({ success: false, message: error.message });
     }
 };
 
@@ -54,10 +71,20 @@ exports.updateService = async (req, res) => {
  */
 exports.deleteService = async (req, res) => {
     try {
+        const service = await Service.findById(req.params.id);
+        if (!service) return res.status(404).json({ success: false, message: 'Service not found' });
+        const linkedOffer = await ProviderOffer.exists({ serviceId: req.params.id });
+        if (linkedOffer) {
+            return res.status(409).json({
+                success: false,
+                message: 'Cannot delete service while provider offers are linked to it'
+            });
+        }
+        await broadbandReadiness.assertActiveServiceRemoval(service);
         await Service.findByIdAndDelete(req.params.id);
         res.json({ success: true, message: 'Service deleted' });
     } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
+        res.status(409).json({ success: false, message: error.message });
     }
 };
 

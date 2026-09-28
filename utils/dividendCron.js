@@ -77,7 +77,7 @@ const runDividendPayout = async () => {
         {
             $match: {
                 status: 'success',
-                type: { $in: ['airtime', 'data', 'tv', 'cable', 'electricity', 'pin'] },
+                type: { $in: ['airtime', 'data', 'tv', 'cable', 'electricity', 'pin', 'broadband'] },
                 createdAt: { $gte: monthStart, $lt: monthEnd }
             }
         },

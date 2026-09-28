@@ -6,7 +6,7 @@ const walletService = require('./wallet.service');
 const refundService = require('./refund.service');
 const pinService = require('./pin.service');
 const { generateTransactionId, generateReference, generateProviderRequestId } = require('../utils/generateID');
-const { createWithIdentifierRetry } = require('../utils/identifierRetry');
+const { createWithIdentifierRetry, isDuplicateKeyFor } = require('../utils/identifierRetry');
 const notificationService = require('./notification.service');
 const Expense = require('../models/Expense');
 const { serializePurchaseResult } = require('../utils/customerResponseSerializer');
@@ -19,6 +19,8 @@ const {
 } = require('../utils/pricingLogger');
 const { resolvePinQuantity } = require('../utils/pinQuantity');
 const { PROVIDER_OUTCOMES, normalizeProviderOutcome } = require('../utils/providerOutcome');
+const transactionIdempotencyIndexService = require('./transactionIdempotencyIndex.service');
+const { fingerprintsMatch } = require('../utils/broadbandRequestFingerprint');
 const {
     normalizeFulfillment,
     encryptFulfillment,
@@ -27,17 +29,47 @@ const {
     expectedFulfillmentQuantity,
 } = require('../utils/fulfillment');
 
+const purchaseError = (message, code, statusCode = 400) => {
+    const error = new Error(message);
+    error.code = code;
+    error.statusCode = statusCode;
+    return error;
+};
+
 const customerPurchaseReference = transaction => {
     return transaction?.providerRequestId
         ? transaction.transactionId
         : transaction?.refId;
 };
 
+const customerOutcomeMessage = (transaction, outcome) => {
+    const service = transaction?.type === 'broadband' ? 'Broadband purchase' : 'Purchase';
+    if (outcome === PROVIDER_OUTCOMES.SUCCESS) return `${service} completed successfully.`;
+    if (outcome === PROVIDER_OUTCOMES.DEFINITIVE_FAILURE) return `The ${service.toLowerCase()} could not be completed.`;
+    return `Your ${service.toLowerCase()} is being processed. Please check the transaction status before trying again.`;
+};
+
 class PurchaseService {
+    _assertIdempotencyFingerprint(transaction, requestFingerprint) {
+        if (fingerprintsMatch(transaction?.requestFingerprint, requestFingerprint)) return;
+        const error = new Error('Idempotency key was already used for a different Broadband purchase');
+        error.code = 'IDEMPOTENCY_CONFLICT';
+        error.statusCode = 409;
+        throw error;
+    }
+
+    async _findIdempotentTransaction(userId, idempotencyKey) {
+        const query = Transaction.findOne({ userId, idempotencyKey });
+        return typeof query?.select === 'function'
+            ? query.select('+requestFingerprint +recoveryPayload +providerCredentialSnapshot')
+            : query;
+    }
+
     _serializeResultData(transaction, evidence = transaction?.providerEvidence || {}) {
         const fulfillment = decryptFulfillment(transaction?.fulfillment);
         return serializePurchaseResult({
             ...evidence,
+            message: customerOutcomeMessage(transaction, PROVIDER_OUTCOMES.SUCCESS),
             ...(fulfillment.complete ? { fulfillment } : {}),
         }, {
             reference: transaction?.refId,
@@ -50,7 +82,7 @@ class PurchaseService {
             success: false,
             status: 'pending',
             providerOutcome: outcome,
-            message: message || 'Transaction is awaiting provider confirmation.',
+            message: message || customerOutcomeMessage(transaction, outcome),
             transactionId: transaction._id,
             reference: transaction.refId,
             data: {
@@ -60,6 +92,160 @@ class PurchaseService {
                 transactionId: transaction.transactionId,
             },
         };
+    }
+
+    _existingTransactionResult(transaction) {
+        if (transaction.status === 'success') {
+            return {
+                success: true,
+                status: 'success',
+                providerOutcome: transaction.providerOutcome,
+                transactionId: transaction._id,
+                reference: transaction.refId,
+                data: this._serializeResultData(transaction)
+            };
+        }
+        if (transaction.status === 'failed' || transaction.status === 'reversed' || transaction.isLoss) {
+            return {
+                success: false,
+                status: 'failed',
+                providerOutcome: transaction.providerOutcome,
+                refunded: Boolean(transaction.isLoss),
+                message: customerOutcomeMessage(transaction, PROVIDER_OUTCOMES.DEFINITIVE_FAILURE),
+                transactionId: transaction._id,
+                reference: transaction.refId,
+                data: null
+            };
+        }
+        return this._pendingResult(
+            transaction,
+            transaction.providerOutcome || PROVIDER_OUTCOMES.UNKNOWN,
+            'Transaction is awaiting provider confirmation.'
+        );
+    }
+
+    async findIdempotentPurchase(userId, idempotencyKey) {
+        const existing = await this.findIdempotentTransaction(userId, idempotencyKey);
+        return existing ? this._existingTransactionResult(existing) : null;
+    }
+
+    async findIdempotentTransaction(userId, idempotencyKey) {
+        if (!idempotencyKey) return null;
+        await transactionIdempotencyIndexService.assertInstalled();
+        return this._findIdempotentTransaction(userId, idempotencyKey);
+    }
+
+    resultFromExistingTransaction(transaction) {
+        return this._existingTransactionResult(transaction);
+    }
+
+    async _postDispatchFailureResult(transaction, error, {
+        preserveDispatchState = false,
+        knownResponse = null
+    } = {}) {
+        const observedOutcome = knownResponse
+            ? normalizeProviderOutcome(knownResponse).outcome
+            : PROVIDER_OUTCOMES.UNKNOWN;
+        const outcomeStrength = {
+            [PROVIDER_OUTCOMES.UNKNOWN]: 0,
+            [PROVIDER_OUTCOMES.PENDING]: 1,
+            [PROVIDER_OUTCOMES.DEFINITIVE_FAILURE]: 2,
+            [PROVIDER_OUTCOMES.SUCCESS]: 3,
+        };
+        const currentOutcome = transaction.providerOutcome || PROVIDER_OUTCOMES.UNKNOWN;
+        const strongestOutcome = outcomeStrength[observedOutcome] > outcomeStrength[currentOutcome]
+            ? observedOutcome
+            : currentOutcome;
+        const replaceableOutcomes = {
+            [PROVIDER_OUTCOMES.UNKNOWN]: [null, PROVIDER_OUTCOMES.UNKNOWN],
+            [PROVIDER_OUTCOMES.PENDING]: [null, PROVIDER_OUTCOMES.UNKNOWN, PROVIDER_OUTCOMES.PENDING],
+            [PROVIDER_OUTCOMES.DEFINITIVE_FAILURE]: [
+                null,
+                PROVIDER_OUTCOMES.UNKNOWN,
+                PROVIDER_OUTCOMES.PENDING,
+                PROVIDER_OUTCOMES.DEFINITIVE_FAILURE,
+            ],
+            [PROVIDER_OUTCOMES.SUCCESS]: [
+                null,
+                PROVIDER_OUTCOMES.UNKNOWN,
+                PROVIDER_OUTCOMES.PENDING,
+                PROVIDER_OUTCOMES.DEFINITIVE_FAILURE,
+                PROVIDER_OUTCOMES.SUCCESS,
+            ],
+        };
+        console.error('[Purchase Resolution] Post-dispatch processing failed', {
+            transactionId: String(transaction._id || ''),
+            errorCode: error.code || error.name || 'ERROR'
+        });
+        await Transaction.updateOne(
+            {
+                _id: transaction._id,
+                status: 'pending',
+                isLoss: false,
+                providerOutcome: { $in: replaceableOutcomes[strongestOutcome] },
+            },
+            {
+                $set: {
+                    providerOutcome: strongestOutcome,
+                    ...(!preserveDispatchState ? { dispatchState: 'dispatching' } : {}),
+                    resolutionState: 'unresolved',
+                    resolutionError: error.message,
+                },
+            }
+        ).catch(() => {});
+
+        let latest = null;
+        try {
+            latest = await Transaction.findById(transaction._id);
+        } catch (_) {}
+        if (latest && (latest.status === 'success'
+            || latest.status === 'failed'
+            || latest.status === 'reversed'
+            || latest.isLoss)) {
+            return this._existingTransactionResult(latest);
+        }
+        const unresolved = latest || transaction;
+        if (!unresolved.providerOutcome || unresolved.providerOutcome === PROVIDER_OUTCOMES.UNKNOWN) {
+            unresolved.providerOutcome = strongestOutcome;
+        }
+        return this._pendingResult(
+            unresolved,
+            unresolved.providerOutcome || PROVIDER_OUTCOMES.UNKNOWN,
+            customerOutcomeMessage(unresolved, PROVIDER_OUTCOMES.UNKNOWN)
+        );
+    }
+
+    async resumeUndispatchedPurchase(transaction, providerCall) {
+        if (!transaction || transaction.status !== 'pending' || transaction.dispatchState !== 'not_dispatched') {
+            return this._existingTransactionResult(transaction);
+        }
+        const claim = await Transaction.updateOne(
+            { _id: transaction._id, status: 'pending', isLoss: false, dispatchState: 'not_dispatched' },
+            { $set: { dispatchState: 'dispatching' } }
+        );
+        if (claim.modifiedCount !== 1) {
+            const latest = await Transaction.findById(transaction._id);
+            return this._existingTransactionResult(latest || transaction);
+        }
+        transaction.dispatchState = 'dispatching';
+
+        let response;
+        try {
+            response = await providerCall(transaction.providerRequestId);
+        } catch (error) {
+            response = {
+                success: false,
+                status: 'unknown',
+                outcome: PROVIDER_OUTCOMES.UNKNOWN,
+                message: error.message || 'Provider request outcome is unknown',
+                raw: {}
+            };
+        }
+        try {
+            return await this.resolveExistingTransaction(transaction._id, response);
+        } catch (error) {
+            return this._postDispatchFailureResult(transaction, error);
+        }
     }
 
     _retryCredentialNotification(transaction) {
@@ -379,7 +565,9 @@ class PurchaseService {
                     serviceId: transaction.service,
                     amount: transaction.amount,
                     reference: customerPurchaseReference(transaction),
-                    reason: normalized,
+                    reason: {
+                        customerMessage: customerOutcomeMessage(transaction, PROVIDER_OUTCOMES.DEFINITIVE_FAILURE)
+                    },
                     refunded: true,
                     greetingName: customer.name,
                 }).catch(error => {
@@ -391,24 +579,41 @@ class PurchaseService {
                 status: 'failed',
                 providerOutcome: PROVIDER_OUTCOMES.DEFINITIVE_FAILURE,
                 refunded: true,
-                message: normalized.message || 'Provider could not complete the transaction.',
+                message: customerOutcomeMessage(transaction, PROVIDER_OUTCOMES.DEFINITIVE_FAILURE),
                 transactionId: transaction._id,
                 reference: transaction.refId,
                 data: null,
             };
         }
 
-        return this._pendingResult(transaction, normalized.outcome, normalized.message);
+        return this._pendingResult(transaction, normalized.outcome);
     }
 
     /** Generic execution flow for all utility purchases. */
-    async processPurchase(userId, { type, serviceId, canonicalService, amount, details, providerCall, providerPreflight, pin, expectedPrice }) {
+    async processPurchase(userId, {
+        type,
+        serviceId,
+        canonicalService,
+        amount,
+        details,
+        providerCall,
+        providerPreflight,
+        pin,
+        expectedPrice,
+        idempotencyKey,
+        requiredProviderOfferId,
+        requiredOperations = [],
+        providerSelectionValidator,
+        recoveryPayload,
+        requestFingerprint
+    }) {
         let transaction;
         let user;
         let reference;
         let providerRequestId;
         let walletDebited = false;
         let dispatchMayHaveOccurred = false;
+        let resumedUndispatched = false;
 
         try {
             await pinService.verifyPin(userId, pin);
@@ -419,19 +624,52 @@ class PurchaseService {
                 throw new Error('A valid canonical service is required for purchase');
             }
 
+            if (idempotencyKey) {
+                if (typeof idempotencyKey !== 'string' || idempotencyKey.length > 100) {
+                    throw new Error('Invalid purchase idempotency key');
+                }
+                if (!/^[a-f0-9]{64}$/.test(requestFingerprint || '')) {
+                    throw new Error('A valid request fingerprint is required for idempotent purchase');
+                }
+                await transactionIdempotencyIndexService.assertInstalled();
+                const existing = await this._findIdempotentTransaction(userId, idempotencyKey);
+                if (existing) {
+                    this._assertIdempotencyFingerprint(existing, requestFingerprint);
+                    if (existing.status === 'pending' && existing.dispatchState === 'not_dispatched') {
+                        transaction = existing;
+                        reference = existing.refId;
+                        providerRequestId = existing.providerRequestId;
+                        walletDebited = true;
+                        resumedUndispatched = true;
+                    } else {
+                        return this._existingTransactionResult(existing);
+                    }
+                }
+            }
+
             const quantity = resolvePinQuantity(details?.quantity);
             const service = canonicalService;
-            const offer = await procurementEngine.selectBestOffer(service._id);
-            if (!offer) throw new Error('No active provider offer is configured for this service');
+            const offer = await procurementEngine.selectBestOffer(service._id, {
+                providerOfferId: requiredProviderOfferId,
+                requiredOperations
+            });
+            if (!offer) throw purchaseError(
+                'No active provider offer is configured for this service',
+                'PROVIDER_OFFER_UNAVAILABLE',
+                503
+            );
             if (offer.status === false || offer.providerId?.status === 'inactive') {
-                throw new Error('Selected provider offer is not active');
+                throw purchaseError('Selected provider offer is not active', 'PROVIDER_OFFER_UNAVAILABLE', 503);
             }
             if (!offer.providerId?.name || !String(offer.providerCode || '').trim()) {
-                throw new Error('Selected provider offer is invalid');
+                throw purchaseError('Selected provider offer is invalid', 'PROVIDER_OFFER_UNAVAILABLE', 503);
             }
             const offerServiceId = offer.serviceId?._id || offer.serviceId;
             if (!offerServiceId || String(offerServiceId) !== String(service._id)) {
                 throw new Error('Selected provider offer does not belong to the canonical service');
+            }
+            if (typeof providerSelectionValidator === 'function') {
+                await providerSelectionValidator(offer, service);
             }
 
             const currentProvider = offer.providerId.name;
@@ -459,7 +697,9 @@ class PurchaseService {
             };
             if (typeof providerPreflight === 'function') {
                 selection.adapter = await providerPreflight(selection);
-                if (!selection.adapter) throw new Error('Selected provider could not be initialized');
+                if (!selection.adapter) {
+                    throw purchaseError('Selected provider could not be initialized', 'PROVIDER_OFFER_UNAVAILABLE', 503);
+                }
             }
 
             const costPrice = pricingResult.baseCostPrice;
@@ -483,7 +723,11 @@ class PurchaseService {
                         source: 'purchase.service/processPurchase',
                         clientType: details?.clientType || 'unknown',
                     });
-                    throw new Error(`The price changed before checkout. Expected: ₦${expectedPrice}, but actual price is ₦${finalAmount}. Please review the updated price and try again.`);
+                    throw purchaseError(
+                        `The price changed before checkout. Expected: ₦${expectedPrice}, but actual price is ₦${finalAmount}. Please review the updated price and try again.`,
+                        'PURCHASE_PRICE_CHANGED',
+                        409
+                    );
                 }
             } else {
                 logMissingExpectedPrice({
@@ -500,65 +744,125 @@ class PurchaseService {
             const profit = finalAmount - costPrice;
             if (profit < 0) throw new Error(`Transaction aborted: Unsafe pricing (Potential Loss). Cost: ${costPrice}, Sale: ${finalAmount}.`);
 
-            const wallet = await Wallet.findOne({ userId });
-            if (!wallet) throw new Error('Wallet not found');
-            if (wallet.balance < finalAmount) throw new Error('Insufficient wallet balance');
+            if (!resumedUndispatched) {
+                const wallet = await Wallet.findOne({ userId });
+                if (!wallet) throw new Error('Wallet not found');
+                if (wallet.balance < finalAmount) {
+                    throw purchaseError('Insufficient wallet balance', 'INSUFFICIENT_WALLET_BALANCE');
+                }
+            }
             const kycLimits = { 1: 50000, 2: 500000, 3: 100000000 };
             if (finalAmount > kycLimits[user.kycLevel || 1]) {
-                throw new Error(`Transaction amount exceeds your Tier ${user.kycLevel || 1} limit.`);
+                throw purchaseError(
+                    `Transaction amount exceeds your Tier ${user.kycLevel || 1} limit.`,
+                    'PURCHASE_LIMIT_EXCEEDED'
+                );
             }
 
-            transaction = await createWithIdentifierRetry({
-                label: 'Purchase',
-                fields: ['transactionId', 'refId', 'providerRequestId'],
-                generate: () => ({
-                    transactionId: generateTransactionId(),
-                    refId: generateReference(),
-                    providerRequestId: generateProviderRequestId(selection.providerAdapterType),
-                }),
-                create: identifiers => Transaction.create({
-                    userId,
-                    ...identifiers,
-                    type,
-                    service: service.code,
-                    amount: finalAmount,
-                    costPrice,
-                    estimatedCostPrice: costPrice,
-                    salePrice: amount,
-                    agentPrice: finalAmount,
-                    profit,
-                    estimatedProfit: profit,
-                    userRole: user.role && user.role !== 'user' ? user.role : (user.accountType || user.role),
-                    provider: currentProvider,
-                    providerId: offer.providerId._id,
-                    providerAdapterType: selection.providerAdapterType,
-                    providerConfigSnapshot: selection.providerConfigSnapshot,
-                    providerCredentialSnapshot: selection.providerCredentialSnapshot,
-                    providerOfferId: offer._id,
-                    providerOutcome: PROVIDER_OUTCOMES.UNKNOWN,
-                    dispatchState: 'not_dispatched',
-                    resolutionState: 'unresolved',
-                    status: 'pending',
-                    details: {
-                        ...details,
-                        ...(['pin', 'electricity'].includes(type) ? { productName: service.name } : {}),
-                        originalAmount: amount,
-                        request_id: identifiers.providerRequestId,
-                        quantity,
-                    },
-                    pricingSnapshot,
-                }),
+            const transactionData = identifiers => ({
+                userId,
+                ...identifiers,
+                ...(idempotencyKey ? { idempotencyKey } : {}),
+                ...(requestFingerprint ? { requestFingerprint } : {}),
+                type,
+                service: service.code,
+                amount: finalAmount,
+                costPrice,
+                estimatedCostPrice: costPrice,
+                salePrice: amount,
+                agentPrice: finalAmount,
+                profit,
+                estimatedProfit: profit,
+                userRole: user.role && user.role !== 'user' ? user.role : (user.accountType || user.role),
+                provider: currentProvider,
+                providerId: offer.providerId._id,
+                providerAdapterType: selection.providerAdapterType,
+                providerConfigSnapshot: selection.providerConfigSnapshot,
+                providerCredentialSnapshot: selection.providerCredentialSnapshot,
+                ...(recoveryPayload ? { recoveryPayload } : {}),
+                providerOfferId: offer._id,
+                providerOutcome: PROVIDER_OUTCOMES.UNKNOWN,
+                dispatchState: 'not_dispatched',
+                resolutionState: 'unresolved',
+                status: 'pending',
+                details: {
+                    ...details,
+                    ...(['pin', 'electricity'].includes(type) ? { productName: service.name } : {}),
+                    originalAmount: amount,
+                    request_id: identifiers.providerRequestId,
+                    quantity,
+                },
+                pricingSnapshot,
             });
+
+            if (!transaction) try {
+                transaction = await createWithIdentifierRetry({
+                    label: 'Purchase',
+                    fields: ['transactionId', 'refId', 'providerRequestId'],
+                    generate: () => ({
+                        transactionId: generateTransactionId(),
+                        refId: generateReference(),
+                        providerRequestId: generateProviderRequestId(selection.providerAdapterType),
+                    }),
+                    create: async identifiers => {
+                        if (!idempotencyKey) return Transaction.create(transactionData(identifiers));
+
+                        const session = await mongoose.startSession();
+                        session.startTransaction();
+                        try {
+                            const [created] = await Transaction.create([transactionData(identifiers)], { session });
+                            await walletService.debit(
+                                userId,
+                                finalAmount,
+                                created.refId,
+                                `${type}_purchase`,
+                                created._id,
+                                session
+                            );
+                            await session.commitTransaction();
+                            walletDebited = true;
+                            return created;
+                        } catch (error) {
+                            await session.abortTransaction();
+                            throw error;
+                        } finally {
+                            await session.endSession();
+                        }
+                    },
+                });
+            } catch (error) {
+                if (!idempotencyKey || !isDuplicateKeyFor(error, 'idempotencyKey')) throw error;
+                const existing = await this._findIdempotentTransaction(userId, idempotencyKey);
+                if (!existing) throw error;
+                this._assertIdempotencyFingerprint(existing, requestFingerprint);
+                if (existing.status !== 'pending' || existing.dispatchState !== 'not_dispatched') {
+                    return this._existingTransactionResult(existing);
+                }
+                transaction = existing;
+                walletDebited = true;
+                resumedUndispatched = true;
+            }
             reference = transaction.refId;
             providerRequestId = transaction.providerRequestId;
 
-            await walletService.debit(userId, finalAmount, reference, `${type}_purchase`, transaction._id);
-            walletDebited = true;
+            if (!idempotencyKey) {
+                await walletService.debit(userId, finalAmount, reference, `${type}_purchase`, transaction._id);
+                walletDebited = true;
+            }
 
-            await Transaction.updateOne(
-                { _id: transaction._id, status: 'pending', isLoss: false },
+            const dispatchClaim = await Transaction.updateOne(
+                {
+                    _id: transaction._id,
+                    status: 'pending',
+                    isLoss: false,
+                    ...(idempotencyKey ? { dispatchState: 'not_dispatched' } : {})
+                },
                 { $set: { dispatchState: 'dispatching' } }
             );
+            if (idempotencyKey && dispatchClaim.modifiedCount !== 1) {
+                const latest = await Transaction.findById(transaction._id);
+                return this._existingTransactionResult(latest || transaction);
+            }
             transaction.dispatchState = 'dispatching';
             dispatchMayHaveOccurred = true;
 
@@ -580,52 +884,7 @@ class PurchaseService {
             if (!transaction) throw error;
 
             if (dispatchMayHaveOccurred) {
-                await Transaction.updateOne(
-                    {
-                        _id: transaction._id,
-                        status: 'pending',
-                        isLoss: false,
-                        providerOutcome: { $in: [null, PROVIDER_OUTCOMES.UNKNOWN] },
-                    },
-                    {
-                        $set: {
-                            providerOutcome: PROVIDER_OUTCOMES.UNKNOWN,
-                            dispatchState: 'dispatching',
-                            resolutionState: 'unresolved',
-                            resolutionError: error.message,
-                        },
-                    }
-                ).catch(() => {});
-                let latest = null;
-                try {
-                    latest = await Transaction.findById(transaction._id);
-                } catch (_) {}
-                if (latest?.status === 'success') {
-                    return {
-                        success: true,
-                        status: 'success',
-                        providerOutcome: PROVIDER_OUTCOMES.SUCCESS,
-                        transactionId: latest._id,
-                        reference: latest.refId,
-                        data: this._serializeResultData(latest),
-                    };
-                }
-                if (latest?.status === 'failed' || latest?.isLoss) {
-                    return {
-                        success: false,
-                        status: 'failed',
-                        providerOutcome: latest.providerOutcome,
-                        refunded: Boolean(latest.isLoss),
-                        transactionId: latest._id,
-                        reference: latest.refId,
-                    };
-                }
-                const unresolved = latest || transaction;
-                return this._pendingResult(
-                    unresolved,
-                    unresolved.providerOutcome || PROVIDER_OUTCOMES.UNKNOWN,
-                    'Provider resolution is pending reconciliation.'
-                );
+                return this._postDispatchFailureResult(transaction, error);
             }
 
             if (walletDebited) {

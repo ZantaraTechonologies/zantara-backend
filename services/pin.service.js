@@ -75,9 +75,11 @@ class PinService {
         // non-investment callers retain their established verification contract.
         if (!enforceLockout) {
             const user = await User.findOne({ _id: userId, status: true }).select('+transactionPin');
-            if (!user || !user.transactionPin) throw new Error('Transaction PIN not set');
+            if (!user || !user.transactionPin) {
+                throw createPinError('Transaction PIN not set', 'TRANSACTION_PIN_NOT_SET', 400);
+            }
             if (!await bcrypt.compare(pin, user.transactionPin)) {
-                throw new Error('Invalid transaction PIN');
+                throw createPinError('Invalid transaction PIN', 'TRANSACTION_PIN_INVALID', 400);
             }
             return true;
         }
@@ -87,7 +89,7 @@ class PinService {
             const user = await User.findOne({ _id: userId, status: true })
                 .select('+transactionPin +transactionPinFailedAttempts +transactionPinLockedUntil');
             if (!user || !user.transactionPin) {
-                throw new Error('Transaction PIN not set');
+                throw createPinError('Transaction PIN not set', 'TRANSACTION_PIN_NOT_SET', 400);
             }
 
             let failures = Number(user.transactionPinFailedAttempts || 0);
@@ -157,7 +159,7 @@ class PinService {
                     new Date(failedState.transactionPinLockedUntil).getTime() > now.getTime()) {
                     throw lockedError();
                 }
-                throw new Error('Invalid transaction PIN');
+                throw createPinError('Invalid transaction PIN', 'TRANSACTION_PIN_INVALID', 400);
             }
 
             // The reset is a CAS on the hash and observed failure count. If a

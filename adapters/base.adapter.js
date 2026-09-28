@@ -14,7 +14,10 @@ class BaseAdapter {
     async purchaseElectricity(data) { throw new Error('Not implemented'); }
     async purchaseCable(data) { throw new Error('Not implemented'); }
     async purchaseExamPin(data) { throw new Error('Not implemented'); }
+    async purchaseBroadband(data) { throw new Error('Not implemented'); }
+    async verifyBroadband(data) { throw new Error('Not implemented'); }
     async queryTransaction(refId) { throw new Error('Not implemented'); }
+    supportsOperation() { return false; }
     
     /** Check balance for this provider */
     async checkBalance() { throw new Error('Not implemented'); }

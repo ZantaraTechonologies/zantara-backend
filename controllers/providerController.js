@@ -3,14 +3,31 @@ const ProviderOffer = require('../models/ProviderOffer');
 const Transaction = require('../models/Transaction');
 const providerService = require('../services/provider.service');
 const { encryptSecret } = require('../utils/crypto');
-const { serializeProvider, sanitizeMetadata, validateMetadata } = require('../utils/providerSerializer');
+const {
+    serializeProvider,
+    sanitizeMetadata,
+    validateMetadata,
+    ALLOWED_METADATA_KEYS
+} = require('../utils/providerSerializer');
 const { logAction } = require('./auditController');
+const broadbandReadiness = require('../services/broadbandReadiness.service');
 
 function validateBaseUrl(url) {
     if (!url || typeof url !== 'string') throw new Error('Base URL is required');
-    const isLocal = url.includes('localhost') || url.includes('127.0.0.1');
-    if (process.env.NODE_ENV === 'production' && !isLocal && !url.startsWith('https://')) {
-        throw new Error('Base URL must use HTTPS in production environments');
+    let parsed;
+    try {
+        parsed = new URL(url.trim());
+    } catch (_) {
+        throw new Error('Base URL must be a valid HTTP or HTTPS URL');
+    }
+    const isLoopback = ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname);
+    if (parsed.username || parsed.password) {
+        throw new Error('Base URL must not contain embedded credentials');
+    }
+    const secureEnvironment = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging';
+    if (!['http:', 'https:'].includes(parsed.protocol)
+        || (secureEnvironment && parsed.protocol !== 'https:' && !isLoopback)) {
+        throw new Error('Base URL must use HTTPS in production and staging environments');
     }
 }
 
@@ -34,10 +51,7 @@ const createProvider = async (req, res) => {
 
         validateBaseUrl(baseUrl);
 
-        if (metadata) {
-            validateMetadata(metadata);
-        }
-        const cleanMetadata = sanitizeMetadata(metadata);
+        const cleanMetadata = sanitizeMetadata(validateMetadata(metadata));
 
         // Encrypt sensitive credential fields before database persistence
         const encryptedApiKey = encryptSecret(apiKey.trim());
@@ -90,6 +104,9 @@ const updateProvider = async (req, res) => {
             || (apiKey && typeof apiKey === 'string' && apiKey.trim() !== '')
             || (secretKey && typeof secretKey === 'string' && secretKey.trim() !== '')
         );
+        if (routingConfigChanged || (status && status !== provider.status)) {
+            await broadbandReadiness.assertProviderMutationSafe(provider._id);
+        }
         if (routingConfigChanged) {
             const historicalPending = await Transaction.countDocuments({
                 status: 'pending',
@@ -123,12 +140,24 @@ const updateProvider = async (req, res) => {
         }
 
         if (metadata) {
-            validateMetadata(metadata);
-            // Merge with existing metadata to ensure editing one field does not delete unrelated metadata configuration
+            // Merge supported metadata so editing one field does not delete unrelated configuration.
             const currentMeta = provider.metadata instanceof Map ? Object.fromEntries(provider.metadata) : (provider.metadata || {});
-            const merged = { ...currentMeta, ...metadata };
-            provider.metadata = sanitizeMetadata(merged);
+            const metadataPatch = {};
+            for (const [key, value] of Object.entries(metadata)) {
+                if (!ALLOWED_METADATA_KEYS.has(key)) throw new Error(`Unsupported metadata key: '${key}'`);
+                if (value === undefined || value === null || value === '') delete currentMeta[key];
+                else metadataPatch[key] = value;
+            }
+            const merged = { ...currentMeta, ...metadataPatch };
+            const knownMetadata = Object.fromEntries(
+                Object.entries(merged).filter(([key]) => ALLOWED_METADATA_KEYS.has(key))
+            );
+            provider.metadata = sanitizeMetadata(validateMetadata(knownMetadata));
             provider.markModified('metadata');
+        }
+
+        if (routingConfigChanged) {
+            provider.routingVersion = Number(provider.routingVersion || 1) + 1;
         }
 
         // Encrypt and replace credentials ONLY if new non-empty values are supplied

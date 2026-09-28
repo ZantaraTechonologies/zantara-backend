@@ -11,7 +11,7 @@ const requestToken = req => {
 };
 
 const loadAccessIdentity = async decoded => {
-    const user = await User.findById(decoded.id).select('status role roles name phone perms authVersion');
+    const user = await User.findById(decoded.id).select('status role roles name phone perms authVersion accountType');
     if (!user) return { reason: 'missing' };
     if (!user.status) return { reason: 'inactive' };
     if (tokenVersion(decoded.authVersion) !== tokenVersion(user.authVersion)) {
@@ -29,6 +29,7 @@ const loadAccessIdentity = async decoded => {
             roles,
             perms,
             status: user.status,
+            accountType: user.accountType || 'retail',
             ...(user.name ? { name: user.name } : {}),
             ...(user.phone ? { phone: user.phone } : {})
         }

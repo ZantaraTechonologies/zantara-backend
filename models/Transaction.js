@@ -55,7 +55,26 @@ const transactionSchema = new mongoose.Schema({
     // Values remain encrypted exactly as stored on Provider and are excluded
     // from normal query results.
     providerCredentialSnapshot: { type: mongoose.Schema.Types.Mixed, select: false },
-    type: { type: String, enum: ['funding', 'airtime', 'data', 'tv', 'cable', 'electricity', 'pin', 'withdrawal', 'transfer_out', 'transfer_in', 'referral_redeem', 'referral_bonus', 'settlement', 'expense', 'share_purchase', 'share_exit', 'dividend_credit', 'dividend_reinvest', 'dividend_redeem', 'dividend_withdrawal'] },
+    recoveryPayload: { type: String, select: false },
+    type: { type: String, enum: ['funding', 'airtime', 'data', 'tv', 'cable', 'electricity', 'pin', 'broadband', 'withdrawal', 'transfer_out', 'transfer_in', 'referral_redeem', 'referral_bonus', 'settlement', 'expense', 'share_purchase', 'share_exit', 'dividend_credit', 'dividend_reinvest', 'dividend_redeem', 'dividend_withdrawal'] },
+    idempotencyKey: {
+        type: String,
+        immutable: true,
+        trim: true,
+        maxlength: 100,
+        select: false
+    },
+    requestFingerprint: {
+        type: String,
+        immutable: true,
+        select: false,
+        validate: {
+            validator(value) {
+                return value == null || /^[a-f0-9]{64}$/.test(value);
+            },
+            message: 'Invalid request fingerprint'
+        }
+    },
     service: { type: String }, // e.g., MTN, GOTV, NEPA
     status: { type: String, enum: ['pending', 'success', 'failed', 'reversed'] },
     amount: { type: Number },
@@ -143,6 +162,14 @@ transactionSchema.index(
         unique: true,
         partialFilterExpression: { providerRequestId: { $type: 'string' } },
         name: 'providerRequestId_1_unique_partial'
+    }
+);
+transactionSchema.index(
+    { userId: 1, idempotencyKey: 1 },
+    {
+        unique: true,
+        partialFilterExpression: { idempotencyKey: { $type: 'string' } },
+        name: 'userId_1_idempotencyKey_1_unique_partial'
     }
 );
 

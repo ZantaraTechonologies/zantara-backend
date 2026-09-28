@@ -7,6 +7,8 @@ const Service = require('../models/Service');
 const ServiceIdentity = require('../models/ServiceIdentity');
 const { sendResponse } = require('../utils/response');
 const { logAction } = require('./auditController');
+const broadbandReadiness = require('../services/broadbandReadiness.service');
+const mongoose = require('mongoose');
 
 /**
  * Controller for administrative management of the normalized hierarchy and pricing rules.
@@ -95,7 +97,9 @@ class AdminHierarchyController {
                 return sendResponse(res, { status: 400, success: false, message: 'Fulfillment route already exists for this provider and variant' });
             }
 
-            const newOffer = await ProviderOffer.create(offerData);
+            const newOffer = new ProviderOffer(offerData);
+            await broadbandReadiness.assertActiveOffer(newOffer);
+            await newOffer.save();
             
             await logAction(req.user.id, req.user.name, 'PROVIDER_OFFER_CREATE', `Offer for variant: ${offerData.serviceId}`, newOffer, 'success', req);
             
@@ -139,17 +143,37 @@ class AdminHierarchyController {
             const { id } = req.params;
             const { priority, status, costPrice, costMode, providerRetailPrice, providerCode, providerServiceCode } = req.body;
 
-            const updatedOffer = await ProviderOffer.findByIdAndUpdate(id, {
-                priority,
-                status,
-                costPrice,
-                costMode,
-                providerRetailPrice,
-                providerCode,
-                providerServiceCode
-            }, { new: true, omitUndefined: true });
-
-            if (!updatedOffer) return sendResponse(res, { status: 404, success: false, message: 'Offer not found' });
+            const currentOffer = await ProviderOffer.findById(id);
+            if (!currentOffer) return sendResponse(res, { status: 404, success: false, message: 'Offer not found' });
+            const linkedService = await Service.findById(currentOffer.serviceId);
+            let updatedOffer;
+            if (linkedService?.category === 'broadband') {
+                if (currentOffer.status && status === false) {
+                    await broadbandReadiness.assertActiveOfferRemoval(currentOffer);
+                }
+                const offerPatch = Object.fromEntries(Object.entries({
+                    priority,
+                    status,
+                    costPrice,
+                    costMode,
+                    providerRetailPrice,
+                    providerCode,
+                    providerServiceCode
+                }).filter(([, value]) => value !== undefined));
+                currentOffer.set(offerPatch);
+                await broadbandReadiness.assertActiveOffer(currentOffer);
+                updatedOffer = await currentOffer.save();
+            } else {
+                updatedOffer = await ProviderOffer.findByIdAndUpdate(id, {
+                    priority,
+                    status,
+                    costPrice,
+                    costMode,
+                    providerRetailPrice,
+                    providerCode,
+                    providerServiceCode
+                }, { new: true, omitUndefined: true });
+            }
 
             await logAction(req.user.id, req.user.name, 'PROVIDER_OFFER_UPDATE', `Offer: ${id}`, req.body, 'success', req);
 
@@ -162,8 +186,10 @@ class AdminHierarchyController {
     async deleteProviderOffer(req, res) {
         try {
             const { id } = req.params;
-            const deleted = await ProviderOffer.findByIdAndDelete(id);
-            if (!deleted) return sendResponse(res, { status: 404, success: false, message: 'Offer not found' });
+            const offer = await ProviderOffer.findById(id);
+            if (!offer) return sendResponse(res, { status: 404, success: false, message: 'Offer not found' });
+            await broadbandReadiness.assertActiveOfferRemoval(offer);
+            await ProviderOffer.findByIdAndDelete(id);
 
             await logAction(req.user.id, req.user.name, 'PROVIDER_OFFER_DELETE', `Offer: ${id}`, {}, 'success', req);
 
@@ -177,9 +203,9 @@ class AdminHierarchyController {
     async getServiceIdentities(req, res) {
         try {
             const identities = await ServiceIdentity.find()
-                .populate('categoryId', 'name')
-                .populate('typeId', 'name')
-                .populate('brandId', 'name')
+                .populate('categoryId', 'name slug status')
+                .populate('typeId', 'name slug aliases categoryId status')
+                .populate('brandId', 'name typeIds status')
                 .sort({ name: 1 });
 
             // Enhance with counts
@@ -196,18 +222,42 @@ class AdminHierarchyController {
                 const hasPricing = await PricingRule.exists({
                     $or: [
                         { targetType: 'identity', targetId: identity._id },
-                        { targetType: 'type', targetId: identity.typeId?._id },
+                        { targetType: 'service_type', targetId: identity.typeId?._id },
                         { targetType: 'category', targetId: identity.categoryId?._id },
                         { targetType: 'global' }
                     ]
                 });
 
-                const readiness = {
+                let readiness = {
                     hasVariants: plansCount > 0,
                     hasFulfillment: offersCount > 0,
                     hasPricing: !!hasPricing,
                     isVisible: identity.status && plansCount > 0 && offersCount > 0 && !!hasPricing
                 };
+
+                if (await broadbandReadiness.isBroadbandIdentity(identity)) {
+                    const activeServices = await Service.find({ identityId: identity._id, status: true });
+                    const identityCheck = await broadbandReadiness.inspectIdentity(identity);
+                    const serviceChecks = await Promise.all(activeServices.map(service => (
+                        broadbandReadiness.inspectService(identity, service)
+                    )));
+                    const readyServices = serviceChecks.filter(check => check.ready).length;
+                    const errors = [
+                        ...identityCheck.errors,
+                        ...serviceChecks.flatMap(check => check.errors)
+                    ];
+                    if (identity.purchaseMode === 'amount' && activeServices.length !== 1) {
+                        errors.push('Broadband AMOUNT identity must have exactly one active purchase service');
+                    }
+                    readiness = {
+                        hasVariants: activeServices.length > 0,
+                        hasFulfillment: readyServices > 0,
+                        hasPricing: !!hasPricing,
+                        isVisible: identity.status && activeServices.length > 0
+                            && readyServices === activeServices.length && errors.length === 0,
+                        errors: [...new Set(errors)]
+                    };
+                }
 
                 return {
                     ...identity.toObject(),
@@ -226,7 +276,9 @@ class AdminHierarchyController {
 
     async createServiceIdentity(req, res) {
         try {
-            const identity = await ServiceIdentity.create(req.body);
+            const identity = new ServiceIdentity(req.body);
+            await broadbandReadiness.assertActiveIdentity(identity);
+            await identity.save();
             await logAction(req.user.id, req.user.name, 'SERVICE_IDENTITY_CREATE', `Identity: ${identity.name}`, identity, 'success', req);
             return sendResponse(res, { success: true, data: identity });
         } catch (error) {
@@ -237,8 +289,12 @@ class AdminHierarchyController {
     async updateServiceIdentity(req, res) {
         try {
             const { id } = req.params;
-            const identity = await ServiceIdentity.findByIdAndUpdate(id, req.body, { new: true });
+            const identity = await ServiceIdentity.findById(id);
             if (!identity) return sendResponse(res, { status: 404, success: false, message: 'Identity not found' });
+
+            identity.set(req.body);
+            await broadbandReadiness.assertActiveIdentity(identity);
+            await identity.save();
             
             await logAction(req.user.id, req.user.name, 'SERVICE_IDENTITY_UPDATE', `Identity: ${id}`, req.body, 'success', req);
             return sendResponse(res, { success: true, data: identity });
@@ -248,28 +304,37 @@ class AdminHierarchyController {
     }
 
     async deleteServiceIdentity(req, res) {
+        let session;
         try {
+            session = await mongoose.startSession();
             const { id } = req.params;
-            
-            // 1. Find all plans linked to this identity
-            const plans = await Service.find({ identityId: id });
+            session.startTransaction();
+            const identity = await ServiceIdentity.findById(id).session(session);
+            if (!identity) {
+                await session.abortTransaction();
+                return sendResponse(res, { status: 404, success: false, message: 'Identity not found' });
+            }
+            if (identity.status && await broadbandReadiness.isBroadbandIdentity(identity)) {
+                const error = new Error('Deactivate the Broadband identity before deleting it');
+                error.statusCode = 409;
+                throw error;
+            }
+
+            const plans = await Service.find({ identityId: id }).session(session);
             const planIds = plans.map(p => p._id);
+            await ProviderOffer.deleteMany({ serviceId: { $in: planIds } }, { session });
+            await Service.deleteMany({ identityId: id }, { session });
+            await ServiceIdentity.deleteOne({ _id: id }, { session });
+            await session.commitTransaction();
 
-            // 2. Delete all fulfillment mappings for those plans
-            await ProviderOffer.deleteMany({ serviceId: { $in: planIds } });
-
-            // 3. Delete the plans
-            await Service.deleteMany({ identityId: id });
-
-            // 4. Delete the identity itself
-            const deleted = await ServiceIdentity.findByIdAndDelete(id);
-            if (!deleted) return sendResponse(res, { status: 404, success: false, message: 'Identity not found' });
-
-            await logAction(req.user.id, req.user.name, 'SERVICE_IDENTITY_DELETE', `Identity: ${id}`, { name: deleted.name }, 'success', req);
+            await logAction(req.user.id, req.user.name, 'SERVICE_IDENTITY_DELETE', `Identity: ${id}`, { name: identity.name }, 'success', req);
             
             return sendResponse(res, { success: true, message: 'Service identity and all linked data deleted successfully' });
         } catch (error) {
-            return sendResponse(res, { status: 500, success: false, message: error.message });
+            if (session) await session.abortTransaction().catch(() => {});
+            return sendResponse(res, { status: error.statusCode || 500, success: false, message: error.message });
+        } finally {
+            if (session) await session.endSession();
         }
     }
 
@@ -357,6 +422,9 @@ class AdminHierarchyController {
             }
 
             if (req.method === 'PUT') {
+                if (data.status === false) {
+                    await broadbandReadiness.assertParentMutationSafe({ categoryId: id }, 'the category');
+                }
                 const category = await ServiceCategory.findByIdAndUpdate(id, data, { new: true });
                 return sendResponse(res, { success: true, data: category });
             }
@@ -386,6 +454,9 @@ class AdminHierarchyController {
             }
 
             if (req.method === 'PUT') {
+                if (['status', 'categoryId', 'name', 'slug', 'aliases'].some(key => data[key] !== undefined)) {
+                    await broadbandReadiness.assertParentMutationSafe({ typeId: id }, 'the service type');
+                }
                 const type = await ServiceType.findByIdAndUpdate(id, data, { new: true });
                 return sendResponse(res, { success: true, data: type });
             }
@@ -412,6 +483,9 @@ class AdminHierarchyController {
             }
 
             if (req.method === 'PUT') {
+                if (data.status === false || data.typeIds !== undefined) {
+                    await broadbandReadiness.assertParentMutationSafe({ brandId: id }, 'the brand');
+                }
                 const brand = await Brand.findByIdAndUpdate(id, data, { new: true });
                 return sendResponse(res, { success: true, data: brand });
             }

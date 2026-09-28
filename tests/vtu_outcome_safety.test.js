@@ -29,6 +29,7 @@ const servicesController = require('../controllers/servicesController');
 const VTPassAdapter = require('../adapters/vtpass.adapter');
 const Vas2NetsAdapter = require('../adapters/vas2nets.adapter');
 const { normalizeProviderOutcome } = require('../utils/providerOutcome');
+const { buildPurchaseFailureContent } = require('../utils/notificationFormatter');
 
 const originals = {
     startSession: mongoose.startSession,
@@ -381,6 +382,47 @@ async function run() {
         assert.strictEqual(walletCredits.length, 1);
     });
 
+    await test('provider-originated messages never cross purchase or notification boundaries', async () => {
+        const malicious = 'apiKey=fake-secret https://internal.provider CODE-X {"token":"bad"}\r\nX-Leak: true';
+
+        const pending = await buyWith(async () => ({
+            success: false,
+            status: 'pending',
+            outcome: 'pending',
+            message: malicious,
+            raw: { status: 'pending' }
+        }));
+        assert.ok(!JSON.stringify(pending).includes(malicious));
+        assert.match(pending.message, /being processed/i);
+
+        const success = await buyWith(async () => ({
+            success: true,
+            status: 'success',
+            outcome: 'success',
+            message: malicious,
+            transactionId: 'PROVIDER-SAFE-MESSAGE',
+            raw: { status: 'success' }
+        }));
+        assert.ok(!JSON.stringify(success).includes(malicious));
+        assert.match(success.data.message, /completed successfully/i);
+
+        let failureNotification;
+        notificationService.notifyPurchaseFailure = async (_customer, input) => {
+            failureNotification = buildPurchaseFailureContent(input);
+        };
+        const failure = await buyWith(async () => ({
+            success: false,
+            status: 'failed',
+            outcome: 'definitive_failure',
+            message: malicious,
+            raw: { status: 'failed' }
+        }));
+        assert.ok(!JSON.stringify(failure).includes(malicious));
+        assert.match(failure.message, /could not be completed/i);
+        assert.ok(failureNotification);
+        assert.ok(!JSON.stringify(failureNotification).includes(malicious));
+    });
+
     await test('refund outage never downgrades persisted DEFINITIVE_FAILURE evidence', async () => {
         const originalRefund = refundService.processRefund;
         refundService.processRefund = async () => { throw new Error('refund database unavailable'); };
@@ -435,6 +477,47 @@ async function run() {
             assert.strictEqual(result.providerOutcome, 'success');
             assert.strictEqual(refundCalls, 0);
         } finally {
+            refundService.processRefund = originalRefund;
+        }
+    });
+
+    await test('provider dispatch plus evidence persistence failure remains pending without failover', async () => {
+        const originalUpdate = Transaction.updateOne;
+        const originalSelect = procurementService.selectBestOffer;
+        let dispatches = 0;
+        let selections = 0;
+        let refundCalls = 0;
+        const originalRefund = refundService.processRefund;
+        Transaction.updateOne = async (filter, update) => {
+            if (update?.$set?.providerEvidence) throw new Error('evidence database unavailable');
+            return originalUpdate(filter, update);
+        };
+        procurementService.selectBestOffer = async (...args) => {
+            selections++;
+            return originalSelect(...args);
+        };
+        refundService.processRefund = async () => { refundCalls++; };
+        try {
+            const result = await buyWith(async () => {
+                dispatches++;
+                return {
+                    success: true,
+                    status: 'success',
+                    outcome: 'success',
+                    message: 'provider-internal-message',
+                    raw: { status: 'success' }
+                };
+            });
+            assert.strictEqual(result.status, 'pending');
+            assert.strictEqual(result.providerOutcome, 'unknown');
+            assert.strictEqual(dispatches, 1);
+            assert.strictEqual(selections, 1);
+            assert.strictEqual(refundCalls, 0);
+            assert.ok(!JSON.stringify(result).includes('evidence database unavailable'));
+            assert.ok(!JSON.stringify(result).includes('provider-internal-message'));
+        } finally {
+            Transaction.updateOne = originalUpdate;
+            procurementService.selectBestOffer = originalSelect;
             refundService.processRefund = originalRefund;
         }
     });
@@ -707,6 +790,154 @@ async function run() {
         assert.strictEqual(res.statusCode, 202);
         assert.strictEqual(res.body.success, false);
         assert.strictEqual(res.body.data.status, 'pending');
+    });
+
+    await test('Broadband status requery contains evidence-persistence failure as controlled reconciliation', async () => {
+        const tx = makeTransaction({
+            userId,
+            refId: 'BROADBAND-INTERNAL-REFERENCE',
+            providerRequestId: 'ZNT-P-23456789ABCDEFGH',
+            type: 'broadband',
+            amount: 1000,
+            provider: 'ExactProvider',
+            dispatchState: 'dispatched',
+            providerOutcome: 'pending',
+        });
+        transactions.push(tx);
+        const originalResolve = purchaseService.resolveExistingTransaction;
+        const originalRefund = refundService.processRefund;
+        let queries = 0;
+        let refunds = 0;
+        let selections = 0;
+        const malicious = 'MongoServerError internal diagnostic Bearer SUPER-SECRET https://provider.internal/api\r\n{"apiKey":"SECRET"}';
+        try {
+            providerService.queryTransaction = async reference => {
+                queries++;
+                assert.strictEqual(reference, tx.providerRequestId);
+                return { outcome: 'success', success: true, status: 'success', transactionId: 'PROVIDER-REF-1', raw: {} };
+            };
+            purchaseService.resolveExistingTransaction = async () => { throw new Error(malicious); };
+            refundService.processRefund = async () => { refunds++; };
+            procurementService.selectBestOffer = async () => { selections++; return offer; };
+
+            const res = makeResponse();
+            await servicesController.checkTransaction({
+                body: { refId: tx.transactionId },
+                user: { id: String(userId) }
+            }, res);
+
+            assert.strictEqual(res.statusCode, 202);
+            assert.strictEqual(res.body.data.status, 'pending');
+            assert.strictEqual(res.body.data.providerOutcome, 'success');
+            assert.strictEqual(tx.providerOutcome, 'success');
+            assert.strictEqual(tx.dispatchState, 'dispatched');
+            assert.strictEqual(tx.providerRequestId, 'ZNT-P-23456789ABCDEFGH');
+            assert.strictEqual(queries, 1);
+            assert.strictEqual(refunds, 0);
+            assert.strictEqual(selections, 0);
+            assert.ok(!JSON.stringify(res.body).includes('MongoServerError'));
+            assert.ok(!JSON.stringify(res.body).includes('SUPER-SECRET'));
+        } finally {
+            purchaseService.resolveExistingTransaction = originalResolve;
+            refundService.processRefund = originalRefund;
+        }
+    });
+
+    await test('Broadband status requery preserves persisted success evidence when finalization throws', async () => {
+        const providerEvidence = {
+            outcome: 'success',
+            success: true,
+            status: 'success',
+            transactionId: 'PROVIDER-EVIDENCE-1',
+            raw: { status: 'success' }
+        };
+        const tx = makeTransaction({
+            userId,
+            refId: 'BROADBAND-FINALIZATION-REFERENCE',
+            providerRequestId: 'ZNT-P-3456789ABCDEFGHJ',
+            type: 'broadband',
+            amount: 1000,
+            provider: 'ExactProvider',
+            dispatchState: 'dispatched',
+            providerOutcome: 'success',
+            providerEvidence,
+        });
+        transactions.push(tx);
+        const originalResolve = purchaseService.resolveExistingTransaction;
+        try {
+            providerService.queryTransaction = async () => ({
+                outcome: 'success', success: true, status: 'success', transactionId: 'PROVIDER-EVIDENCE-1', raw: {}
+            });
+            purchaseService.resolveExistingTransaction = async () => {
+                throw new Error('local finalization failed providerCode=vtpass');
+            };
+
+            const res = makeResponse();
+            await servicesController.checkTransaction({
+                body: { refId: tx.transactionId },
+                user: { id: String(userId) }
+            }, res);
+
+            assert.strictEqual(res.statusCode, 202);
+            assert.strictEqual(res.body.data.providerOutcome, 'success');
+            assert.strictEqual(tx.providerEvidence, providerEvidence);
+            assert.strictEqual(tx.dispatchState, 'dispatched');
+            assert.ok(!JSON.stringify(res.body).includes('providerCode=vtpass'));
+        } finally {
+            purchaseService.resolveExistingTransaction = originalResolve;
+        }
+    });
+
+    await test('Broadband definitive-failure refund error remains controlled and preserves provider outcome', async () => {
+        const tx = makeTransaction({
+            userId,
+            refId: 'BROADBAND-FAILURE-REFERENCE',
+            providerRequestId: 'ZNT-P-456789ABCDEFGHJK',
+            type: 'broadband',
+            amount: 1000,
+            provider: 'ExactProvider',
+            dispatchState: 'dispatched',
+            providerOutcome: 'pending',
+        });
+        transactions.push(tx);
+        const originalRefund = refundService.processRefund;
+        let refunds = 0;
+        let selections = 0;
+        try {
+            providerService.queryTransaction = async () => ({
+                outcome: 'definitive_failure',
+                success: false,
+                status: 'failed',
+                message: 'Bearer SUPER-SECRET',
+                raw: { providerCode: 'vtpass' }
+            });
+            refundService.processRefund = async () => {
+                refunds++;
+                throw new Error('MongoServerError {"apiKey":"SECRET"}\r\nhttps://provider.internal/api');
+            };
+            procurementService.selectBestOffer = async () => { selections++; return offer; };
+
+            const res = makeResponse();
+            await servicesController.checkTransaction({
+                body: { refId: tx.transactionId },
+                user: { id: String(userId) }
+            }, res);
+
+            assert.strictEqual(res.statusCode, 202);
+            assert.strictEqual(res.body.data.status, 'pending');
+            assert.strictEqual(res.body.data.providerOutcome, 'definitive_failure');
+            assert.strictEqual(tx.providerOutcome, 'definitive_failure');
+            assert.strictEqual(tx.dispatchState, 'dispatched');
+            assert.strictEqual(refunds, 1);
+            assert.strictEqual(walletCredits.length, 0);
+            assert.strictEqual(selections, 0);
+            const output = JSON.stringify(res.body);
+            assert.ok(!output.includes('SUPER-SECRET'));
+            assert.ok(!output.includes('MongoServerError'));
+            assert.ok(!output.includes('provider.internal'));
+        } finally {
+            refundService.processRefund = originalRefund;
+        }
     });
 
     await test('terminal local transaction is returned without another provider requery', async () => {

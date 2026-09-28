@@ -21,7 +21,10 @@ class PricingService {
         const quantity = isPin ? resolvePinQuantity(quantityArg) : 1;
 
         // For airtime, the cost is the requested face value. For data, it's the fixed plan cost.
-        const costPrice = (service.category === 'airtime' || service.category === 'electricity') 
+        const isVariableAmount = service.category === 'airtime'
+            || service.category === 'electricity'
+            || (service.category === 'broadband' && providerOffer.costMode === 'dynamic');
+        const costPrice = isVariableAmount
             ? Number(requestedAmount) 
             : providerOffer.costPrice;
             

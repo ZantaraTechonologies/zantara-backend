@@ -311,7 +311,8 @@ async function runPostPurchaseResponseTests() {
 
             assert.strictEqual(result.success, true);
             assert.strictEqual(result.data.status, 'success');
-            assert.strictEqual(result.data.message, 'DStv renewed successfully');
+            assert.strictEqual(result.data.message, 'Purchase completed successfully.');
+            assert.ok(!JSON.stringify(result).includes('DStv renewed successfully'));
             assert.ok(result.data.reference);
             assert.ok(result.data.transactionId);
         });

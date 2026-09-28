@@ -4,7 +4,7 @@ const serviceSchema = new mongoose.Schema({
     name: String,
     code: String, // Zantara Universal Code (e.g., MTN_DATA_1GB)
     providerCode: String, // Vendor-specific Code (e.g., mtn-100mb)
-    category: { type: String, enum: ['airtime', 'data', 'tv', 'electricity', 'pin'] },
+    category: { type: String, enum: ['airtime', 'data', 'tv', 'electricity', 'pin', 'broadband'] },
     categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'ServiceCategory', default: null },
     typeId: { type: mongoose.Schema.Types.ObjectId, ref: 'ServiceType', default: null },
     brandId: { type: mongoose.Schema.Types.ObjectId, ref: 'Brand', default: null },

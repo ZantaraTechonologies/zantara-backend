@@ -60,6 +60,7 @@ const TYPE_LABELS = {
     cable: 'Cable TV',
     exam_pin: 'Exam PIN',
     pin: 'Exam PIN',
+    broadband: 'Broadband',
 };
 
 /**
@@ -252,6 +253,8 @@ function buildContextLine(details, type) {
             return details.meter_number ? `Meter: ${maskIdentifier(details.meter_number)}` : '';
         case 'cable':
             return details.billersCode ? `Account: ${maskIdentifier(details.billersCode)}` : '';
+        case 'broadband':
+            return details.identifierMasked ? `Account: ${details.identifierMasked}` : '';
         default:
             return '';
     }

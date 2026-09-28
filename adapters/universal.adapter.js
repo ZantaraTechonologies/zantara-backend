@@ -2,6 +2,7 @@ const axios = require('axios');
 const BaseAdapter = require('./base.adapter');
 const { PROVIDER_OUTCOMES } = require('../utils/providerOutcome');
 const { normalizeFulfillment } = require('../utils/fulfillment');
+const { supportsProviderOperation } = require('./providerAdapterRegistry');
 
 /**
  * Safely extracts a value from an object using a dot-separated path (e.g. 'data.user.balance').
@@ -86,6 +87,14 @@ class UniversalAdapter extends BaseAdapter {
         return String(method).toUpperCase();
     }
 
+    _operationValue(operation, key, fallback) {
+        if (operation) {
+            const operationKey = `${operation}${key.charAt(0).toUpperCase()}${key.slice(1)}`;
+            if (this.metadata[operationKey] !== undefined) return this.metadata[operationKey];
+        }
+        return this.metadata[key] !== undefined ? this.metadata[key] : fallback;
+    }
+
     /**
      * Generic request processor supporting category endpoint & method resolution.
      */
@@ -125,7 +134,7 @@ class UniversalAdapter extends BaseAdapter {
             }
 
             const res = await axios(options);
-            return this.mapResponse(res.data);
+            return this.mapResponse(res.data, category);
         } catch (err) {
             return { 
                 success: false, 
@@ -142,6 +151,16 @@ class UniversalAdapter extends BaseAdapter {
     async purchaseElectricity(data) { return this._processRequest(data, 'electricity'); }
     async purchaseCable(data) { return this._processRequest(data, 'cable'); }
     async purchaseExamPin(data) { return this._processRequest(data, 'exam'); }
+    async purchaseBroadband(data) {
+        const fieldMap = this.metadata.broadbandFieldMap || this.metadata.fieldMap;
+        const payload = { ...data };
+        if (!fieldMap?.verification_reference) delete payload.verification_reference;
+        return this._processRequest(payload, 'broadband');
+    }
+
+    supportsOperation(operation) {
+        return supportsProviderOperation({ adapterType: 'universal', metadata: this.metadata }, operation);
+    }
 
     async checkBalance() {
         try {
@@ -194,7 +213,7 @@ class UniversalAdapter extends BaseAdapter {
                 timeout: 15000
             };
 
-            const reqKey = this.metadata.fieldMap?.request_id || 'request_id';
+            const reqKey = this.metadata.queryFieldMap?.request_id || this.metadata.fieldMap?.request_id || 'request_id';
             const payload = { [reqKey]: request_id };
 
             if (['POST', 'PUT', 'PATCH'].includes(method)) {
@@ -204,7 +223,7 @@ class UniversalAdapter extends BaseAdapter {
             }
 
             const res = await axios(options);
-            return this.mapResponse(res.data);
+            return this.mapResponse(res.data, 'query');
         } catch (err) {
             return {
                 success: false,
@@ -310,22 +329,128 @@ class UniversalAdapter extends BaseAdapter {
         }
     }
 
-    /**
-     * Normalized response mapping following Zantara provider response structure
-     */
-    mapResponse(data) {
+    async verifyBroadband(data) {
+        if (!this.metadata.broadbandVerifyUrl) {
+            return {
+                success: false,
+                status: 'unknown',
+                outcome: PROVIDER_OUTCOMES.UNKNOWN,
+                message: 'Broadband verification is not configured for this provider'
+            };
+        }
+
+        try {
+            const url = this._resolveUrl('broadbandVerifyUrl', '', data);
+            const method = this._resolveMethod('broadbandVerifyMethod', null, 'POST');
+            const payload = this._buildBroadbandVerificationPayload(data);
+
+            const options = {
+                method,
+                url,
+                headers: this._buildHeaders(),
+                timeout: 15000
+            };
+            if (['POST', 'PUT', 'PATCH'].includes(method)) options.data = payload;
+            else options.params = payload;
+
+            const res = await axios(options);
+            return this.mapVerificationResponse(res.data);
+        } catch (err) {
+            return {
+                success: false,
+                status: 'unknown',
+                outcome: PROVIDER_OUTCOMES.UNKNOWN,
+                message: err.response?.data?.message || err.message,
+                raw: err.response?.data
+            };
+        }
+    }
+
+    _buildBroadbandVerificationPayload(data) {
+        const fieldMap = this.metadata.broadbandVerifyFieldMap;
+        const payload = {};
+        if (fieldMap && typeof fieldMap === 'object') {
+            Object.entries(fieldMap).forEach(([internalKey, externalKey]) => {
+                if (data[internalKey] !== undefined) payload[externalKey] = data[internalKey];
+            });
+            return payload;
+        }
+        for (const key of ['serviceID', 'variation_code', 'identifier']) {
+            if (data[key] !== undefined) payload[key] = data[key];
+        }
+        return payload;
+    }
+
+    mapVerificationResponse(data) {
         if (!data || typeof data !== 'object') {
             return {
                 success: false,
-                status: 'failed',
+                status: 'unknown',
+                outcome: PROVIDER_OUTCOMES.UNKNOWN,
                 message: 'Invalid response from provider',
                 raw: data
             };
         }
 
-        const successPath = this.metadata.successPath || 'status';
-        const expectedSuccessValue = this.metadata.successValue !== undefined && this.metadata.successValue !== ''
-            ? String(this.metadata.successValue).toLowerCase()
+        const read = key => {
+            const path = this.metadata[key];
+            return path ? getByDotPath(data, path) : undefined;
+        };
+        const successActual = read('broadbandVerifySuccessPath');
+        const pendingActual = read('broadbandVerifyPendingPath');
+        const failureActual = read('broadbandVerifyFailurePath');
+        const isSuccess = successActual !== undefined
+            && String(successActual).toLowerCase() === String(this.metadata.broadbandVerifySuccessValue).toLowerCase();
+        const isPending = this.metadata.broadbandVerifyPendingValue !== undefined
+            && String(pendingActual).toLowerCase() === String(this.metadata.broadbandVerifyPendingValue).toLowerCase();
+        const normalizedFailure = String(failureActual).toLowerCase();
+        const isFailure = this.metadata.broadbandVerifyFailureValue !== undefined
+            ? normalizedFailure === String(this.metadata.broadbandVerifyFailureValue).toLowerCase()
+            : ['failed', 'failure', 'declined', 'rejected', 'error'].includes(normalizedFailure);
+        const matchingOutcomes = [isSuccess, isPending, isFailure].filter(Boolean).length;
+        const outcome = matchingOutcomes !== 1
+            ? PROVIDER_OUTCOMES.UNKNOWN
+            : isSuccess
+                ? PROVIDER_OUTCOMES.SUCCESS
+                : isPending
+                    ? PROVIDER_OUTCOMES.PENDING
+                    : PROVIDER_OUTCOMES.DEFINITIVE_FAILURE;
+        const messageValue = read('broadbandVerifyMessagePath');
+
+        return {
+            success: outcome === PROVIDER_OUTCOMES.SUCCESS,
+            status: outcome === PROVIDER_OUTCOMES.SUCCESS ? 'verified' : outcome,
+            outcome,
+            message: typeof messageValue === 'string'
+                ? messageValue
+                : (outcome === PROVIDER_OUTCOMES.SUCCESS ? 'Customer verified' : 'Customer verification failed'),
+            customer: {
+                name: read('broadbandVerifyCustomerNamePath'),
+                id: read('broadbandVerifyCustomerIdPath')
+            },
+            verificationReference: read('broadbandVerifyReferencePath'),
+            raw: data
+        };
+    }
+
+    /**
+     * Normalized response mapping following Zantara provider response structure
+     */
+    mapResponse(data, operation = null) {
+        if (!data || typeof data !== 'object') {
+            return {
+                success: false,
+                status: 'unknown',
+                outcome: PROVIDER_OUTCOMES.UNKNOWN,
+                message: 'Invalid response from provider',
+                raw: data
+            };
+        }
+
+        const successPath = this._operationValue(operation, 'successPath', 'status');
+        const configuredSuccessValue = this._operationValue(operation, 'successValue', 'success');
+        const expectedSuccessValue = configuredSuccessValue !== undefined && configuredSuccessValue !== ''
+            ? String(configuredSuccessValue).toLowerCase()
             : 'success';
 
         // Safe dot-path extraction for success
@@ -339,18 +464,19 @@ class UniversalAdapter extends BaseAdapter {
 
         // Status and explicit non-success mappings.
         let status = isSuccess ? 'success' : 'unknown';
-        if (this.metadata.statusPath) {
-            const extractedStatus = getByDotPath(data, this.metadata.statusPath);
+        const statusPath = this._operationValue(operation, 'statusPath');
+        if (statusPath) {
+            const extractedStatus = getByDotPath(data, statusPath);
             if (extractedStatus !== undefined && extractedStatus !== null) {
                 status = String(extractedStatus);
             }
         }
 
         const normalizedStatus = String(status).toLowerCase();
-        const pendingPath = this.metadata.pendingPath || this.metadata.statusPath;
-        const pendingValue = this.metadata.pendingValue;
-        const failurePath = this.metadata.failurePath || this.metadata.statusPath;
-        const failureValue = this.metadata.failureValue;
+        const pendingPath = this._operationValue(operation, 'pendingPath') || statusPath;
+        const pendingValue = this._operationValue(operation, 'pendingValue');
+        const failurePath = this._operationValue(operation, 'failurePath') || statusPath;
+        const failureValue = this._operationValue(operation, 'failureValue');
         const pendingActual = pendingPath ? getByDotPath(data, pendingPath) : undefined;
         const failureActual = failurePath ? getByDotPath(data, failurePath) : undefined;
         const isPending = pendingValue !== undefined
@@ -370,8 +496,9 @@ class UniversalAdapter extends BaseAdapter {
 
         // Message
         let message;
-        if (this.metadata.messagePath) {
-            const extractedMsg = getByDotPath(data, this.metadata.messagePath);
+        const messagePath = this._operationValue(operation, 'messagePath');
+        if (messagePath) {
+            const extractedMsg = getByDotPath(data, messagePath);
             if (extractedMsg !== undefined && extractedMsg !== null) {
                 message = typeof extractedMsg === 'object' ? JSON.stringify(extractedMsg) : String(extractedMsg);
             }
@@ -382,8 +509,9 @@ class UniversalAdapter extends BaseAdapter {
 
         // Transaction ID
         let transactionId;
-        if (this.metadata.transactionIdPath) {
-            const extractedTx = getByDotPath(data, this.metadata.transactionIdPath);
+        const transactionIdPath = this._operationValue(operation, 'transactionIdPath');
+        if (transactionIdPath) {
+            const extractedTx = getByDotPath(data, transactionIdPath);
             if (extractedTx !== undefined && extractedTx !== null) {
                 transactionId = String(extractedTx);
             }

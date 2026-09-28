@@ -10,6 +10,8 @@ const procurementService = require('../services/procurement.service')
 const mongoose = require('mongoose')
 const { decryptFulfillment } = require('../utils/fulfillment')
 const { decryptSecret, isEncrypted } = require('../utils/crypto')
+const ServiceIdentity = require('../models/ServiceIdentity')
+const broadbandReadiness = require('../services/broadbandReadiness.service')
 
 const getSelectedProviderAdapter = selection => providerService.getAdapterInstance(
     selection.provider,
@@ -65,7 +67,8 @@ const purchaseAirtime = async (req, res) => {
         // Find the service/identity by code (case-insensitive)
         let service = await Service.findOne({ 
             code: { $regex: new RegExp(`^${finalNetwork}$`, 'i') }, 
-            category: 'airtime' 
+            category: 'airtime',
+            status: true
         }).populate('identityId');
 
         // Fallback: If not found by code, check if finalNetwork is a ServiceIdentity slug
@@ -77,7 +80,8 @@ const purchaseAirtime = async (req, res) => {
                 ]
             });
             if (identity) {
-                service = await Service.findOne({ identityId: identity._id }).populate('identityId');
+                service = await Service.findOne({ identityId: identity._id, category: 'airtime', status: true })
+                    .populate('identityId');
             }
         }
         if (!service) throw new Error('Service provider configuration not found');
@@ -135,7 +139,9 @@ const purchaseData = async (req, res) => {
     try {
         // Find the service variant by its internal code (SKU) - Case-insensitive lookup
         const service = await Service.findOne({ 
-            code: { $regex: new RegExp(`^${variation_code}$`, 'i') } 
+            code: { $regex: new RegExp(`^${variation_code}$`, 'i') },
+            category: 'data',
+            status: true
         }).populate('identityId');
         if (!service) throw new Error('Service provider configuration not found');
 
@@ -197,9 +203,52 @@ const getIdentitiesByCategory = async (req, res) => {
             .populate('typeId', 'name slug')
             .sort({ name: 1 });
 
+        if (broadbandReadiness.isBroadbandType(typeDoc)) {
+            const readyIdentities = [];
+            for (const identity of identities) {
+                const identityCheck = await broadbandReadiness.inspectIdentity(identity);
+                if (!identityCheck.ready) continue;
+                const services = await Service.find({
+                    identityId: identity._id,
+                    category: 'broadband',
+                    status: true
+                });
+                if (services.length === 0
+                    || (identity.purchaseMode === 'amount' && services.length !== 1)) continue;
+                const serviceChecks = await Promise.all(
+                    services.map(service => broadbandReadiness.inspectService(identity, service))
+                );
+                if (serviceChecks.some(check => !check.ready)) continue;
+
+                const policyObject = value => value?.toObject ? value.toObject() : value || null;
+                const safeReference = value => value ? {
+                    id: value._id || value,
+                    ...(value.name ? { name: value.name } : {}),
+                    ...(value.slug ? { slug: value.slug } : {}),
+                    ...(value.logoUrl ? { logoUrl: value.logoUrl } : {})
+                } : null;
+                readyIdentities.push({
+                    serviceIdentityId: identity._id,
+                    name: identity.name,
+                    slug: identity.slug,
+                    purchaseMode: identity.purchaseMode,
+                    identifierPolicy: policyObject(identity.identifierPolicy),
+                    verificationPolicy: policyObject(identity.verificationPolicy),
+                    amountPolicy: policyObject(identity.amountPolicy),
+                    brand: safeReference(identity.brandId),
+                    type: safeReference(identity.typeId)
+                });
+            }
+            return sendResponse(res, { success: true, data: readyIdentities });
+        }
+
         return sendResponse(res, { success: true, data: identities });
     } catch (err) {
-        return sendResponse(res, { status: 500, success: false, message: 'Error fetching service identities', error: err.message });
+        return sendResponse(res, {
+            status: 503,
+            success: false,
+            message: 'Service catalogue is temporarily unavailable'
+        });
     }
 }
 
@@ -211,19 +260,19 @@ const getPlans = async (req, res) => {
         const { network } = req.params; // network is the identityId or identity slug
         if (!network) return sendResponse(res, { status: 400, success: false, message: 'Identity identifier required' });
 
-        // Find by identityId or identity slug
-        const query = mongoose.Types.ObjectId.isValid(network)
-            ? { identityId: network, status: true }
-            : { status: true }; // If slug, we might need a more complex lookup
-
-        // For now, let's look up the identity first if it's a slug
-        let identityId = network;
-        if (!mongoose.Types.ObjectId.isValid(network)) {
-            const ServiceIdentity = require('../models/ServiceIdentity');
-            const identity = await ServiceIdentity.findOne({ slug: network });
-            if (!identity) return sendResponse(res, { status: 404, success: false, message: 'Service family not found' });
-            identityId = identity._id;
+        const identity = mongoose.Types.ObjectId.isValid(network)
+            ? await ServiceIdentity.findById(network)
+            : await ServiceIdentity.findOne({ slug: network });
+        if (!identity) return sendResponse(res, { status: 404, success: false, message: 'Service family not found' });
+        if (await broadbandReadiness.isBroadbandIdentity(identity)) {
+            return sendResponse(res, {
+                status: 409,
+                success: false,
+                message: 'Broadband plans are available through the canonical identity plan endpoint',
+                data: { serviceIdentityId: identity._id }
+            });
         }
+        const identityId = identity._id;
 
         const plans = await Service.find({
             identityId,
@@ -285,7 +334,9 @@ const verifyMeter = async (req, res) => {
         const { billersCode, serviceID, type } = req.body;
         // Lookup service (case-insensitive)
         let service = await Service.findOne({ 
-            code: { $regex: new RegExp(`^${serviceID}$`, 'i') } 
+            code: { $regex: new RegExp(`^${serviceID}$`, 'i') },
+            category: 'electricity',
+            status: true
         }).populate('identityId');
 
         // Fallback: Check if serviceID is an identity slug
@@ -298,7 +349,8 @@ const verifyMeter = async (req, res) => {
                 ]
             });
             if (identity) {
-                service = await Service.findOne({ identityId: identity._id }).populate('identityId');
+                service = await Service.findOne({ identityId: identity._id, category: 'electricity', status: true })
+                    .populate('identityId');
             }
         }
 
@@ -318,14 +370,15 @@ const verifyMeter = async (req, res) => {
 const verifySmartcard = async (req, res) => {
     try {
         const { billersCode, serviceID, type } = req.body;
-        let service = await Service.findOne({ code: serviceID }).populate('identityId');
+        let service = await Service.findOne({ code: serviceID, category: 'tv', status: true }).populate('identityId');
 
         // Fallback
         if (!service) {
             const ServiceIdentity = require('../models/ServiceIdentity');
             const identity = await ServiceIdentity.findOne({ slug: String(serviceID).toLowerCase() });
             if (identity) {
-                service = await Service.findOne({ identityId: identity._id }).populate('identityId');
+                service = await Service.findOne({ identityId: identity._id, category: 'tv', status: true })
+                    .populate('identityId');
             }
         }
 
@@ -345,14 +398,15 @@ const verifySmartcard = async (req, res) => {
 const verifyExamProfile = async (req, res) => {
     try {
         const { billersCode, serviceID, type } = req.body;
-        let service = await Service.findOne({ code: serviceID }).populate('identityId');
+        let service = await Service.findOne({ code: serviceID, category: 'pin', status: true }).populate('identityId');
 
         // Fallback
         if (!service) {
             const ServiceIdentity = require('../models/ServiceIdentity');
             const identity = await ServiceIdentity.findOne({ slug: String(serviceID).toLowerCase() });
             if (identity) {
-                service = await Service.findOne({ identityId: identity._id }).populate('identityId');
+                service = await Service.findOne({ identityId: identity._id, category: 'pin', status: true })
+                    .populate('identityId');
             }
         }
 
@@ -388,14 +442,16 @@ const payElectricityBill = async (req, res) => {
         // Lookup the service (case-insensitive)
         let service = await Service.findOne({ 
             code: { $regex: new RegExp(`^${finalServiceID}$`, 'i') }, 
-            category: 'electricity' 
+            category: 'electricity',
+            status: true
         }).populate('identityId');
 
         // Fallback
         if (!service) {
             const identity = await ServiceIdentity.findOne({ slug: String(finalServiceID).toLowerCase() });
             if (identity) {
-                service = await Service.findOne({ identityId: identity._id }).populate('identityId');
+                service = await Service.findOne({ identityId: identity._id, category: 'electricity', status: true })
+                    .populate('identityId');
             }
         }
         if (!service) throw new Error('Service provider configuration not found');
@@ -443,14 +499,16 @@ const rechargeCable = async (req, res) => {
         // Lookup the package (variation_code) case-insensitively
         let service = await Service.findOne({ 
             code: { $regex: new RegExp(`^${variation_code}$`, 'i') }, 
-            category: 'tv' 
+            category: 'tv',
+            status: true
         }).populate('identityId');
 
         // Fallback to serviceID (identity)
         if (!service) {
             const identity = await ServiceIdentity.findOne({ slug: String(finalServiceID).toLowerCase() });
             if (identity) {
-                service = await Service.findOne({ identityId: identity._id }).populate('identityId');
+                service = await Service.findOne({ identityId: identity._id, category: 'tv', status: true })
+                    .populate('identityId');
             }
         }
         if (!service) throw new Error('Service provider configuration not found');
@@ -494,14 +552,16 @@ const purchaseExamPin = async (req, res) => {
         // Lookup (case-insensitive)
         let service = await Service.findOne({ 
             code: { $regex: new RegExp(`^${variation_code || serviceID}$`, 'i') }, 
-            category: 'pin' 
+            category: 'pin',
+            status: true
         }).populate('identityId');
 
         // Fallback
         if (!service) {
             const identity = await ServiceIdentity.findOne({ slug: String(serviceID || variation_code).toLowerCase() });
             if (identity) {
-                service = await Service.findOne({ identityId: identity._id }).populate('identityId');
+                service = await Service.findOne({ identityId: identity._id, category: 'pin', status: true })
+                    .populate('identityId');
             }
         }
         if (!service) throw new Error('Service provider configuration not found');
@@ -598,6 +658,157 @@ const getPurchasedPins = async (req, res) => {
     return sendResponse(res, { data: { pins: [...authoritativePins, ...legacyPins] } })
 }
 
+const getPlansByIdentityId = async (req, res) => {
+    try {
+        const { serviceIdentityId } = req.params;
+        if (!mongoose.Types.ObjectId.isValid(serviceIdentityId)) {
+            return sendResponse(res, { status: 400, success: false, message: 'Valid identity ID required' });
+        }
+
+        const identity = await ServiceIdentity.findOne({ _id: serviceIdentityId, status: true })
+            .populate('brandId', 'name logoUrl')
+            .populate('typeId', 'name slug aliases');
+
+        if (!identity) {
+            return sendResponse(res, { status: 404, success: false, message: 'Service identity not found' });
+        }
+
+        const isBroadband = await broadbandReadiness.isBroadbandIdentity(identity);
+        let broadbandIdentityCheck = null;
+        if (isBroadband) {
+            broadbandIdentityCheck = await broadbandReadiness.inspectIdentity(identity);
+            if (!broadbandIdentityCheck.ready) {
+                return sendResponse(res, {
+                    status: 409,
+                    success: false,
+                    message: 'Broadband service identity is not ready'
+                });
+            }
+        }
+
+        const services = await Service.find({ identityId: identity._id, status: true })
+            .sort({ price: 1, name: 1, _id: 1 });
+
+        if (isBroadband && identity.purchaseMode === 'amount') {
+            const amountServices = services.filter(service => service.category === 'broadband');
+            if (amountServices.length !== 1) {
+                return sendResponse(res, {
+                    status: 409,
+                    success: false,
+                    message: 'Broadband AMOUNT identity is not ready'
+                });
+            }
+            const readiness = await broadbandReadiness.inspectService(identity, amountServices[0]);
+            if (!readiness.ready) {
+                return sendResponse(res, {
+                    status: 409,
+                    success: false,
+                    message: 'Broadband AMOUNT identity is not ready'
+                });
+            }
+        }
+
+        const plans = (await Promise.all(services.map(async service => {
+            if (service.status === false) return null;
+            if (isBroadband) {
+                if (identity.purchaseMode !== 'plan' || service.category !== 'broadband') return null;
+                const hierarchyErrors = broadbandReadiness.hierarchyErrors({
+                    identity,
+                    service,
+                    ...broadbandIdentityCheck
+                });
+                if (hierarchyErrors.length) return null;
+            }
+            if (service.category === 'broadband'
+                && (!identity.purchaseMode || !identity.identifierPolicy || !identity.verificationPolicy)) {
+                return null;
+            }
+            const requiredOperations = service.category === 'broadband'
+                ? broadbandReadiness.requiredOperationsForIdentity(identity)
+                : [];
+            const offer = await procurementService.selectBestOffer(service._id, {
+                requiredOperations,
+                offerValidator: candidate => service.category !== 'broadband'
+                    || broadbandReadiness.offerErrors({ identity, service, offer: candidate }).length === 0
+            });
+            if (!offer) return null;
+            if (service.category === 'broadband'
+                && (!String(offer.providerCode || '').trim()
+                    || !String(offer.providerServiceCode || '').trim()
+                    || (offer.currency || 'NGN') !== 'NGN'
+                    || (identity.purchaseMode === 'amount' && offer.costMode !== 'dynamic')
+                    || (identity.purchaseMode === 'plan' && offer.costMode !== 'fixed'))) {
+                return null;
+            }
+
+            const isAmountMode = identity.purchaseMode === 'amount';
+            const pricing = isAmountMode
+                ? null
+                : await pricingService.resolvePricing(req.user || { role: 'all' }, service, offer);
+
+            return {
+                ...(isBroadband
+                    ? { planId: service._id, serviceIdentityId: identity._id }
+                    : { id: service._id, identityId: identity._id }),
+                code: service.code,
+                name: service.name,
+                category: service.category,
+                categoryId: service.categoryId,
+                typeId: service.typeId,
+                brandId: service.brandId,
+                inputSchema: service.inputSchema || {},
+                fulfillmentMode: service.fulfillmentMode,
+                price: {
+                    mode: identity.purchaseMode || null,
+                    currency: identity.amountPolicy?.currency || offer.currency || 'NGN',
+                    salePrice: pricing?.salePrice ?? null,
+                    referencePrice: pricing?.retailPrice ?? service.suggestedRetailPrice ?? null,
+                    savings: pricing?.savings ?? null,
+                    fixed: identity.purchaseMode === 'plan'
+                }
+            };
+        }))).filter(Boolean);
+
+        const policyObject = value => value?.toObject ? value.toObject() : value || null;
+        const populatedReference = reference => {
+            if (!reference) return null;
+            if (!reference.name) return { id: reference };
+            return {
+                id: reference._id,
+                name: reference.name,
+                ...(reference.slug ? { slug: reference.slug } : {}),
+                ...(reference.logoUrl ? { logoUrl: reference.logoUrl } : {})
+            };
+        };
+
+        return sendResponse(res, {
+            success: true,
+            data: {
+                identity: {
+                    ...(isBroadband
+                        ? { serviceIdentityId: identity._id }
+                        : { id: identity._id }),
+                    name: identity.name,
+                    slug: identity.slug,
+                    purchaseMode: identity.purchaseMode || null,
+                    identifierPolicy: policyObject(identity.identifierPolicy),
+                    verificationPolicy: policyObject(identity.verificationPolicy),
+                    amountPolicy: policyObject(identity.amountPolicy),
+                    brand: populatedReference(identity.brandId),
+                    type: populatedReference(identity.typeId)
+                },
+                plans
+            }
+        });
+    } catch (err) {
+        return sendResponse(res, {
+            status: 503,
+            success: false,
+            message: 'Service catalogue is temporarily unavailable'
+        });
+    }
+}
+
 const checkTransaction = async (req, res) => {
     const { refId } = req.body
     if (!refId) {
@@ -663,7 +874,16 @@ const checkTransaction = async (req, res) => {
             };
         }
 
-        const result = await purchaseService.resolveExistingTransaction(localTx._id, providerResult, { isRequery: true });
+        let result;
+        try {
+            result = await purchaseService.resolveExistingTransaction(localTx._id, providerResult, { isRequery: true });
+        } catch (error) {
+            if (localTx.type !== 'broadband') throw error;
+            result = await purchaseService._postDispatchFailureResult(localTx, error, {
+                preserveDispatchState: true,
+                knownResponse: providerResult
+            });
+        }
         if (result.status === 'pending') {
             return sendResponse(res, { status: 202, success: false, message: result.message, data: result.data });
         }
@@ -679,7 +899,11 @@ const checkTransaction = async (req, res) => {
             }
         })
     } catch (err) {
-        return sendResponse(res, { status: 500, success: false, message: 'Error checking transaction status', error: err.message })
+        return sendResponse(res, {
+            status: 503,
+            success: false,
+            message: 'We could not refresh this transaction status right now'
+        })
     }
 }
 
@@ -688,6 +912,7 @@ module.exports = {
     purchaseData,
     getIdentitiesByCategory,
     getPlans,
+    getPlansByIdentityId,
     payElectricityBill,
     verifyMeter,
     verifySmartcard,

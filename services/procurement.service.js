@@ -1,5 +1,6 @@
 const Service = require('../models/Service');
 const ProviderOffer = require('../models/ProviderOffer');
+const { supportsProviderOperation } = require('../adapters/providerAdapterRegistry');
 
 /**
  * Service responsible for selecting the best provider for a given service.
@@ -31,12 +32,13 @@ class ProcurementService {
      * @param {string|ObjectId} serviceId - The ID of the normalized service.
      * @returns {Promise<Object|null>} - The best ProviderOffer or null if none found.
      */
-    async selectBestOffer(serviceId) {
+    async selectBestOffer(serviceId, { requiredOperations = [], providerOfferId, offerValidator } = {}) {
         try {
             // Find active offers for this service, sorted by priority (highest first)
             const offers = await ProviderOffer.find({
                 serviceId,
-                status: true
+                status: true,
+                ...(providerOfferId ? { _id: providerOfferId } : {})
             })
             .populate('providerId')
             .sort({ priority: -1, _id: 1 });
@@ -46,7 +48,10 @@ class ProcurementService {
             }
 
             // Hardening: Filter out offers where the parent provider is NOT active
-            const validOffers = offers.filter(o => o.providerId && o.providerId.status === 'active');
+            const validOffers = offers.filter(o => o.providerId
+                && o.providerId.status === 'active'
+                && requiredOperations.every(operation => supportsProviderOperation(o.providerId, operation))
+                && (typeof offerValidator !== 'function' || offerValidator(o)));
 
             if (validOffers.length === 0) {
                 return null;

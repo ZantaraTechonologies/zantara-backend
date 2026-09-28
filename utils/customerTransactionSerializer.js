@@ -64,6 +64,7 @@ const SAFE_DETAILS_BY_TYPE = {
     cable: ['serviceID', 'billersCode', 'variation_code'],
     exam_pin: ['serviceID', 'variation_code', 'quantity', 'billersCode', 'productName'],
     pin: ['serviceID', 'variation_code', 'quantity', 'billersCode', 'productName'],
+    broadband: ['productName', 'identifierMasked', 'purchaseMode'],
     wallet_funding: [],
     funding: [],
     transfer_out: ['recipientName', 'recipientPhone', 'remarks'],
