@@ -69,6 +69,7 @@ app.use(morgan(isProduction ? 'combined' : 'dev'));
 app.use((req, res, next) => {
     if (process.env.MAINTENANCE_MODE === 'true' && req.path !== '/') {
         return res.status(503).json({ 
+            code: 'SYSTEM_MAINTENANCE',
             error: 'System Maintenance', 
             message: 'Zantara is currently undergoing a scheduled update. Please try again later.' 
         });
