@@ -8,7 +8,7 @@ const HTTPS_URL_RE = /^https:\/\/.+$/i;
  * Throws descriptive Error objects with a `field` property on failure.
  */
 const validateBrandingFields = (updates) => {
-    const { SUPPORT_EMAIL, SUPPORT_PHONE, SITE_URL, SITE_LOGO, SITE_NAME } = updates;
+    const { SUPPORT_EMAIL, SUPPORT_PHONE, SITE_URL, SITE_LOGO, SITE_NAME, BUSINESS_ADDRESS } = updates;
 
     if (SUPPORT_EMAIL !== undefined && SUPPORT_EMAIL !== '') {
         if (typeof SUPPORT_EMAIL !== 'string' || !EMAIL_RE.test(SUPPORT_EMAIL)) {
@@ -49,6 +49,12 @@ const validateBrandingFields = (updates) => {
             throw err;
         }
     }
+
+    if (BUSINESS_ADDRESS !== undefined && BUSINESS_ADDRESS.length > 500) {
+        const err = new Error('BUSINESS_ADDRESS must be at most 500 characters');
+        err.field = 'BUSINESS_ADDRESS';
+        throw err;
+    }
 };
 
 exports.getBusinessSettings = async (req, res) => {
@@ -58,6 +64,7 @@ exports.getBusinessSettings = async (req, res) => {
         const supportPhone = await settingsService.getSetting('SUPPORT_PHONE', '');
         const siteUrl = await settingsService.getSetting('SITE_URL', '');
         const siteLogo = await settingsService.getSetting('SITE_LOGO', '');
+        const businessAddress = await settingsService.getSetting('BUSINESS_ADDRESS', '');
         const referralRate = await settingsService.getSetting('REFERRAL_COMMISSION_PERCENTAGE', 0.01);
         const appLockTimeout = await settingsService.getSetting('APP_LOCK_TIMEOUT_MINUTES', 3);
         const transferFeeConfig = await settingsService.getSetting('TRANSFER_FEE_CONFIG', {
@@ -78,6 +85,7 @@ exports.getBusinessSettings = async (req, res) => {
                 SUPPORT_PHONE: supportPhone,
                 SITE_URL: siteUrl,
                 SITE_LOGO: siteLogo,
+                BUSINESS_ADDRESS: businessAddress,
                 REFERRAL_RATE: referralRate,
                 APP_LOCK_TIMEOUT_MINUTES: Number(appLockTimeout),
                 TRANSFER_FEE_CONFIG: transferFeeConfig,
@@ -91,7 +99,7 @@ exports.getBusinessSettings = async (req, res) => {
 
 exports.updateBusinessSettings = async (req, res) => {
     try {
-        const { SITE_NAME, SUPPORT_EMAIL, SUPPORT_PHONE, SITE_URL, SITE_LOGO, REFERRAL_RATE, APP_LOCK_TIMEOUT_MINUTES, TRANSFER_FEE_CONFIG, WITHDRAWAL_FEE_CONFIG } = req.body;
+        const { SITE_NAME, SUPPORT_EMAIL, SUPPORT_PHONE, SITE_URL, SITE_LOGO, BUSINESS_ADDRESS, REFERRAL_RATE, APP_LOCK_TIMEOUT_MINUTES, TRANSFER_FEE_CONFIG, WITHDRAWAL_FEE_CONFIG } = req.body;
 
         const rawUpdates = {};
         if (SITE_NAME !== undefined) rawUpdates.SITE_NAME = String(SITE_NAME).trim();
@@ -99,6 +107,7 @@ exports.updateBusinessSettings = async (req, res) => {
         if (SUPPORT_PHONE !== undefined) rawUpdates.SUPPORT_PHONE = String(SUPPORT_PHONE).trim();
         if (SITE_URL !== undefined) rawUpdates.SITE_URL = String(SITE_URL).trim();
         if (SITE_LOGO !== undefined) rawUpdates.SITE_LOGO = String(SITE_LOGO).trim();
+        if (BUSINESS_ADDRESS !== undefined) rawUpdates.BUSINESS_ADDRESS = String(BUSINESS_ADDRESS).trim();
 
         validateBrandingFields(rawUpdates);
 

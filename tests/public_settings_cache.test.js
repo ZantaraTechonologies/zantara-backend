@@ -18,7 +18,8 @@ const PUBLIC_KEYS = [
     'SITE_URL',
     'SITE_LOGO',
     'SUPPORT_EMAIL',
-    'SUPPORT_PHONE'
+    'SUPPORT_PHONE',
+    'BUSINESS_ADDRESS'
 ];
 
 const originalMethods = {
@@ -34,7 +35,8 @@ const persisted = new Map([
     ['SITE_URL', 'https://old.example.com'],
     ['SITE_LOGO', 'https://old.example.com/logo.png'],
     ['SUPPORT_EMAIL', 'old@example.com'],
-    ['SUPPORT_PHONE', '+234 800 000 0000']
+    ['SUPPORT_PHONE', '+234 800 000 0000'],
+    ['BUSINESS_ADDRESS', 'Old address']
 ]);
 
 let findCalls = 0;
@@ -111,18 +113,36 @@ async function run() {
             SITE_URL: 'https://new.example.com',
             SITE_LOGO: 'https://new.example.com/logo.png',
             SUPPORT_EMAIL: 'support@new.example.com',
-            SUPPORT_PHONE: '+234 811 111 1111'
+            SUPPORT_PHONE: '+234 811 111 1111',
+            BUSINESS_ADDRESS: '12 Example Street\nLagos, Nigeria'
         };
 
-        await test('business admin update persists all five public settings', async () => {
+        await test('business admin update trims and persists all six public settings', async () => {
             const res = makeRes();
-            await adminSettingController.updateBusinessSettings({ body: updates }, res);
+            await adminSettingController.updateBusinessSettings({
+                body: {
+                    ...updates,
+                    BUSINESS_ADDRESS: `  ${updates.BUSINESS_ADDRESS}  `
+                }
+            }, res);
 
             assert.strictEqual(res.statusCode, 200);
             assert.strictEqual(res.body.success, true);
             for (const key of PUBLIC_KEYS) {
                 assert.strictEqual(persisted.get(key), updates[key], `${key} was not persisted`);
             }
+        });
+
+        await test('business address rejects values longer than 500 characters', async () => {
+            const res = makeRes();
+            await adminSettingController.updateBusinessSettings({
+                body: { BUSINESS_ADDRESS: 'a'.repeat(501) }
+            }, res);
+
+            assert.strictEqual(res.statusCode, 400);
+            assert.strictEqual(res.body.success, false);
+            assert.strictEqual(res.body.field, 'BUSINESS_ADDRESS');
+            assert.strictEqual(persisted.get('BUSINESS_ADDRESS'), updates.BUSINESS_ADDRESS);
         });
 
         await test('business admin update refreshes stale cached values', async () => {
@@ -155,7 +175,8 @@ async function run() {
                 SITE_URL: 'https://generic.example.com',
                 SITE_LOGO: 'https://generic.example.com/logo.png',
                 SUPPORT_EMAIL: 'support@generic.example.com',
-                SUPPORT_PHONE: '+234 822 222 2222'
+                SUPPORT_PHONE: '+234 822 222 2222',
+                BUSINESS_ADDRESS: '34 Generic Avenue\nAbuja, Nigeria'
             };
 
             for (const [key, value] of Object.entries(genericUpdates)) {
@@ -176,6 +197,15 @@ async function run() {
             }
 
             assert.strictEqual(genericServiceCalls, PUBLIC_KEYS.length, 'a public key bypassed settingsService.updateSetting');
+        });
+
+        await test('business address can be cleared', async () => {
+            const res = makeRes();
+            await adminSettingController.updateBusinessSettings({ body: { BUSINESS_ADDRESS: '   ' } }, res);
+
+            assert.strictEqual(res.statusCode, 200);
+            assert.strictEqual(persisted.get('BUSINESS_ADDRESS'), '');
+            assert.strictEqual(await settingsService.getSetting('BUSINESS_ADDRESS'), '');
         });
     } finally {
         Setting.find = originalMethods.find;

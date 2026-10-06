@@ -11,7 +11,8 @@ const CACHED_PUBLIC_SETTING_KEYS = new Set([
     'SITE_URL',
     'SITE_LOGO',
     'SUPPORT_EMAIL',
-    'SUPPORT_PHONE'
+    'SUPPORT_PHONE',
+    'BUSINESS_ADDRESS'
 ]);
 
 const getFilteredTransactions = async (req, res) => {

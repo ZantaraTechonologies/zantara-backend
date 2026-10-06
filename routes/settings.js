@@ -13,6 +13,7 @@ router.get('/public', async (req, res) => {
         const supportPhone = await settingsService.getSetting('SUPPORT_PHONE', '');
         const siteUrl = await settingsService.getSetting('SITE_URL', '');
         const siteLogo = await settingsService.getSetting('SITE_LOGO', '');
+        const businessAddress = await settingsService.getSetting('BUSINESS_ADDRESS', '');
         const appLockTimeout = await settingsService.getSetting('APP_LOCK_TIMEOUT_MINUTES', 3);
         const transferFeeConfig = await settingsService.getSetting('TRANSFER_FEE_CONFIG', {
             type: 'tiered',
@@ -32,6 +33,7 @@ router.get('/public', async (req, res) => {
                 SUPPORT_PHONE: supportPhone || undefined,
                 SITE_URL: siteUrl || undefined,
                 SITE_LOGO: siteLogo || undefined,
+                BUSINESS_ADDRESS: businessAddress || undefined,
                 APP_LOCK_TIMEOUT_MINUTES: Number(appLockTimeout),
                 TRANSFER_FEE_CONFIG: transferFeeConfig,
                 WITHDRAWAL_FEE_CONFIG: withdrawalFeeConfig
