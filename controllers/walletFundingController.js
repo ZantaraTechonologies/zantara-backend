@@ -100,10 +100,15 @@ const verifyFunding = async (req, res) => {
             status: result.status,
             type: row.type,
             reference,
-            amount: result.amount
+            amount: result.amount,
+            ...(result.deferred !== undefined ? { deferred: result.deferred } : {}),
+            ...(result.message ? { message: result.message } : {})
         });
     } catch (e) {
         console.error('Verify logic error:', e.message);
+        if (e.code === 'PUBLIC_SHAREHOLDING_HOLD') {
+            return res.status(503).json({ status: 'unavailable', code: e.code, message: e.message });
+        }
         return res.status(500).json({ status: 'error', message: e.message });
     }
 };

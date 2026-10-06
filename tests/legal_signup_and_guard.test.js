@@ -807,6 +807,7 @@ function test(name, fn) {
     const servicesRouter = require('../routes/services');
     const walletRouter = require('../routes/wallet');
     const investmentRouter = require('../routes/investment');
+    const requirePublicShareholdingAccess = require('../middlewares/requirePublicShareholdingAccess');
     const withdrawalRouter = require('../routes/withdrawal');
 
     const layersFor = (router, path) => {
@@ -865,7 +866,10 @@ function test(name, fn) {
     test('G6. guarded: POST /investment/buy,exit,reinvest,redeem,withdraw', () => {
         for (const path of ['/buy', '/exit', '/reinvest', '/redeem', '/withdraw']) {
             const h = layersFor(investmentRouter, path);
-            assert.ok(h[0] === verifyJWT && h[1] === requireLegalCompliance, `${path} mis-wired`);
+            assert.ok(
+                h[0] === verifyJWT && h[1] === requirePublicShareholdingAccess && h[2] === requireLegalCompliance,
+                `${path} mis-wired`
+            );
         }
     });
     test('G7. guarded: POST /withdrawal (root)', () => {
@@ -1119,7 +1123,10 @@ function test(name, fn) {
         test('R14. dedicated investment routes remain guarded (/buy, /exit, /reinvest, /redeem, /withdraw)', () => {
             for (const path of ['/buy', '/exit', '/reinvest', '/redeem', '/withdraw']) {
                 const h = layersFor(investmentRouter, path);
-                assert.ok(h && h[0] === verifyJWT && h[1] === requireLegalCompliance, `${path} not guarded`);
+                assert.ok(
+                    h && h[0] === verifyJWT && h[1] === requirePublicShareholdingAccess && h[2] === requireLegalCompliance,
+                    `${path} not guarded`
+                );
             }
         });
     }

@@ -51,8 +51,8 @@ const runDividendPayout = async () => {
     const settings = await getInvestmentSettings();
 
     if (!settings.investmentEnabled) {
-        console.log('[DividendCron] Skipped: Investment feature is disabled.');
-        return { success: false, reason: 'Investment disabled' };
+        console.log('[DividendCron] Skipped: Zantara share purchases are disabled.');
+        return { success: false, reason: 'Zantara share purchases are disabled' };
     }
 
     // 1. Get last month's date range (Production Rule: March in April, April in May)
@@ -95,7 +95,7 @@ const runDividendPayout = async () => {
     // never exceed the configured percentage of realized profit.
     const profit = parseInvestmentMoney(totalNetProfit, { label: 'Net profit' });
     const allocationPercent = parsePercentage(settings.investorAllocationPercent, {
-        label: 'Investor allocation percent',
+        label: 'Shareholder allocation percent',
         allowHundred: true
     });
     const allocationBasisPoints = Math.round(allocationPercent * 100);
@@ -176,8 +176,8 @@ const runDividendPayout = async () => {
         // Notify all shareholders (Fire-and-forget push)
         for (const tx of txDocs) {
             notificationService.sendInApp(tx.userId, {
-                title: 'Dividend Paid! 📈',
-                message: `Your monthly dividend of ₦${tx.amount.toLocaleString()} for ${month} has been credited to your investment wallet.`,
+                title: 'Shareholder Dividend Credited',
+                message: `Your shareholder dividend of ₦${tx.amount.toLocaleString()} for ${month} has been credited to your Dividend Balance.`,
                 type: 'investment',
                 metadata: { transactionId: tx.transactionId }
             }).catch(err => console.error(`[DividendCron] Notification failed for ${tx.userId}:`, err.message));

@@ -227,13 +227,15 @@ function installMocks() {
         refId,
         isWalletPayment,
         session,
-        sharePriceOverride
+        sharePriceOverride,
+        options = {}
     ) => {
         assert.ok(session, 'share fulfillment must use the settlement transaction session');
         const existing = [...fulfillments, ...session.stagedFulfillments].find(item => item.refId === refId);
         if (existing) return { success: true, message: 'Already processed' };
         session.stagedFulfillments.push({
-            userId: String(userId), qty, refId, isWalletPayment, sharePriceOverride
+            userId: String(userId), qty, refId, isWalletPayment, sharePriceOverride,
+            bypassPublicShareholdingHold: options.bypassPublicShareholdingHold
         });
         return { success: true, qtyPurchased: qty, sharesOwned: qty };
     };
@@ -516,6 +518,7 @@ async function runAdminSettlementTests() {
             assert.equal(fulfillments[0].qty, 2);
             assert.equal(fulfillments[0].sharePriceOverride, 8000);
             assert.equal(fulfillments[0].isWalletPayment, false);
+            assert.equal(fulfillments[0].bypassPublicShareholdingHold, true);
             assert.equal(current('REF-INV1').status, 'success');
             assert.equal(audits.length, 0, 'investment fulfillment must not create a funding audit');
         });
@@ -552,6 +555,33 @@ async function runAdminSettlementTests() {
             );
             assert.equal(current('REF-INV3').status, 'reconciliation_required');
             assert.equal(fulfillments.length, 0);
+            assert.equal(sessions[0].aborted, true);
+        });
+
+        await test('C4. Disabled share purchases quarantine a paid settlement for reconciliation', async () => {
+            reset();
+            addRecord('REF-INV4', {
+                type: 'investment_buy',
+                amountKobo: 1600000,
+                confirmedAmountKobo: 1600000,
+                sharePrice: 8000
+            });
+            const fulfillSharePurchase = investmentService.fulfillSharePurchase;
+            investmentService.fulfillSharePurchase = async () => {
+                throw new Error('Zantara share purchases are currently disabled');
+            };
+
+            try {
+                await assert.rejects(
+                    paymentGatewayService.adminSettleProcessing({ refId: 'REF-INV4' }),
+                    /share purchases are currently disabled/
+                );
+            } finally {
+                investmentService.fulfillSharePurchase = fulfillSharePurchase;
+            }
+
+            assert.equal(current('REF-INV4').status, 'reconciliation_required');
+            assert.match(current('REF-INV4').reconciliationReason, /share purchases are currently disabled/);
             assert.equal(sessions[0].aborted, true);
         });
 

@@ -1,5 +1,7 @@
 'use strict';
 
+process.env.PUBLIC_SHAREHOLDING_KYC_HOLD = 'false';
+
 const assert = require('assert');
 const mongoose = require('mongoose');
 
@@ -278,6 +280,9 @@ function resetState(overrides = {}) {
         quotaVersions: new Map(),
         transactions: [],
         ledger: [],
+        notifications: [],
+        adminNotifications: [],
+        auditActions: [],
         sessions: [],
         versions: { user: 0, wallet: 0 },
         recordVersions: new Map(),
@@ -456,9 +461,16 @@ function resetState(overrides = {}) {
         return quota ? clone(quota) : null;
     });
 
-    notificationService.sendInApp = async () => ({ _id: 'notification-1' });
-    legacyNotificationService.notifySuperAdmins = async () => {};
-    auditController.logAction = async () => {};
+    notificationService.sendInApp = async (userId, content, eventKey) => {
+        state.notifications.push({ userId, content: clone(content), eventKey });
+        return { _id: 'notification-1' };
+    };
+    legacyNotificationService.notifySuperAdmins = async (subject, html) => {
+        state.adminNotifications.push({ subject, html });
+    };
+    auditController.logAction = async (...args) => {
+        state.auditActions.push(clone(args));
+    };
 }
 
 function seedWithdrawal(overrides = {}) {
@@ -810,6 +822,38 @@ async function run() {
         }
         assert.strictEqual(state.commits, 1);
         assert.strictEqual(state.aborts, 1);
+    });
+
+    await test('R21a approved referral bank payout preserves the withdrawal contract with a source-aware label', async () => {
+        const referral = seedWithdrawal({ source: 'referral', refId: 'REF_W-REQUEST-1' });
+        const response = await processWithdrawal(referral._id, 'approved');
+
+        assert.strictEqual(response.statusCode, 200);
+        assert.strictEqual(state.transactions.length, 1);
+        assert.strictEqual(state.transactions[0].type, 'dividend_withdrawal');
+        assert.match(state.transactions[0].transactionId, /^DIVW-/);
+        assert.strictEqual(state.transactions[0].service, 'Referral Commission Payout');
+        assert.strictEqual(state.transactions[0].details.bankName, 'Test Bank');
+        assert.strictEqual(state.notifications[0].content.title, 'Referral Commission Payout Approved');
+        assert.match(state.notifications[0].eventKey, /^referral_commission_payout_approved:/);
+        assert.strictEqual(state.auditActions[0][2], 'REFERRAL_COMMISSION_PAYOUT_APPROVE');
+        assert.match(state.auditActions[0][3], /^Referral Commission Payout ID:/);
+    });
+
+    await test('R21b approved dividend bank payout remains dividend_withdrawal with a DIVW transaction ID', async () => {
+        const dividend = seedWithdrawal({ source: 'dividend', refId: 'DIVW-REQUEST-1' });
+        const response = await processWithdrawal(dividend._id, 'approved');
+
+        assert.strictEqual(response.statusCode, 200);
+        assert.strictEqual(state.transactions.length, 1);
+        assert.strictEqual(state.transactions[0].type, 'dividend_withdrawal');
+        assert.match(state.transactions[0].transactionId, /^DIVW-/);
+        assert.strictEqual(state.transactions[0].service, 'Dividend Payout');
+        assert.strictEqual(state.transactions[0].details.bankName, 'Test Bank');
+        assert.strictEqual(state.notifications[0].content.title, 'Dividend Payout Approved');
+        assert.match(state.notifications[0].eventKey, /^dividend_withdrawal_approved:/);
+        assert.strictEqual(state.auditActions[0][2], 'DIVIDEND_WITHDRAW_APPROVE');
+        assert.match(state.auditActions[0][3], /^Dividend Payout ID:/);
     });
 
     await test('R22 malformed historical share exits cannot mint wallet funds or consume shares', async () => {

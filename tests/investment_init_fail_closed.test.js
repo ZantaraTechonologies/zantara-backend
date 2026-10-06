@@ -1,5 +1,7 @@
 'use strict';
 
+process.env.PUBLIC_SHAREHOLDING_KYC_HOLD = 'false';
+
 /**
  * CRIT FINAL GATE — Investment Initialization FAIL-CLOSED Tests
  *

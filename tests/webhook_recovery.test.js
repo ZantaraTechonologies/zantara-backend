@@ -1,3 +1,5 @@
+process.env.PUBLIC_SHAREHOLDING_KYC_HOLD = 'false';
+
 const assert = require('assert');
 const mongoose = require('mongoose');
 const crypto = require('crypto');

@@ -66,7 +66,7 @@ const redeemEarnings = async (req, res) => {
             service: 'Referral',
             amount: amountNum,
             status: 'success',
-            details: { message: 'Referral earnings redemption' }
+            details: { message: 'Referral commission transfer to main wallet' }
         }], { session });
 
         // 1. Debit Referral Balance
@@ -81,14 +81,14 @@ const redeemEarnings = async (req, res) => {
 
         const notificationService = require('../services/notification.service');
         await notificationService.sendInApp(userId, {
-            title: 'Earnings Redeemed',
-            message: `₦${amount.toLocaleString()} from your referral wallet has been added to your main balance.`,
+            title: 'Referral Commission Transfer Successful',
+            message: `₦${amount.toLocaleString()} from your Referral Commission Balance has been added to your main wallet.`,
             type: 'transaction'
         });
 
         res.json({ 
             success: true, 
-            message: 'Earnings redeemed successfully', 
+            message: 'Referral commissions transferred successfully',
             newBalance: user.referralBalance 
         });
     } catch (err) {

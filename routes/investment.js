@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { verifyJWT, checkRoles } = require('../middlewares/auth');
 const requireLegalCompliance = require('../middlewares/requireLegalCompliance');
+const requirePublicShareholdingAccess = require('../middlewares/requirePublicShareholdingAccess');
 const requireTransactionPin = require('../middlewares/requireTransactionPin');
 const { pinLimiter } = require('../middlewares/limiter');
 const {
@@ -24,13 +25,13 @@ const {
 } = require('../controllers/investmentController');
 
 // ─── User Routes (any logged-in user) ───────────────────────
-router.get('/summary',  verifyJWT, getInvestmentSummary);
-router.get('/history',  verifyJWT, getDividendHistory);
-router.post('/buy',     verifyJWT, requireLegalCompliance, pinLimiter, requireTransactionPin, buyShares);
-router.post('/exit',    verifyJWT, requireLegalCompliance, pinLimiter, requireTransactionPin, requestShareExit);
-router.post('/reinvest',verifyJWT, requireLegalCompliance, pinLimiter, requireTransactionPin, reinvestDividends);
-router.post('/redeem',  verifyJWT, requireLegalCompliance, pinLimiter, requireTransactionPin, redeemToMainWallet);
-router.post('/withdraw',verifyJWT, requireLegalCompliance, pinLimiter, requireTransactionPin, requestDividendWithdrawal);
+router.get('/summary',  verifyJWT, requirePublicShareholdingAccess, getInvestmentSummary);
+router.get('/history',  verifyJWT, requirePublicShareholdingAccess, getDividendHistory);
+router.post('/buy',     verifyJWT, requirePublicShareholdingAccess, requireLegalCompliance, pinLimiter, requireTransactionPin, buyShares);
+router.post('/exit',    verifyJWT, requirePublicShareholdingAccess, requireLegalCompliance, pinLimiter, requireTransactionPin, requestShareExit);
+router.post('/reinvest',verifyJWT, requirePublicShareholdingAccess, requireLegalCompliance, pinLimiter, requireTransactionPin, reinvestDividends);
+router.post('/redeem',  verifyJWT, requirePublicShareholdingAccess, requireLegalCompliance, pinLimiter, requireTransactionPin, redeemToMainWallet);
+router.post('/withdraw',verifyJWT, requirePublicShareholdingAccess, requireLegalCompliance, pinLimiter, requireTransactionPin, requestDividendWithdrawal);
 
 // ─── Admin Routes (superAdmin only) ─────────────────────────
 router.get('/admin/overview',     verifyJWT, checkRoles('superAdmin'), getShareholderOverview);

@@ -1,5 +1,7 @@
 'use strict';
 
+process.env.PUBLIC_SHAREHOLDING_KYC_HOLD = 'false';
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');

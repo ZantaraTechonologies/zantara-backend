@@ -12,6 +12,11 @@ const walletService = require('./wallet.service');
 const notificationService = require('./notification.service');
 const investmentService = require('./investment.service');
 const { parseInvestmentMoney } = require('../utils/investmentValidation');
+const {
+    assertPublicShareholdingAvailable,
+    isPublicShareholdingAvailable,
+    PUBLIC_SHAREHOLDING_HOLD_MESSAGE
+} = require('../config/publicShareholding');
 const { generatePaymentReference } = require('../utils/generateID');
 const { createWithIdentifierRetry } = require('../utils/identifierRetry');
 const { decryptSecret, encryptSecret, isEncrypted } = require('../utils/crypto');
@@ -264,6 +269,9 @@ class PaymentGatewayService {
             throw new Error('Minimum funding amount is ₦50.00');
         }
 
+        const txType = metadata?.type || 'funding';
+        if (txType === 'investment_buy') assertPublicShareholdingAvailable();
+
         let gateway = null;
 
         // 1. Explicit Gateway Selection
@@ -351,7 +359,6 @@ class PaymentGatewayService {
         // created and BEFORE the gateway is initialized. If the price cannot be
         // loaded, is missing, non-finite or <= 0, initialization is aborted so
         // the gateway never gets the chance to take the customer's money.
-        const txType = metadata?.type || 'funding';
         let sharePriceSnapshot = null;
         if (txType === 'investment_buy') {
             const invSettings = await investmentService.getInvestmentSettings();
@@ -369,13 +376,13 @@ class PaymentGatewayService {
                 throw configurationError;
             }
             if (amountKobo % sharePrice.kobo !== 0) {
-                const err = new Error('Investment amount must purchase a whole number of shares.');
+                const err = new Error('Share-purchase amount must purchase a whole number of shares.');
                 err.code = 'INVALID_INVESTMENT_AMOUNT';
                 throw err;
             }
             const qty = amountKobo / sharePrice.kobo;
             if (qty < invSettings.minSharesPerPurchase || qty > invSettings.maxSharesPerUser || qty > invSettings.totalSharesAvailable) {
-                const err = new Error('Investment amount is outside the permitted share limits.');
+                const err = new Error('Share-purchase amount is outside the permitted share limits.');
                 err.code = 'INVALID_INVESTMENT_AMOUNT';
                 throw err;
             }
@@ -383,12 +390,12 @@ class PaymentGatewayService {
             try {
                 sharesOwned = await investmentService.getAuthoritativeShareBalance(user._id || user.id);
             } catch (error) {
-                const err = new Error('Investment account share balance requires manual reconciliation.');
+                const err = new Error('Shareholding record requires share-balance reconciliation.');
                 err.code = 'INVALID_INVESTMENT_CONFIGURATION';
                 throw err;
             }
             if (sharesOwned + qty > invSettings.maxSharesPerUser) {
-                const err = new Error('Investment amount exceeds the permitted per-user share limit.');
+                const err = new Error('Share-purchase amount exceeds the permitted per-user share limit.');
                 err.code = 'INVALID_INVESTMENT_AMOUNT';
                 throw err;
             }
@@ -725,6 +732,51 @@ class PaymentGatewayService {
             return { success: false, status: transactionStatus.status, alreadyProcessed: true, credited: false };
         }
 
+        if (transactionStatus.type === 'investment_buy' &&
+            source !== 'admin_reconciliation' &&
+            !isPublicShareholdingAvailable()) {
+            try {
+                const deferred = await TransactionStatus.updateOne(
+                    { refId, status: 'pending' },
+                    {
+                        $set: {
+                            status: 'settlement_pending',
+                            ...evidence,
+                            settlementLeaseExpiresAt: new Date(0),
+                            lastAttempt: new Date(),
+                            reconciliationReason: PUBLIC_SHAREHOLDING_HOLD_MESSAGE
+                        },
+                        $unset: { settlementClaimToken: 1 }
+                    }
+                );
+                if (deferred.modifiedCount !== 1) {
+                    const latest = await TransactionStatus.findOne({ refId });
+                    return {
+                        success: latest?.status === 'success',
+                        status: latest?.status || 'pending',
+                        alreadyProcessed: true,
+                        credited: false
+                    };
+                }
+            } catch (error) {
+                if (error?.code === 11000) {
+                    await this._assertProviderTransactionOwner({
+                        provider: evidence.confirmedProvider,
+                        providerTransactionId: evidence.confirmedProviderRef,
+                        refId
+                    });
+                }
+                throw error;
+            }
+            return {
+                success: false,
+                status: 'settlement_pending',
+                credited: false,
+                deferred: true,
+                message: PUBLIC_SHAREHOLDING_HOLD_MESSAGE
+            };
+        }
+
         const claim = this._newSettlementClaim();
         let claimResult;
         try {
@@ -784,6 +836,10 @@ class PaymentGatewayService {
         try {
             transactionStatus = await TransactionStatus.findOne({ refId }).session(session);
             if (!transactionStatus) throw new Error(`TransactionStatus record '${refId}' not found`);
+            const bypassPublicShareholdingHold = source === 'admin_reconciliation';
+            if (transactionStatus.type === 'investment_buy' && !bypassPublicShareholdingHold) {
+                assertPublicShareholdingAvailable();
+            }
             if (!['processing', 'settlement_pending'].includes(transactionStatus.status)) {
                 throw new Error(`Cannot settle reference '${refId}': status is '${transactionStatus.status}'`);
             }
@@ -833,11 +889,17 @@ class PaymentGatewayService {
                 let fulfillment;
                 try {
                     fulfillment = await investmentService.fulfillSharePurchase(
-                        transactionStatus.userId, qty, refId, false, session, sharePrice
+                        transactionStatus.userId,
+                        qty,
+                        refId,
+                        false,
+                        session,
+                        sharePrice,
+                        { bypassPublicShareholdingHold }
                     );
                 } catch (error) {
                     if (error.code === 'SETTLEMENT_EVIDENCE_INVALID' ||
-                        /share limit|share supply|investment feature is currently disabled|audit does not reconcile/i.test(error.message || '')) {
+                        /share limit|share supply|share purchases are currently disabled|investment feature is currently disabled|audit does not reconcile/i.test(error.message || '')) {
                         error.code = 'SETTLEMENT_EVIDENCE_INVALID';
                     }
                     throw error;
@@ -1003,6 +1065,10 @@ class PaymentGatewayService {
                 skipped++;
                 continue;
             }
+            if (candidate.type === 'investment_buy' && !isPublicShareholdingAvailable()) {
+                skipped++;
+                continue;
+            }
             try {
                 const result = await this.adminSettleProcessing({ refId: candidate.refId, automatedRecovery: true });
                 if (result.settled) settled++;
@@ -1092,7 +1158,9 @@ class PaymentGatewayService {
             status: finalResult.status,
             type: transaction.type,
             reference,
-            amount: finalResult.amount
+            amount: finalResult.amount,
+            ...(finalResult.deferred !== undefined ? { deferred: finalResult.deferred } : {}),
+            ...(finalResult.message ? { message: finalResult.message } : {})
         };
     }
 

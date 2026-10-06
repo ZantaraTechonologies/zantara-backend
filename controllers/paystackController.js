@@ -48,6 +48,14 @@ const payment = async (req, res) => {
     } catch (err) {
         console.error('Paystack Error:', err.response?.data || err.message);
 
+        if (err.code === 'PUBLIC_SHAREHOLDING_HOLD') {
+            return res.status(503).json({
+                success: false,
+                code: err.code,
+                message: err.message
+            });
+        }
+
         if (err.code === 'PAYMENT_INITIALIZATION_AMBIGUOUS') {
             return res.status(202).json({
                 message: err.message,
@@ -87,9 +95,14 @@ const verifyTransaction = async (req, res) => {
         res.json({
             success: result.status === 'success',
             status: result.status,
-            type: result.type
+            type: result.type,
+            ...(result.deferred !== undefined ? { deferred: result.deferred } : {}),
+            ...(result.message ? { message: result.message } : {})
         });
     } catch (err) {
+        if (err.code === 'PUBLIC_SHAREHOLDING_HOLD') {
+            return res.status(503).json({ success: false, code: err.code, message: err.message });
+        }
         res.status(500).json({ error: err.message });
     }
 };

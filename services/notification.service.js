@@ -499,7 +499,7 @@ class NotificationService {
                 ? 'Shares Purchased Successfully'
                 : 'Wallet Funded Successfully';
             const message = isInvestment
-                ? 'Your purchase of platform shares has been confirmed. Welcome aboard!'
+                ? 'Your purchase of shares in Zantara Intelligent Systems Limited has been confirmed. You are now a shareholder of Zantara Intelligent Systems Limited.'
                 : buildFundingSuccessContent({ amount, method, reference, brand }).message;
             const emailHtml = isInvestment ? null : buildFundingSuccessContent({ amount, method, reference, brand }).emailHtml;
             const emailSubject = isInvestment ? null : 'Wallet Funded Successfully';

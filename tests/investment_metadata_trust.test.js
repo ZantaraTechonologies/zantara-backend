@@ -1,5 +1,7 @@
 'use strict';
 
+process.env.PUBLIC_SHAREHOLDING_KYC_HOLD = 'false';
+
 /**
  * Investment fulfillment trust-boundary tests. These exercise the public
  * finalizeFundingCredit path, including its token-owned transactional settle.

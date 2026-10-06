@@ -46,14 +46,14 @@ const parsePersistedMoney = (value, options) => {
 };
 
 const validateWithdrawalRecord = withdrawal => {
-    if (!withdrawal || !BALANCE_KEYS[withdrawal.source]) throw new Error('Invalid withdrawal source');
-    const amount = parsePersistedMoney(withdrawal.amount, { label: 'Withdrawal amount' });
-    const fee = parsePersistedMoney(withdrawal.feeCharged, { allowZero: true, label: 'Withdrawal fee' });
-    const net = parsePersistedMoney(withdrawal.netAmount, { label: 'Withdrawal net amount' });
-    parsePercentage(withdrawal.feePercent, { label: 'Withdrawal fee percent' });
-    if (amount.kobo !== fee.kobo + net.kobo) throw new Error('Withdrawal monetary fields do not reconcile');
+    if (!withdrawal || !BALANCE_KEYS[withdrawal.source]) throw new Error('Invalid payout source');
+    const amount = parsePersistedMoney(withdrawal.amount, { label: 'Payout amount' });
+    const fee = parsePersistedMoney(withdrawal.feeCharged, { allowZero: true, label: 'Payout fee' });
+    const net = parsePersistedMoney(withdrawal.netAmount, { label: 'Payout net amount' });
+    parsePercentage(withdrawal.feePercent, { label: 'Payout fee percent' });
+    if (amount.kobo !== fee.kobo + net.kobo) throw new Error('Payout monetary fields do not reconcile');
     if (withdrawal.reservationVersion !== 1 || withdrawal.reservedAmountKobo !== amount.kobo || withdrawal.reservedSource !== withdrawal.source) {
-        throw new Error('Withdrawal reservation proof is missing or invalid');
+        throw new Error('Payout reservation proof is missing or invalid');
     }
     return { amount, fee, net, balanceKey: BALANCE_KEYS[withdrawal.source] };
 };
@@ -86,7 +86,7 @@ const validateShareExitRecord = exitRequest => {
 
 /**
  * GET /api/investment/summary
- * Returns the user's full investment portfolio overview
+ * Returns the user's full shareholding overview
  */
 exports.getInvestmentSummary = async (req, res) => {
     try {
@@ -143,7 +143,7 @@ exports.getInvestmentSummary = async (req, res) => {
         });
     } catch (err) {
         console.error('getInvestmentSummary error:', err);
-        res.status(500).json({ message: 'Failed to load investment summary' });
+        res.status(500).json({ message: 'Failed to load shareholding summary' });
     }
 };
 
@@ -164,7 +164,7 @@ exports.buyShares = async (req, res) => {
     try {
         const userId = req.user.id;
         const settings = await investmentService.getInvestmentSettings(session);
-        if (!settings.investmentEnabled) throw Object.assign(new Error('Investment feature is currently disabled'), { statusCode: 403 });
+        if (!settings.investmentEnabled) throw Object.assign(new Error('Zantara share purchases are currently disabled'), { statusCode: 403 });
 
         // Min shares check
         if (qty < (settings.minSharesPerPurchase || 1))
@@ -182,15 +182,15 @@ exports.buyShares = async (req, res) => {
 
         // Notify user of successful share purchase
         await notificationService.sendInApp(userId, {
-            title: 'Investment Successful 📈',
-            message: `You have successfully purchased ${qty} share${qty > 1 ? 's' : ''} in Zantara. Welcome to the board!`,
+            title: 'Share Purchase Successful',
+            message: `You have successfully purchased ${qty} share${qty > 1 ? 's' : ''} in Zantara Intelligent Systems Limited. You are now a shareholder of Zantara Intelligent Systems Limited.`,
             type: 'investment',
             metadata: { sharesPurchased: qty, totalCost }
-        }).catch(error => console.error('Investment purchase notification failed:', error.message));
+        }).catch(error => console.error('Share purchase notification failed:', error.message));
 
         res.json({
             success: true,
-            message: `Successfully purchased ${qty} share${qty > 1 ? 's' : ''}`,
+            message: `Successfully purchased ${qty} share${qty > 1 ? 's' : ''} in Zantara Intelligent Systems Limited`,
             data: { sharesOwned: result.sharesOwned, totalCost, newWalletBalance: debit.balance }
         });
     } catch (err) {
@@ -205,7 +205,7 @@ exports.buyShares = async (req, res) => {
 
 /**
  * POST /api/investment/exit  { qty }
- * Request to sell shares back — creates a pending ShareExitRequest
+ * Submit a neutral Share Exit request and create a pending ShareExitRequest
  */
 exports.requestShareExit = async (req, res) => {
     let qty;
@@ -316,20 +316,20 @@ exports.reinvestDividends = async (req, res) => {
         const user = await User.findById(userId).session(session);
         const settings = await getSettings();
 
-        if (!settings.investmentEnabled) throw Object.assign(new Error('Investment feature is currently disabled'), { statusCode: 403 });
+        if (!settings.investmentEnabled) throw Object.assign(new Error('Zantara share purchases are currently disabled'), { statusCode: 403 });
         const sharePriceKobo = parseInvestmentMoney(settings.sharePrice, { label: 'Share price' }).kobo;
         const costKobo = qty * sharePriceKobo;
-        if (!Number.isSafeInteger(costKobo)) throw new Error('Reinvestment total exceeds safe monetary precision');
-        const feePercent = parsePercentage(settings.dividendReinvestFee, { label: 'dividend reinvest fee', allowHundred: true });
+        if (!Number.isSafeInteger(costKobo)) throw new Error('Additional share-purchase total exceeds safe monetary precision');
+        const feePercent = parsePercentage(settings.dividendReinvestFee, { label: 'additional share-purchase fee', allowHundred: true });
         const feeKobo = Math.round(costKobo * feePercent / 100);
         const totalCostKobo = costKobo + feeKobo;
-        if (!Number.isSafeInteger(totalCostKobo)) throw new Error('Reinvestment total exceeds safe monetary precision');
+        if (!Number.isSafeInteger(totalCostKobo)) throw new Error('Additional share-purchase total exceeds safe monetary precision');
         const cost = costKobo / 100;
         const fee = feeKobo / 100;
         const totalCost = totalCostKobo / 100;
 
         if (user.dividendBalance < totalCost)
-            throw Object.assign(new Error(`Insufficient dividend balance. Need ₦${totalCost.toLocaleString()}`), { statusCode: 400 });
+            throw Object.assign(new Error(`Insufficient Dividend Balance. Need ₦${totalCost.toLocaleString()}`), { statusCode: 400 });
         await investmentService.assertShareCapacity(user, qty, settings, session);
 
         user.dividendBalance -= totalCost;
@@ -350,11 +350,11 @@ exports.reinvestDividends = async (req, res) => {
         }], { session });
 
         await session.commitTransaction();
-        res.json({ success: true, message: `Reinvested into ${qty} share${qty > 1 ? 's' : ''}`, data: { sharesOwned: user.sharesOwned, dividendBalance: user.dividendBalance } });
+        res.json({ success: true, message: `${qty} additional share${qty > 1 ? 's' : ''} purchased with dividends`, data: { sharesOwned: user.sharesOwned, dividendBalance: user.dividendBalance } });
     } catch (err) {
         await session.abortTransaction();
         console.error('reinvestDividends error:', err);
-        res.status(err.statusCode || (isWriteConflict(err) ? 409 : 500)).json({ message: err.message || 'Reinvestment failed' });
+        res.status(err.statusCode || (isWriteConflict(err) ? 409 : 500)).json({ message: err.message || 'Additional share purchase with dividends failed' });
     } finally {
         session.endSession();
     }
@@ -380,7 +380,8 @@ exports.redeemToMainWallet = async (req, res) => {
         const userId = req.user.id;
         const settings = await getSettings();
         const balanceKey = BALANCE_KEYS[source];
-        const calculated = calculateFee(parsedAmount.kobo, settings.dividendRedeemFee, 'dividend redemption fee');
+        const balanceLabel = source === 'referral' ? 'Referral Commission Balance' : 'Dividend Balance';
+        const calculated = calculateFee(parsedAmount.kobo, settings.dividendRedeemFee, `${balanceLabel} transfer fee`);
         const amount = parsedAmount.naira;
         const fee = calculated.feeKobo / 100;
         const netAmount = calculated.netKobo / 100;
@@ -393,7 +394,7 @@ exports.redeemToMainWallet = async (req, res) => {
         );
         if (!user) {
             await session.abortTransaction();
-            return res.status(400).json({ message: `Insufficient ${source} balance` });
+            return res.status(400).json({ message: `Insufficient ${balanceLabel}` });
         }
         const credited = await walletService.credit(userId, netAmount, refId, `${source}_investment_redemption`, null, session);
 
@@ -416,7 +417,7 @@ exports.redeemToMainWallet = async (req, res) => {
     } catch (err) {
         await session.abortTransaction();
         console.error('redeemToMainWallet error:', err);
-        res.status(isWriteConflict(err) ? 409 : 500).json({ message: err.message || 'Redemption failed' });
+        res.status(isWriteConflict(err) ? 409 : 500).json({ message: err.message || 'Balance transfer failed' });
     } finally {
         session.endSession();
     }
@@ -428,8 +429,10 @@ exports.redeemToMainWallet = async (req, res) => {
  */
 exports.requestDividendWithdrawal = async (req, res) => {
     const { amount: rawAmount, bankName, accountNumber, accountName, source = 'dividend' } = req.body;
+    const payoutLabel = source === 'referral' ? 'Referral Commission Payout' : 'Dividend Payout';
+    const balanceLabel = source === 'referral' ? 'Referral Commission Balance' : 'Dividend Balance';
     if (!bankName || !accountNumber || !accountName) return res.status(400).json({ message: 'All fields are required' });
-    if (!BALANCE_KEYS[source]) return res.status(400).json({ message: 'Invalid withdrawal source' });
+    if (!BALANCE_KEYS[source]) return res.status(400).json({ message: 'Invalid payout source' });
 
     let amount;
     let settings;
@@ -446,7 +449,7 @@ exports.requestDividendWithdrawal = async (req, res) => {
     try {
         const userId = req.user.id;
         const balanceKey = BALANCE_KEYS[source];
-        const calculated = calculateFee(amount.kobo, settings.dividendWithdrawalFee, 'dividend withdrawal fee');
+        const calculated = calculateFee(amount.kobo, settings.dividendWithdrawalFee, `${payoutLabel} fee`);
         const feeCharged = calculated.feeKobo / 100;
         const netAmount = calculated.netKobo / 100;
         const normalizedAmount = amount.naira;
@@ -458,7 +461,7 @@ exports.requestDividendWithdrawal = async (req, res) => {
         );
         if (!user) {
             await session.abortTransaction();
-            return res.status(400).json({ message: `Insufficient ${source} balance` });
+            return res.status(400).json({ message: `Insufficient ${balanceLabel}` });
         }
 
         const withdrawal = await InvestmentWithdrawal.create([{
@@ -480,13 +483,13 @@ exports.requestDividendWithdrawal = async (req, res) => {
         await session.commitTransaction();
         res.json({
             success: true,
-            message: 'Withdrawal request submitted. Processing within 1-2 business days.',
+            message: `${payoutLabel} request submitted. Processing within 1-2 business days.`,
             data: { amount: normalizedAmount, feeCharged, netAmount, refId: withdrawal[0].refId }
         });
     } catch (err) {
         if (session.inTransaction()) await session.abortTransaction();
         console.error('requestDividendWithdrawal error:', err);
-        res.status(isWriteConflict(err) ? 409 : 500).json({ message: err.message || 'Withdrawal request failed' });
+        res.status(isWriteConflict(err) ? 409 : 500).json({ message: err.message || `${payoutLabel} request failed` });
     } finally {
         session.endSession();
     }
@@ -623,7 +626,7 @@ exports.processShareExit = async (req, res) => {
         user = await User.findById(exitRequest.userId).session(session);
         if (!user || user.frozenShares < validated.shares || user.sharesOwned < validated.shares) {
             await session.abortTransaction();
-            return res.status(422).json({ message: 'Exit request reservation no longer reconciles with the user portfolio' });
+            return res.status(422).json({ message: 'Exit request reservation no longer reconciles with the user share balance' });
         }
         await shareExitQuotaService.assertReserved({ periodKey: validated.quotaPeriodKey, session });
 
@@ -703,7 +706,7 @@ exports.getPendingDividendWithdrawals = async (req, res) => {
             .populate('userId', 'name email phone').sort({ createdAt: -1 });
         res.json({ success: true, data: withdrawals });
     } catch (err) {
-        res.status(500).json({ message: 'Failed to load withdrawal requests' });
+        res.status(500).json({ message: 'Failed to load payout requests' });
     }
 };
 
@@ -727,7 +730,7 @@ exports.processDividendWithdrawal = async (req, res) => {
         );
         if (!withdrawal) {
             await session.abortTransaction();
-            return res.status(409).json({ message: 'Withdrawal not found or already processed' });
+            return res.status(409).json({ message: 'Payout request not found or already processed' });
         }
 
         let validated;
@@ -740,12 +743,12 @@ exports.processDividendWithdrawal = async (req, res) => {
                 { $set: { status: 'manual_review', adminNote: `Automatic quarantine: ${error.message}` } },
                 { new: true }
             );
-            return res.status(422).json({ message: `Withdrawal requires manual review: ${error.message}` });
+            return res.status(422).json({ message: `Payout request requires manual review: ${error.message}` });
         }
 
         if (action === 'rejected') {
             const user = await User.findById(withdrawal.userId).session(session);
-            if (!user) throw new Error('Withdrawal owner not found');
+            if (!user) throw new Error('Payout request owner not found');
             user[validated.balanceKey] = Number(user[validated.balanceKey] || 0) + validated.amount.naira;
             await user.save({ session });
         }
@@ -755,25 +758,28 @@ exports.processDividendWithdrawal = async (req, res) => {
         await withdrawal.save({ session });
 
         if (action === 'approved') {
+            const isReferralPayout = withdrawal.source === 'referral';
             await Transaction.create([{
                 userId: withdrawal.userId,
                 transactionId: generateRef('DIVW'),
                 type: 'dividend_withdrawal',
+                service: isReferralPayout ? 'Referral Commission Payout' : 'Dividend Payout',
                 amount: withdrawal.netAmount,
                 status: 'success',
                 details: { grossAmount: withdrawal.amount, feeCharged: withdrawal.feeCharged, refId: withdrawal.refId, bankName: withdrawal.bankName }
             }], { session });
         }
 
+        const payoutLabel = withdrawal.source === 'referral' ? 'Referral Commission Payout' : 'Dividend Payout';
         statusMsg = action === 'approved'
-            ? `Your dividend withdrawal of ${formatNairaAmount(withdrawal.amount)} has been approved.`
-            : `Your dividend withdrawal of ${formatNairaAmount(withdrawal.amount)} was rejected. ${adminNote ? 'Reason: ' + adminNote : ''}`;
+            ? `Your ${payoutLabel} of ${formatNairaAmount(withdrawal.amount)} has been approved.`
+            : `Your ${payoutLabel} of ${formatNairaAmount(withdrawal.amount)} was rejected. ${adminNote ? 'Reason: ' + adminNote : ''}`;
 
         await session.commitTransaction();
     } catch (err) {
         if (session.inTransaction()) await session.abortTransaction();
         console.error('processDividendWithdrawal error:', err);
-        return res.status(isWriteConflict(err) ? 409 : 500).json({ message: 'Failed to process withdrawal' });
+        return res.status(isWriteConflict(err) ? 409 : 500).json({ message: 'Failed to process payout request' });
     } finally {
         session.endSession();
     }
@@ -781,30 +787,34 @@ exports.processDividendWithdrawal = async (req, res) => {
     const { action, adminNote } = req.body;
     const { logAction } = require('./auditController');
     const { notifySuperAdmins } = require('../services/notificationService');
+    const isReferralPayout = withdrawal.source === 'referral';
+    const payoutLabel = isReferralPayout ? 'Referral Commission Payout' : 'Dividend Payout';
     await logAction(
         req.user.id,
         req.user.name,
-        action === 'approved' ? 'DIVIDEND_WITHDRAW_APPROVE' : 'DIVIDEND_WITHDRAW_REJECT',
-        `Withdrawal ID: ${req.params.id} (User ID: ${withdrawal.userId})`,
+        isReferralPayout
+            ? `REFERRAL_COMMISSION_PAYOUT_${action === 'approved' ? 'APPROVE' : 'REJECT'}`
+            : `DIVIDEND_WITHDRAW_${action === 'approved' ? 'APPROVE' : 'REJECT'}`,
+        `${payoutLabel} ID: ${req.params.id} (User ID: ${withdrawal.userId})`,
         { amount: withdrawal.amount, action, adminNote },
         'success',
         req
     );
     if (action === 'approved' && withdrawal.amount >= 50000) {
         await notifySuperAdmins(
-            `Large Investment Withdrawal Approved: ${formatNairaAmount(withdrawal.amount)}`,
-            `<p>Admin <b>${req.user.name}</b> approved a large investment withdrawal of <b>${formatNairaAmount(withdrawal.amount)}</b> for User ${withdrawal.userId}.</p>`
+            `Large ${payoutLabel} Approved: ${formatNairaAmount(withdrawal.amount)}`,
+            `<p>Admin <b>${req.user.name}</b> approved a large ${payoutLabel.toLowerCase()} of <b>${formatNairaAmount(withdrawal.amount)}</b> for User ${withdrawal.userId}.</p>`
         ).catch(error => console.error('Super admin notification failed:', error.message));
     }
     await notificationService.sendInApp(withdrawal.userId, {
-        title: `Withdrawal ${action.charAt(0).toUpperCase() + action.slice(1)}`,
+        title: `${payoutLabel} ${action.charAt(0).toUpperCase() + action.slice(1)}`,
         message: statusMsg,
         type: 'investment',
         metadata: { withdrawalId: withdrawal._id }
-    }, `dividend_withdrawal_${action}:${withdrawal._id}`).catch(error => {
-        console.error('Investment withdrawal notification failed:', error.message);
+    }, `${isReferralPayout ? 'referral_commission_payout' : 'dividend_withdrawal'}_${action}:${withdrawal._id}`).catch(error => {
+        console.error(`${payoutLabel} notification failed:`, error.message);
     });
-    return res.json({ success: true, message: `Withdrawal ${action}` });
+    return res.json({ success: true, message: `${payoutLabel} ${action}` });
 };
 
 exports.getInvestmentSettings = async (req, res) => {
@@ -812,7 +822,7 @@ exports.getInvestmentSettings = async (req, res) => {
         const settings = await getSettings();
         res.json({ success: true, data: settings });
     } catch (err) {
-        res.status(500).json({ message: 'Failed to load settings' });
+        res.status(500).json({ message: 'Failed to load shareholding settings' });
     }
 };
 
@@ -826,12 +836,12 @@ exports.updateInvestmentSettings = async (req, res) => {
                 return { updateOne: { filter: { key }, update: { $set: { key, value: normalized } }, upsert: true } };
             });
 
-        if (ops.length === 0) return res.status(400).json({ message: 'No valid settings provided' });
+        if (ops.length === 0) return res.status(400).json({ message: 'No valid shareholding settings provided' });
         await Setting.bulkWrite(ops);
-        res.json({ success: true, message: 'Investment settings updated' });
+        res.json({ success: true, message: 'Shareholding settings updated' });
     } catch (err) {
         console.error('updateInvestmentSettings error:', err);
-        res.status(400).json({ message: err.message || 'Failed to update settings' });
+        res.status(400).json({ message: err.message || 'Failed to update shareholding settings' });
     }
 };
 
@@ -842,12 +852,12 @@ exports.triggerManualDividendPayout = async (req, res) => {
             const { logAction } = require('./auditController');
             await logAction(req.user.id, req.user.name, 'INVESTMENT_MANUAL_PAYOUT', `Month: ${result.month}`, { totalPaid: result.totalPaid, shareholders: result.shareholders }, 'success', req);
             
-            res.json({ success: true, message: `Payout successful for ${result.month}. Distributed ₦${result.totalPaid.toLocaleString()} to ${result.shareholders} shareholders.` });
+            res.json({ success: true, message: `Shareholder dividend distribution successful for ${result.month}. Distributed ₦${result.totalPaid.toLocaleString()} to ${result.shareholders} shareholders.` });
         } else {
             // Return 200 for "Skipped" states so the frontend shows an info toast rather than an error
-            res.json({ success: false, message: `Payout Skipped: ${result.reason}. (Check March profit levels)` });
+            res.json({ success: false, message: `Shareholder dividend distribution skipped: ${result.reason}.` });
         }
     } catch (err) {
-        res.status(500).json({ message: 'Server error during manual payout trigger.' });
+        res.status(500).json({ message: 'Server error during manual shareholder dividend distribution.' });
     }
 };

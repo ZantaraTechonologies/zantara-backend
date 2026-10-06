@@ -6,6 +6,7 @@ const Setting = require('../models/Setting');
 const ShareIssuanceLock = require('../models/ShareIssuanceLock');
 const crypto = require('crypto');
 const { parseInvestmentMoney, parseShareQuantity, parsePercentage } = require('../utils/investmentValidation');
+const { assertPublicShareholdingAvailable } = require('../config/publicShareholding');
 
 const INVESTMENT_DEFAULTS = {
     investmentEnabled: true,
@@ -26,9 +27,9 @@ const INVESTMENT_DEFAULTS = {
 const INVESTMENT_SETTING_KEYS = Object.freeze(Object.keys(INVESTMENT_DEFAULTS));
 
 const validateInvestmentSetting = (key, value) => {
-    if (!INVESTMENT_SETTING_KEYS.includes(key)) throw new Error(`Unsupported investment setting '${key}'`);
+    if (!INVESTMENT_SETTING_KEYS.includes(key)) throw new Error(`Unsupported shareholding setting '${key}'`);
     if (key === 'investmentEnabled') {
-        if (typeof value !== 'boolean') throw new Error('investmentEnabled must be boolean');
+        if (typeof value !== 'boolean') throw new Error('Shareholding availability must be boolean');
         return value;
     }
     if (key === 'sharePrice') return parseInvestmentMoney(value, { label: 'Share price' }).naira;
@@ -67,10 +68,10 @@ const getAuthoritativeShareBalance = async userId => {
         { _id: lookupId },
         { projection: { sharesOwned: 1, isShareholder: 1 } }
     );
-    if (!record) throw new Error('Investment account not found');
+    if (!record) throw new Error('Shareholding record not found');
     if (record.sharesOwned === undefined && record.isShareholder !== true) return 0;
     if (typeof record.sharesOwned !== 'number' || !Number.isSafeInteger(record.sharesOwned) || record.sharesOwned < 0) {
-        throw new Error('Investment account share balance requires manual reconciliation');
+        throw new Error('Shareholding record requires share-balance reconciliation');
     }
     return record.sharesOwned;
 };
@@ -150,7 +151,16 @@ const assertShareCapacity = async (user, qty, settings, session) => {
  * @param {string} refId - Reference ID for idempotency and tracking
  * @param {boolean} isWalletPayment - Whether the payment was already deducted from wallet
  */
-const fulfillSharePurchase = async (userId, qty, refId, isWalletPayment = false, externalSession = null, sharePriceOverride = null) => {
+const fulfillSharePurchase = async (
+    userId,
+    qty,
+    refId,
+    isWalletPayment = false,
+    externalSession = null,
+    sharePriceOverride = null,
+    { bypassPublicShareholdingHold = false } = {}
+) => {
+    if (!bypassPublicShareholdingHold) assertPublicShareholdingAvailable();
     const qtyNum = parseShareQuantity(qty, 'Share quantity');
 
     const session = externalSession || await mongoose.startSession();
@@ -161,7 +171,7 @@ const fulfillSharePurchase = async (userId, qty, refId, isWalletPayment = false,
         const settings = await getInvestmentSettings(session);
 
         if (!user) throw new Error('User not found');
-        if (!settings.investmentEnabled) throw new Error('Investment feature is currently disabled');
+        if (!settings.investmentEnabled) throw new Error('Zantara share purchases are currently disabled');
 
         const effectiveSharePrice = Number(sharePriceOverride) > 0
             ? Number(sharePriceOverride)
@@ -191,7 +201,7 @@ const fulfillSharePurchase = async (userId, qty, refId, isWalletPayment = false,
 
         await assertShareCapacity(user, qtyNum, settings, session);
 
-        // Update user portfolio
+        // Update the user's share balance.
         const isFirstPurchase = !user.isShareholder;
         user.sharesOwned += qtyNum;
         user.isShareholder = true;

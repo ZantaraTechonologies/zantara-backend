@@ -1,5 +1,6 @@
 'use strict';
 
+process.env.PUBLIC_SHAREHOLDING_KYC_HOLD = 'false';
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'investment-pin-test-secret';
 
 const assert = require('assert');

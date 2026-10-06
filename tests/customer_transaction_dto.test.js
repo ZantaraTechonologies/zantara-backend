@@ -164,6 +164,12 @@ console.log('====================================================\n');
     const cableDoc = serializeCustomerTransaction({ ...FULL_DOC, type: 'cable', details: { serviceID: 'dstv', billersCode: '12345608', variation_code: 'Y2026', roles: ['user'] } });
     const pinDoc = serializeCustomerTransaction({ ...FULL_DOC, type: 'exam_pin', details: { serviceID: 'waec', variation_code: 'PIN', quantity: 2, billersCode: '0803', roles: ['user'], originalAmount: 200 } });
     const transferDoc = serializeCustomerTransaction({ ...FULL_DOC, type: 'transfer_out', details: { recipientName: 'Ada', recipientPhone: '0804', remarks: 'for lunch', roles: ['user'] } });
+    const referralPayoutDoc = serializeCustomerTransaction({
+        ...FULL_DOC,
+        type: 'dividend_withdrawal',
+        service: 'Referral Commission Payout',
+        details: { grossAmount: 1000, feeCharged: 50, bankName: 'Test Bank', refId: 'REF_W-INTERNAL' }
+    });
 
     test('G. data details: phone/serviceID/variation_code, no internals', () => {
         assert.deepStrictEqual(dataDoc.details, { phone: '0801', serviceID: 'data-1', variation_code: '1GB' });
@@ -200,6 +206,11 @@ console.log('====================================================\n');
     });
     test('K. transfer details safe', () => {
         assert.deepStrictEqual(transferDoc.details, { recipientName: 'Ada', recipientPhone: '0804', remarks: 'for lunch' });
+    });
+    test('K2. referral bank payout preserves the existing withdrawal DTO contract', () => {
+        assert.strictEqual(referralPayoutDoc.type, 'dividend_withdrawal');
+        assert.strictEqual(referralPayoutDoc.service, 'Referral Commission Payout');
+        assert.deepStrictEqual(referralPayoutDoc.details, { grossAmount: 1000, feeCharged: 50, bankName: 'Test Bank' });
     });
     test('L. unknown/empty type gets no details object', () => {
         const d = serializeCustomerTransaction({ ...FULL_DOC, type: 'settlement', details: { costPrice: 1, roles: ['user'] } });
