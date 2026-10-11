@@ -164,8 +164,14 @@ const gracefulShutdown = createGracefulShutdown({
 });
 registerShutdownSignals({ shutdown: gracefulShutdown.shutdown });
 
-mongoose.connect(MONGOURI).then(() => {
+mongoose.connect(MONGOURI).then(async () => {
     if (gracefulShutdown.isShuttingDown()) return;
+
+    if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') {
+        await require('./services/paymentGateway.service').assertDatabaseManagedPaystackReady({
+            requireLive: process.env.NODE_ENV === 'production'
+        });
+    }
 
     server = app.listen(PORT, () => console.log(`API is Live on port ${PORT}`));
     // Start the monthly dividend cron job

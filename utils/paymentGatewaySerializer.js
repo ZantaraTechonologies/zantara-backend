@@ -1,5 +1,19 @@
 'use strict';
 
+const { getAdapterSpec } = require('../adapters/payment/paymentAdapterRegistry');
+
+const virtualAccountCapability = (adapterType, gatewayCode) => {
+    const normalizedAdapter = String(adapterType || '').toLowerCase();
+    const normalizedCode = String(gatewayCode || '').toLowerCase();
+    const capability = getAdapterSpec(normalizedAdapter)?.virtualAccounts;
+    const canonicalWebhookRoute = normalizedCode === normalizedAdapter;
+    return {
+        supported: !!capability?.supported && canonicalWebhookRoute,
+        type: capability?.type || null,
+        providerSlugs: [...(capability?.providerSlugs || [])]
+    };
+};
+
 /**
  * Payment Gateway Serializer
  *
@@ -38,6 +52,7 @@ function sanitizePaymentGateway(gateway) {
         publicKey: doc.publicKey || '',
         baseUrl: doc.baseUrl || '',
         supportedChannels: doc.supportedChannels || [],
+        virtualAccounts: virtualAccountCapability(doc.adapterType || doc.code, doc.code),
         metadata: doc.metadata || {},
         lastHealthCheck: doc.lastHealthCheck || { status: 'unknown' },
         createdAt: doc.createdAt,
@@ -64,6 +79,7 @@ function sanitizePaymentGatewayForClient(gateway) {
         code: doc.code,
         name: doc.name,
         supportedChannels: doc.supportedChannels || [],
+        virtualAccounts: virtualAccountCapability(doc.adapterType || doc.code, doc.code),
         isDefault: !!doc.isDefault,
         environment: doc.environment
     };

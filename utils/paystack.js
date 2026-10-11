@@ -2,10 +2,37 @@
 const axios = require('axios');
 require('dotenv').config();
 
-const PAYSTACK_BASE_URL =
-    (process.env.PAYSTACK_BASE_URL || 'https://api.paystack.co').replace(/\/$/, '');
 const CLIENT_BASE_URL =
     (process.env.CLIENT_BASE_URL || 'http://localhost:5173').replace(/\/$/, '');
+
+async function getPaystackConfig() {
+    // Lazy loading avoids introducing a startup module cycle through controllers.
+    const paymentGatewayService = require('../services/paymentGateway.service');
+    const gateway = await paymentGatewayService.getGateway('paystack');
+    if (!gateway || gateway.status !== 'active' || gateway.adapterType !== 'paystack' || !gateway.secretKey) {
+        const error = new Error('Database-managed Paystack gateway is unavailable');
+        error.code = 'PAYSTACK_CONFIGURATION_UNAVAILABLE';
+        throw error;
+    }
+    return {
+        baseUrl: (gateway.baseUrl || 'https://api.paystack.co').replace(/\/$/, ''),
+        secretKey: gateway.secretKey
+    };
+}
+
+async function requestConfig() {
+    const { baseUrl, secretKey } = await getPaystackConfig();
+    return {
+        baseUrl,
+        config: {
+            headers: {
+                Authorization: `Bearer ${secretKey}`,
+                'Content-Type': 'application/json',
+            },
+            timeout: 20000,
+        }
+    };
+}
 
 async function initializePayment(
     email,
@@ -18,14 +45,6 @@ async function initializePayment(
     const kobo = Math.round(Number(amount) * 100);
     if (!kobo || kobo < 1) throw new Error('initializePayment: invalid amount');
 
-    const config = {
-        headers: {
-            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-            'Content-Type': 'application/json',
-        },
-        timeout: 20000,
-    };
-
     const body = {
         email,
         amount: kobo,
@@ -36,8 +55,9 @@ async function initializePayment(
     };
 
     try {
+        const { baseUrl, config } = await requestConfig();
         const { data } = await axios.post(
-            `${PAYSTACK_BASE_URL}/transaction/initialize`,
+            `${baseUrl}/transaction/initialize`,
             body,
             config
         );
@@ -65,15 +85,9 @@ async function initializePayment(
 }
 
 async function getPaystackBalance() {
-    const config = {
-        headers: {
-            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-            'Content-Type': 'application/json',
-        },
-    };
-
     try {
-        const { data } = await axios.get(`${PAYSTACK_BASE_URL}/balance`, config);
+        const { baseUrl, config } = await requestConfig();
+        const { data } = await axios.get(`${baseUrl}/balance`, config);
         
         if (data?.status && Array.isArray(data.data)) {
             // Paystack returns an array of balances for different currencies
@@ -95,13 +109,6 @@ async function getPaystackBalance() {
 }
 
 async function createTransferRecipient(name, accountNumber, bankCode) {
-    const config = {
-        headers: {
-            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-            'Content-Type': 'application/json',
-        },
-    };
-
     const body = {
         type: "nuban",
         name: name,
@@ -111,7 +118,8 @@ async function createTransferRecipient(name, accountNumber, bankCode) {
     };
 
     try {
-        const { data } = await axios.post(`${PAYSTACK_BASE_URL}/transferrecipient`, body, config);
+        const { baseUrl, config } = await requestConfig();
+        const { data } = await axios.post(`${baseUrl}/transferrecipient`, body, config);
         if (!data?.status) throw new Error(data?.message || 'Failed to create transfer recipient');
         return data.data.recipient_code;
     } catch (err) {
@@ -120,13 +128,6 @@ async function createTransferRecipient(name, accountNumber, bankCode) {
 }
 
 async function initiateTransfer(amount, recipientCode, reference, reason = "Withdrawal from Zantara") {
-    const config = {
-        headers: {
-            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-            'Content-Type': 'application/json',
-        },
-    };
-
     const body = {
         source: "balance",
         amount: Math.round(Number(amount) * 100), // Kobo
@@ -136,7 +137,8 @@ async function initiateTransfer(amount, recipientCode, reference, reason = "With
     };
 
     try {
-        const { data } = await axios.post(`${PAYSTACK_BASE_URL}/transfer`, body, config);
+        const { baseUrl, config } = await requestConfig();
+        const { data } = await axios.post(`${baseUrl}/transfer`, body, config);
         if (!data?.status) throw new Error(data?.message || 'Transfer failed');
         return data;
     } catch (err) {
@@ -145,15 +147,9 @@ async function initiateTransfer(amount, recipientCode, reference, reason = "With
 }
 
 async function getBanks() {
-    const config = {
-        headers: {
-            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-            'Content-Type': 'application/json',
-        },
-    };
-
     try {
-        const { data } = await axios.get(`${PAYSTACK_BASE_URL}/bank?country=nigeria`, config);
+        const { baseUrl, config } = await requestConfig();
+        const { data } = await axios.get(`${baseUrl}/bank?country=nigeria`, config);
         if (data?.status) {
             return data.data; // Array of banks
         }
@@ -164,15 +160,9 @@ async function getBanks() {
 }
 
 async function resolveAccount(accountNumber, bankCode) {
-    const config = {
-        headers: {
-            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-            'Content-Type': 'application/json',
-        },
-    };
-
     try {
-        const { data } = await axios.get(`${PAYSTACK_BASE_URL}/bank/resolve`, {
+        const { baseUrl, config } = await requestConfig();
+        const { data } = await axios.get(`${baseUrl}/bank/resolve`, {
             params: { account_number: accountNumber, bank_code: bankCode },
             ...config
         });

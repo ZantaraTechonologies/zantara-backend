@@ -580,7 +580,7 @@ async function runAtomicityTests() {
 
     await test('5B. sanitizePaymentGatewayForClient strips ALL credential and health information', async () => {
         const fakeGateway = {
-            code: 'paystack', name: 'Paystack', supportedChannels: ['card'],
+            code: 'paystack', adapterType: 'paystack', name: 'Paystack', supportedChannels: ['card'],
             isDefault: true, environment: 'test',
             secretKey: 'sk_live_SuperSecret', webhookSecret: 'wh_live_Secret',
             publicKey: 'pk_test_abc', lastHealthCheck: { status: 'online' }
@@ -595,6 +595,7 @@ async function runAtomicityTests() {
         assert.ok(!json.includes('lastHealthCheck'), 'No health details in client output');
         assert.strictEqual(result.code, 'paystack');
         assert.strictEqual(result.name, 'Paystack');
+        assert.strictEqual(result.virtualAccounts.supported, true);
     });
 
     await test('5C. sanitizePaymentGateway with unconfigured credentials returns false indicators', async () => {

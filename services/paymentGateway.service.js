@@ -29,6 +29,7 @@ const { SUPPORTED_ADAPTER_CODES, getAdapterSpec } = require('../adapters/payment
 const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60 * 1000;
 const SETTLEMENT_LEASE_MS = 15 * 60 * 1000;
 const AUTOMATIC_SETTLEMENT_TYPES = new Set(['funding', 'investment_buy']);
+const CREDENTIAL_STORAGE_STATE = Symbol('paymentGatewayCredentialStorageState');
 
 class PaymentGatewayService {
     constructor() {
@@ -58,6 +59,10 @@ class PaymentGatewayService {
     _hydrateGatewayCredentials(gateway) {
         if (!gateway) return null;
         const doc = gateway.toObject ? gateway.toObject() : { ...gateway };
+        doc[CREDENTIAL_STORAGE_STATE] = {
+            secretKeyEncrypted: isEncrypted(doc.secretKey),
+            webhookSecretEncrypted: !doc.webhookSecret || isEncrypted(doc.webhookSecret)
+        };
         if (doc.secretKey && isEncrypted(doc.secretKey)) {
             doc.secretKey = decryptSecret(doc.secretKey);
         }
@@ -73,10 +78,10 @@ class PaymentGatewayService {
             return isEncrypted(value) ? value : encryptSecret(value);
         };
         return {
+            gatewayId: String(gateway.gatewayId || gateway._id || ''),
             name: gateway.name,
             code: gateway.code,
             adapterType: gateway.adapterType,
-            status: gateway.status,
             environment: gateway.environment,
             publicKey: gateway.publicKey || '',
             secretKey: protect(gateway.secretKey),
@@ -87,6 +92,53 @@ class PaymentGatewayService {
         };
     }
 
+    _webhookGatewayCandidates(gateway) {
+        if (!gateway) return [];
+        const gatewayId = String(gateway._id || gateway.gatewayId || '');
+        const code = String(gateway.code || '').toLowerCase();
+        const adapterType = String(gateway.adapterType || code).toLowerCase();
+        const snapshots = Array.isArray(gateway.webhookVerificationSnapshots)
+            ? gateway.webhookVerificationSnapshots
+            : [];
+        const candidates = [gateway];
+
+        for (const value of snapshots) {
+            const snapshot = value?.toObject ? value.toObject() : { ...(value || {}) };
+            if (
+                String(snapshot.gatewayId || '') !== gatewayId
+                || String(snapshot.code || '').toLowerCase() !== code
+                || String(snapshot.adapterType || '').toLowerCase() !== adapterType
+            ) continue;
+            candidates.push(this._hydrateGatewayCredentials({
+                ...snapshot,
+                _id: gateway._id,
+                webhookVerificationSnapshots: snapshots
+            }));
+        }
+        return candidates;
+    }
+
+    _selectWebhookGateway(gateway, headers, rawBody) {
+        const matches = [];
+        for (const candidate of this._webhookGatewayCandidates(gateway)) {
+            const adapter = this.getAdapterInstance(candidate);
+            if (adapter.verifyWebhookSignature(headers, rawBody)) matches.push({ gateway: candidate, adapter });
+        }
+        if (matches.length === 0) return { matched: false };
+
+        const contexts = new Map();
+        for (const match of matches) {
+            const key = JSON.stringify({
+                secretKey: match.gateway.secretKey || '',
+                baseUrl: match.gateway.baseUrl || '',
+                environment: match.gateway.environment || ''
+            });
+            if (!contexts.has(key)) contexts.set(key, match);
+        }
+        if (contexts.size !== 1) return { matched: false, ambiguous: true };
+        return { matched: true, ...contexts.values().next().value };
+    }
+
     _isDefinitiveInitializationError(error) {
         if (error?.gatewayInitializationOutcome === 'definitive_failure') return true;
         if (error?.code === 'PAYMENT_GATEWAY_ADAPTER_UNSUPPORTED') return true;
@@ -95,35 +147,10 @@ class PaymentGatewayService {
         return ![408, 409, 425, 429].includes(status);
     }
 
-    /**
-     * Legacy environment fallback for Paystack if no database records exist yet.
-     * DEPRECATED: Will be removed once all gateways are fully DB-managed.
-     * Used ONLY when PaymentGateway collection is empty.
-     */
-    _getLegacyPaystackFallback() {
-        const secret = process.env.PAYSTACK_SECRET_KEY;
-        if (!secret) return null;
-
-        console.log('[PaymentGateway] Using legacy Paystack .env fallback (no DB gateway records exist yet).');
-        return {
-            _id: 'legacy-env-paystack',
-            name: 'Paystack',
-            code: 'paystack',
-            adapterType: 'paystack',
-            status: 'active',
-            environment: process.env.PAYSTACK_ENV || 'test',
-            isDefault: true,
-            publicKey: process.env.PAYSTACK_PUBLIC_KEY || '',
-            secretKey: secret,
-            webhookSecret: process.env.PAYSTACK_WEBHOOK_SECRET || '',
-            baseUrl: 'https://api.paystack.co',
-            supportedChannels: ['card', 'bank_transfer', 'ussd']
-        };
-    }
-
     _getLegacyGatewayFallback(code) {
         const normalizedCode = String(code || '').toLowerCase();
-        if (normalizedCode === 'paystack') return this._getLegacyPaystackFallback();
+        // Paystack is DB-only. Other legacy adapters remain unchanged in Phase 5A.
+        if (normalizedCode === 'paystack') return null;
         if (normalizedCode === 'monnify' && process.env.MONNIFY_API_KEY && process.env.MONNIFY_SECRET_KEY) {
             return {
                 _id: 'legacy-env-monnify',
@@ -168,13 +195,19 @@ class PaymentGatewayService {
      * Retrieves and hydrates a single gateway by code.
      */
     async getGateway(code) {
+        const normalizedCode = String(code || '').trim().toLowerCase();
+        if (!normalizedCode) return null;
         const count = await PaymentGateway.countDocuments();
         if (count === 0) {
             // Legacy fallback: only if no DB records exist
-            return this._getLegacyGatewayFallback(code);
+            return this._getLegacyGatewayFallback(normalizedCode);
         }
 
-        const gateway = await PaymentGateway.findOne({ code: code.toLowerCase() });
+        let query = PaymentGateway.findOne({ code: normalizedCode });
+        if (typeof query?.select === 'function') {
+            query = query.select('+webhookVerificationSnapshots +virtualAccountMutationVersion');
+        }
+        const gateway = await query;
         return gateway ? this._hydrateGatewayCredentials(gateway) : null;
     }
 
@@ -184,10 +217,7 @@ class PaymentGatewayService {
      */
     async getActiveGateways() {
         const count = await PaymentGateway.countDocuments();
-        if (count === 0) {
-            const fallback = this._getLegacyPaystackFallback();
-            return fallback ? [fallback] : [];
-        }
+        if (count === 0) return [];
         const gateways = await PaymentGateway.find({ status: 'active' });
         return gateways.map(g => this._hydrateGatewayCredentials(g));
     }
@@ -197,9 +227,7 @@ class PaymentGatewayService {
      */
     async getDefaultGateway() {
         const count = await PaymentGateway.countDocuments();
-        if (count === 0) {
-            return this._getLegacyPaystackFallback();
-        }
+        if (count === 0) return null;
         const gateway = await PaymentGateway.findOne({ isDefault: true, status: 'active' });
         return gateway ? this._hydrateGatewayCredentials(gateway) : null;
     }
@@ -209,19 +237,47 @@ class PaymentGatewayService {
      */
     async getGatewaysForChannel(channel) {
         const count = await PaymentGateway.countDocuments();
-        if (count === 0) {
-            const fallback = this._getLegacyPaystackFallback();
-            if (fallback && fallback.supportedChannels.includes(channel)) {
-                return [fallback];
-            }
-            return [];
-        }
+        if (count === 0) return [];
 
         const gateways = await PaymentGateway.find({
             status: 'active',
             supportedChannels: channel
         }).sort({ priority: 1, createdAt: 1 });
         return gateways.map(g => this._hydrateGatewayCredentials(g));
+    }
+
+    async assertDatabaseManagedPaystackReady({ requireLive = process.env.NODE_ENV === 'production' } = {}) {
+        const gateway = await this.getGateway('paystack');
+        if (!gateway) throw new Error('Database-managed Paystack gateway is required');
+        if (String(gateway.adapterType || '').toLowerCase() !== 'paystack') {
+            throw new Error("Gateway code 'paystack' must use the Paystack adapter");
+        }
+        if (gateway.status !== 'active') {
+            throw new Error('Database-managed Paystack gateway must be active');
+        }
+        if (!gateway.publicKey) {
+            throw new Error('Database-managed Paystack public key is required');
+        }
+        if (!gateway.secretKey || isEncrypted(gateway.secretKey)) {
+            throw new Error('Database-managed Paystack secret key is unavailable or unreadable');
+        }
+        if (gateway.webhookSecret && isEncrypted(gateway.webhookSecret)) {
+            throw new Error('Database-managed Paystack webhook secret is unreadable');
+        }
+        const storageState = gateway[CREDENTIAL_STORAGE_STATE];
+        if (!storageState?.secretKeyEncrypted || !storageState.webhookSecretEncrypted) {
+            throw new Error('Database-managed Paystack credentials must be encrypted at rest');
+        }
+        if (gateway.webhookSecret && gateway.webhookSecret !== gateway.secretKey) {
+            throw new Error('Paystack webhook secret must match the Paystack API secret');
+        }
+        if (requireLive && gateway.environment !== 'live') {
+            throw new Error('Production requires a live Paystack gateway configuration');
+        }
+        if (requireLive && (!gateway.publicKey.startsWith('pk_live_') || !gateway.secretKey.startsWith('sk_live_'))) {
+            throw new Error('Production requires Paystack live public and secret keys');
+        }
+        return true;
     }
 
     /**
@@ -1289,14 +1345,231 @@ class PaymentGatewayService {
         return /^VIRTUAL_[a-f\d]{24}$/i.test(value) ? value : null;
     }
 
+    _paystackDvaWebhookError(message, code) {
+        const error = new Error(message);
+        error.code = code;
+        error.webhookTerminal = true;
+        return error;
+    }
+
+    _assertPaystackDvaTransactionIdentity(transaction, { owner, gateway, reference, amountKobo, currency, providerTransactionId }) {
+        const channels = Array.isArray(transaction?.channels) ? transaction.channels : [];
+        if (
+            !transaction
+            || String(transaction.userId || '') !== String(owner.userId)
+            || transaction.type !== 'funding'
+            || String(transaction.provider || '').toLowerCase() !== 'paystack'
+            || String(transaction.gatewayId || '') !== String(gateway._id)
+            || String(transaction.refId || '') !== reference
+            || transaction.amountKobo !== amountKobo
+            || String(transaction.expectedCurrency || '').toUpperCase() !== currency
+            || !channels.includes('virtual_account')
+            || (transaction.providerRef && String(transaction.providerRef) !== providerTransactionId)
+        ) {
+            throw this._paystackDvaWebhookError(
+                'Existing transaction does not match the verified Paystack DVA deposit',
+                'PAYSTACK_DVA_DEPOSIT_TRANSACTION_MISMATCH'
+            );
+        }
+    }
+
+    async _processPaystackDvaDeposit({ gateway, adapter, normalized, webhookEvent }) {
+        try {
+            const webhookDva = normalized.dedicatedNuban || {};
+            const reference = String(normalized.raw?.reference || '');
+            const providerTransactionId = String(normalized.providerTransactionId || '');
+            const amountKobo = normalized.amountKobo;
+            const currency = String(normalized.currency || '').toUpperCase();
+            if (
+                normalized.eventType !== 'charge.success'
+                || normalized.status !== 'success'
+                || !webhookDva.isDedicatedNuban
+                || normalized.reference !== reference
+                || !reference
+                || reference.length > 200
+                || !/^\d+$/.test(providerTransactionId)
+                || normalized.eventId !== providerTransactionId
+                || !Number.isSafeInteger(amountKobo)
+                || amountKobo <= 0
+                || currency !== 'NGN'
+                || !/^\d{10}$/.test(webhookDva.receiverAccountNumber || '')
+                || !/^\d+$/.test(webhookDva.providerCustomerId || '')
+                || !/^CUS_[A-Za-z0-9]+$/.test(webhookDva.providerCustomerCode || '')
+            ) {
+                throw this._paystackDvaWebhookError(
+                    'Paystack dedicated-NUBAN webhook evidence is incomplete',
+                    'PAYSTACK_DVA_DEPOSIT_MALFORMED'
+                );
+            }
+
+            let serverVerify;
+            try {
+                serverVerify = await adapter.verifyPayment(reference);
+            } catch (error) {
+                serverVerify = {
+                    success: false,
+                    status: 'pending',
+                    reference,
+                    message: `Provider verification unavailable: ${error.message}`
+                };
+            }
+            if (serverVerify.status === 'failed') {
+                await this._setWebhookEventState(
+                    webhookEvent,
+                    'failed',
+                    `Secondary verification confirmed failure: ${serverVerify.message}`
+                );
+                return { status: 200, message: 'Secondary verification confirmed DVA deposit failure' };
+            }
+            if (serverVerify.status !== 'success') {
+                await this._setWebhookEventState(
+                    webhookEvent,
+                    'retryable',
+                    `Secondary verification inconclusive: ${serverVerify.message}`
+                );
+                return { status: 503, message: 'Secondary verification inconclusive; retry later' };
+            }
+
+            const verifiedDva = serverVerify.dedicatedNuban || {};
+            const verifiedAmountKobo = serverVerify.amountKobo;
+            const verifiedCurrency = String(serverVerify.currency || '').toUpperCase();
+            if (
+                !verifiedDva.isDedicatedNuban
+                || serverVerify.reference !== reference
+                || String(serverVerify.providerTransactionId || '') !== providerTransactionId
+                || !Number.isSafeInteger(verifiedAmountKobo)
+                || verifiedAmountKobo !== amountKobo
+                || verifiedCurrency !== currency
+                || verifiedDva.receiverAccountNumber !== webhookDva.receiverAccountNumber
+                || verifiedDva.providerCustomerId !== webhookDva.providerCustomerId
+                || verifiedDva.providerCustomerCode !== webhookDva.providerCustomerCode
+            ) {
+                throw this._paystackDvaWebhookError(
+                    'Paystack webhook and server verification DVA evidence do not match',
+                    'PAYSTACK_DVA_DEPOSIT_EVIDENCE_MISMATCH'
+                );
+            }
+
+            const virtualAccountService = require('./virtualAccount.service');
+            const owner = await virtualAccountService.resolvePaystackDepositOwner({
+                gateway,
+                accountNumber: verifiedDva.receiverAccountNumber,
+                providerCustomerId: verifiedDva.providerCustomerId,
+                providerCustomerCode: verifiedDva.providerCustomerCode
+            });
+            if (owner.gatewaySnapshot) {
+                const snapshotAdapter = String(owner.gatewaySnapshot.adapterType || owner.gatewaySnapshot.code || '').toLowerCase();
+                const snapshotGatewayId = String(owner.gatewaySnapshot.gatewayId || '');
+                const snapshotCode = String(owner.gatewaySnapshot.code || '').toLowerCase();
+                if (
+                    snapshotAdapter !== 'paystack'
+                    || (snapshotGatewayId && snapshotGatewayId !== String(gateway._id))
+                    || (snapshotCode && snapshotCode !== String(gateway.code || '').toLowerCase())
+                ) {
+                    throw this._paystackDvaWebhookError(
+                        'Stored DVA gateway snapshot does not belong to Paystack',
+                        'PAYSTACK_DVA_DEPOSIT_GATEWAY_MISMATCH'
+                    );
+                }
+            }
+
+            const transactionQuery = TransactionStatus.findOne({ refId: reference });
+            let transaction = typeof transactionQuery?.select === 'function'
+                ? await transactionQuery.select('+gatewayConfigSnapshot')
+                : await transactionQuery;
+            if (!transaction) {
+                try {
+                    transaction = await TransactionStatus.create({
+                        refId: reference,
+                        userId: owner.userId,
+                        type: 'funding',
+                        status: 'pending',
+                        amountKobo: verifiedAmountKobo,
+                        expectedCurrency: verifiedCurrency,
+                        channels: ['virtual_account'],
+                        provider: 'paystack',
+                        gatewayId: String(gateway._id),
+                        service: gateway.name,
+                        providerRef: providerTransactionId,
+                        gatewayConfigSnapshot: owner.gatewaySnapshot || this._snapshotGatewayConfig(gateway)
+                    });
+                } catch (error) {
+                    if (error?.code !== 11000) throw error;
+                    const concurrentQuery = TransactionStatus.findOne({ refId: reference });
+                    transaction = typeof concurrentQuery?.select === 'function'
+                        ? await concurrentQuery.select('+gatewayConfigSnapshot')
+                        : await concurrentQuery;
+                    if (!transaction) throw error;
+                }
+            }
+
+            this._assertPaystackDvaTransactionIdentity(transaction, {
+                owner,
+                gateway,
+                reference,
+                amountKobo: verifiedAmountKobo,
+                currency: verifiedCurrency,
+                providerTransactionId
+            });
+            const finalResult = await this.finalizeFundingCredit({
+                transactionStatus: transaction,
+                gatewayPaymentResult: { ...serverVerify, gateway: 'paystack' },
+                source: 'webhook'
+            });
+            if (finalResult.status !== 'success') {
+                await this._setWebhookEventState(
+                    webhookEvent,
+                    'retryable',
+                    `DVA deposit settlement remains ${finalResult.status}`
+                );
+                return { status: 503, message: 'DVA deposit settlement is still processing; retry later' };
+            }
+
+            await this._setWebhookEventState(webhookEvent, 'processed');
+            return { status: 200, message: 'Paystack DVA deposit settled successfully' };
+        } catch (error) {
+            const terminal = error.webhookTerminal === true || [
+                'PAYMENT_GATEWAY_MISMATCH',
+                'PAYMENT_REFERENCE_MISMATCH',
+                'PAYMENT_CURRENCY_MISMATCH',
+                'PAYMENT_AMOUNT_MISMATCH',
+                'PAYMENT_PROVIDER_TRANSACTION_REUSED',
+                'PAYMENT_EVIDENCE_INVALID',
+                'SETTLEMENT_EVIDENCE_INVALID'
+            ].includes(error.code);
+            await this._setWebhookEventState(
+                webhookEvent,
+                terminal ? 'failed' : 'retryable',
+                error.message
+            );
+            if (terminal) {
+                console.warn(`[Webhook] Rejected Paystack DVA deposit: ${error.message}`);
+                return { status: 200, message: 'Paystack DVA deposit webhook rejected' };
+            }
+            console.error(`[Webhook] Paystack DVA deposit processing failed: ${error.message}`);
+            return { status: 503, message: 'Paystack DVA deposit processing failed; retry later' };
+        }
+    }
+
     /**
      * Routes and processes incoming webhooks for a specific gateway.
      */
     async routeWebhook(providerCode, req) {
         let gateway = await this.getGateway(providerCode);
-        let adapter = gateway ? this.getAdapterInstance(gateway) : null;
+        let adapter = null;
         let payload;
-        let isValid = adapter ? adapter.verifyWebhookSignature(req.headers, req.body) : false;
+        const selected = gateway
+            ? this._selectWebhookGateway(gateway, req.headers, req.body)
+            : { matched: false };
+        if (selected.ambiguous) {
+            console.error(`[PAYMENT-SECURITY-ALERT] Ambiguous webhook verification context for provider: ${providerCode}`);
+            return { status: 409, message: 'Ambiguous webhook verification context' };
+        }
+        let isValid = selected.matched;
+        if (selected.matched) {
+            gateway = selected.gateway;
+            adapter = selected.adapter;
+        }
 
         // A gateway can be rotated immediately after initialization. For new
         // generated references, retry signature verification with the encrypted
@@ -1319,6 +1592,7 @@ class PaymentGatewayService {
                     const snapshotGateway = this._hydrateGatewayCredentials(transaction.gatewayConfigSnapshot);
                     const snapshotAdapter = this.getAdapterInstance(snapshotGateway);
                     if (snapshotAdapter.verifyWebhookSignature(req.headers, req.body)) {
+                        snapshotGateway._id = snapshotGateway._id || transaction.gatewayId;
                         gateway = snapshotGateway;
                         adapter = snapshotAdapter;
                         isValid = true;
@@ -1375,6 +1649,38 @@ class PaymentGatewayService {
         if (claim.response) return claim.response;
         const webhookEvent = claim.webhookEvent;
 
+        if (normalized.eventDomain === 'virtual_account_provisioning') {
+            try {
+                // Lazy loading avoids a module cycle because virtual-account
+                // provisioning already depends on this gateway service.
+                const virtualAccountService = require('./virtualAccount.service');
+                await virtualAccountService.handlePaystackAssignmentWebhook({ gateway, normalized });
+                await this._setWebhookEventState(webhookEvent, 'processed');
+                return { status: 200, message: 'Virtual-account assignment webhook processed successfully' };
+            } catch (error) {
+                const terminal = error.webhookTerminal === true;
+                await this._setWebhookEventState(
+                    webhookEvent,
+                    terminal ? 'failed' : 'retryable',
+                    error.message
+                );
+                if (terminal) {
+                    console.warn(`[Webhook] Rejected ${normalized.eventType} for ${providerCode}: ${error.message}`);
+                    return { status: 200, message: 'Virtual-account assignment webhook rejected' };
+                }
+                console.error(`[Webhook] Failed to process ${normalized.eventType} for ${providerCode}: ${error.message}`);
+                return { status: 503, message: 'Virtual-account assignment processing failed; retry later' };
+            }
+        }
+
+        if (
+            providerCode === 'paystack'
+            && normalized.eventType === 'charge.success'
+            && normalized.dedicatedNuban?.claimsDedicatedNuban
+        ) {
+            return this._processPaystackDvaDeposit({ gateway, adapter, normalized, webhookEvent });
+        }
+
         // 5. Process Successful Payment Event
         if (normalized.status === 'success') {
             const refId = normalized.reference;
@@ -1426,6 +1732,14 @@ class PaymentGatewayService {
                 }
 
                 if (serverVerify.status === 'success') {
+                    if (providerCode === 'paystack' && serverVerify.dedicatedNuban?.claimsDedicatedNuban) {
+                        await this._setWebhookEventState(
+                            webhookEvent,
+                            'failed',
+                            'Verified dedicated-NUBAN payment did not pass DVA ownership routing'
+                        );
+                        return { status: 200, message: 'Paystack DVA deposit webhook rejected' };
+                    }
                     try {
                         await this.finalizeFundingCredit({
                             transactionStatus: transaction,

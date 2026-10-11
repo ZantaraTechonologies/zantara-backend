@@ -12,10 +12,11 @@ const { sendEmail } = require('../utils/mailer')
 const { sendSMS } = require('../utils/sms')
 const notificationService = require('../services/notification.service')
 const ActivityLog = require('../models/ActivityLog')
-const paymentGatewayService = require('../services/paymentGateway.service')
+const virtualAccountService = require('../services/virtualAccount.service')
 const LegalAcceptance = require('../models/LegalAcceptance')
 const legalService = require('../services/legalDocument.service')
 const { maskSecret } = require('../utils/logSanitizer')
+const { serializeUserProfile } = require('../utils/virtualAccountSerializer')
 
 const PASSWORD_RESET_RESPONSE = Object.freeze({
     success: true,
@@ -28,6 +29,25 @@ const logSecurityEvent = async event => {
     } catch (error) {
         console.error(`[Security Audit] ${event.action} log failed:`, error.message);
     }
+};
+
+const refreshVirtualAccounts = async (userId, options = {}) => {
+    try {
+        const outcomes = await virtualAccountService.provisionEligible({ userId, ...options });
+        for (const [provider, outcome] of Object.entries(outcomes)) {
+            if (outcome.status === 'failed') {
+                console.error(`[VirtualAccount] ${provider} automatic provisioning failed:`, outcome.message);
+            }
+        }
+        return outcomes;
+    } catch (error) {
+        console.error('[VirtualAccount] Automatic provisioning lifecycle failed:', error.message);
+        return null;
+    }
+};
+
+const scheduleVirtualAccountRefresh = (userId, options = {}) => {
+    void refreshVirtualAccounts(userId, options);
 };
 
 const register = async (req, res) => {
@@ -125,40 +145,20 @@ const register = async (req, res) => {
 
         // ── Post-commit side effects (deliberately outside transaction) ─────────
 
+        // Start provider lifecycle work only after commit, without making the
+        // registration response depend on provider or database latency.
+        scheduleVirtualAccountRefresh(user._id, {
+            paystackConsent: req.body?.consent === true || req.body?.consent === 'true',
+            paystackPreferredBank: req.body?.preferredBank
+        });
+
         // Notify Referrer
         if (referredBy) {
             await notificationService.sendInApp(referredBy, {
                 title: 'New Network Member!',
                 message: `${user.name || user.phone} has joined your network using your referral link.`,
                 type: 'referral'
-            });
-        }
-
-        // Auto-generate Virtual Accounts (Monnify) — must NOT run inside transaction
-        try {
-            const gateway = await paymentGatewayService.getGateway('monnify');
-            if (!gateway || gateway.status !== 'active') throw new Error('Monnify gateway is not active');
-            const adapter = paymentGatewayService.getAdapterInstance(gateway);
-            const vaResult = await adapter.createReservedAccount(user);
-            if (vaResult.status && vaResult.accounts?.length > 0) {
-                const accountReference = vaResult.accountReference || `VIRTUAL_${user._id}`;
-                user.virtualAccounts = vaResult.accounts.map(acc => ({
-                    bankName: acc.bankName,
-                    accountName: acc.accountName,
-                    accountNumber: acc.accountNumber,
-                    provider: 'monnify',
-                    gatewayId: String(gateway._id),
-                    accountReference,
-                }));
-                user.virtualAccountGatewaySnapshots = {
-                    [accountReference]: paymentGatewayService._snapshotGatewayConfig(gateway),
-                };
-                await user.save();
-                console.log(`Virtual accounts auto-generated for ${phone}`);
-            }
-        } catch (vaError) {
-            console.error(`Virtual account auto-generation failed for ${phone}:`, vaError.message);
-            // We don't block registration if VA generation fails
+            }).catch(error => console.error('[Registration] Referrer notification failed:', error.message));
         }
 
         await ActivityLog.create({
@@ -166,11 +166,11 @@ const register = async (req, res) => {
             action: 'REGISTER',
             ipAddress: req.ip,
             device: req.headers['user-agent']
-        })
+        }).catch(error => console.error('[Registration] Activity log failed:', error.message))
 
         console.log(`Registration successful for user: ${phone}`);
         user.lastLogin = new Date();
-        await user.save();
+        await user.save().catch(error => console.error('[Registration] lastLogin update failed:', error.message));
         sendToken(user, res)
     } catch (error) {
         console.error("Registration fatal error:", error);
@@ -260,6 +260,8 @@ const login = async (req, res) => {
         user.lastLogin = new Date();
         await user.save();
 
+        scheduleVirtualAccountRefresh(user._id);
+
         // Security notification for new login
         await notificationService.sendInApp(user._id, {
             title: 'Security Alert: New Login',
@@ -275,7 +277,7 @@ const login = async (req, res) => {
 
 const profile = async (req, res) => {
     const user = await User.findById(req.user.id).select('-password')
-    res.json(user)
+    res.json(serializeUserProfile(user))
 }
 
 const checkPhone = async (phone) => {
@@ -385,6 +387,7 @@ const updateUser = async (req, res) => {
         })
 
         sendToken(updatedUser, res)
+        scheduleVirtualAccountRefresh(updatedUser._id)
     } catch (error) {
         if (error.code === 11000) {
             return res.status(409).json({ message: "This phone number or email address is already in use." })

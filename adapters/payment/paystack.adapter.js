@@ -5,10 +5,238 @@ const BasePaymentAdapter = require('./base-payment.adapter');
 class PaystackAdapter extends BasePaymentAdapter {
     constructor(gatewayConfig = {}) {
         super(gatewayConfig);
-        this.baseUrl = (this.baseUrl || process.env.PAYSTACK_BASE_URL || 'https://api.paystack.co').replace(/\/$/, '');
-        this.secretKey = this.secretKey || process.env.PAYSTACK_SECRET_KEY || '';
-        this.publicKey = this.publicKey || process.env.PAYSTACK_PUBLIC_KEY || '';
+        this.baseUrl = (this.baseUrl || 'https://api.paystack.co').replace(/\/$/, '');
+        this.secretKey = this.secretKey || '';
+        this.publicKey = this.publicKey || '';
         this.webhookSecret = this.webhookSecret || this.secretKey;
+    }
+
+    _apiHeaders() {
+        if (!this.secretKey) {
+            const error = new Error('PaystackAdapter: secret key is required');
+            error.code = 'PAYSTACK_CONFIGURATION_INVALID';
+            throw error;
+        }
+        return {
+            Authorization: `Bearer ${this.secretKey}`,
+            'Content-Type': 'application/json'
+        };
+    }
+
+    getVirtualAccountCustomer(user) {
+        const email = String(user?.email || '').trim().toLowerCase();
+        const phone = String(user?.phone || '').trim();
+        const names = String(user?.name || '').trim().split(/\s+/).filter(Boolean);
+        if (!/^\S+@\S+\.\S+$/.test(email)) {
+            const error = new Error('A valid email address is required for Paystack DVA provisioning');
+            error.code = 'PAYSTACK_CUSTOMER_EMAIL_INVALID';
+            throw error;
+        }
+        if (phone.length < 7) {
+            const error = new Error('A valid phone number is required for Paystack DVA provisioning');
+            error.code = 'PAYSTACK_CUSTOMER_PHONE_INVALID';
+            throw error;
+        }
+        if (names.length < 2) {
+            const error = new Error('A first name and last name are required for Paystack DVA provisioning');
+            error.code = 'PAYSTACK_CUSTOMER_NAME_INCOMPLETE';
+            throw error;
+        }
+        return {
+            email,
+            phone,
+            firstName: names[0],
+            lastName: names.slice(1).join(' ')
+        };
+    }
+
+    _normalizeDedicatedAccount(data = {}) {
+        const customer = data.customer || {};
+        return {
+            providerAccountId: data.id === undefined || data.id === null ? '' : String(data.id),
+            accountName: data.account_name || '',
+            accountNumber: data.account_number || '',
+            bankName: data.bank?.name || '',
+            bankCode: data.bank?.id === undefined || data.bank?.id === null ? '' : String(data.bank.id),
+            bankSlug: data.bank?.slug || '',
+            currency: (data.currency || 'NGN').toUpperCase(),
+            active: data.active === true || data.active === 1,
+            assigned: data.assigned === true || data.assigned === 1,
+            providerCustomerId: customer.id === undefined || customer.id === null ? '' : String(customer.id),
+            providerCustomerCode: customer.customer_code || '',
+            raw: data
+        };
+    }
+
+    _normalizeCustomer(data = {}) {
+        return {
+            providerCustomerId: data.id === undefined || data.id === null ? '' : String(data.id),
+            providerCustomerCode: data.customer_code || '',
+            email: data.email || '',
+            firstName: data.first_name || '',
+            lastName: data.last_name || '',
+            phone: data.phone || '',
+            dedicatedAccount: data.dedicated_account
+                ? this._normalizeDedicatedAccount({ ...data.dedicated_account, customer: data })
+                : null,
+            raw: data
+        };
+    }
+
+    _normalizeDedicatedNubanDeposit(data = {}) {
+        const authorization = data.authorization || {};
+        const customer = data.customer || {};
+        const transactionChannel = String(data.channel || '').trim().toLowerCase();
+        const authorizationChannel = String(authorization.channel || '').trim().toLowerCase();
+        return {
+            claimsDedicatedNuban: transactionChannel === 'dedicated_nuban' || authorizationChannel === 'dedicated_nuban',
+            isDedicatedNuban: authorizationChannel === 'dedicated_nuban',
+            transactionChannel,
+            authorizationChannel,
+            receiverAccountNumber: String(authorization.receiver_bank_account_number || '').trim(),
+            receiverBank: String(authorization.receiver_bank || '').trim(),
+            providerCustomerId: customer.id === undefined || customer.id === null ? '' : String(customer.id),
+            providerCustomerCode: String(customer.customer_code || '').trim()
+        };
+    }
+
+    async createCustomer({ email, firstName, lastName, phone }) {
+        if (!email || !firstName || !lastName || !phone) {
+            const error = new Error('Paystack customer requires email, first name, last name, and phone');
+            error.code = 'PAYSTACK_CUSTOMER_DATA_INVALID';
+            throw error;
+        }
+
+        const response = await axios.post(`${this.baseUrl}/customer`, {
+            email,
+            first_name: firstName,
+            last_name: lastName,
+            phone
+        }, { headers: this._apiHeaders(), timeout: 20000 });
+
+        if (!response.data?.status || !response.data?.data) {
+            throw new Error(response.data?.message || 'Paystack customer creation failed');
+        }
+        return this._normalizeCustomer(response.data.data);
+    }
+
+    async fetchCustomer(identifier) {
+        if (!identifier) {
+            const error = new Error('Paystack customer identifier is required');
+            error.code = 'PAYSTACK_CUSTOMER_IDENTIFIER_REQUIRED';
+            throw error;
+        }
+
+        try {
+            const response = await axios.get(`${this.baseUrl}/customer/${encodeURIComponent(identifier)}`, {
+                headers: this._apiHeaders(),
+                timeout: 20000
+            });
+            if (!response.data?.status || !response.data?.data) return null;
+            return this._normalizeCustomer(response.data.data);
+        } catch (error) {
+            if (Number(error.response?.status) === 404) return null;
+            throw error;
+        }
+    }
+
+    async createDedicatedVirtualAccount({ customer, preferredBank, firstName, lastName, phone }) {
+        if (!customer) {
+            const error = new Error('Paystack customer ID or code is required for DVA creation');
+            error.code = 'PAYSTACK_CUSTOMER_IDENTIFIER_REQUIRED';
+            throw error;
+        }
+        if (!preferredBank) {
+            const error = new Error('Paystack preferred bank is required for DVA creation');
+            error.code = 'PAYSTACK_DVA_BANK_REQUIRED';
+            throw error;
+        }
+
+        const body = {
+            customer,
+            preferred_bank: preferredBank,
+            ...(firstName ? { first_name: firstName } : {}),
+            ...(lastName ? { last_name: lastName } : {}),
+            ...(phone ? { phone } : {})
+        };
+        const response = await axios.post(`${this.baseUrl}/dedicated_account`, body, {
+            headers: this._apiHeaders(),
+            timeout: 20000
+        });
+
+        if (!response.data?.status) {
+            throw new Error(response.data?.message || 'Paystack DVA creation failed');
+        }
+        const account = response.data.data
+            ? this._normalizeDedicatedAccount(response.data.data)
+            : null;
+        return {
+            success: true,
+            status: account?.accountNumber && account.active && account.assigned ? 'active' : 'pending',
+            message: response.data.message || '',
+            account,
+            raw: response.data.data || null
+        };
+    }
+
+    async assignDedicatedVirtualAccount({ email, firstName, lastName, phone, preferredBank, country = 'NG', accountNumber, bvn, bankCode }) {
+        if (!email || !firstName || !lastName || !phone || !preferredBank || !country) {
+            const error = new Error('Paystack DVA assignment requires email, first name, last name, phone, preferred bank, and country');
+            error.code = 'PAYSTACK_CUSTOMER_DATA_INVALID';
+            throw error;
+        }
+        const response = await axios.post(`${this.baseUrl}/dedicated_account/assign`, {
+            email,
+            first_name: firstName,
+            last_name: lastName,
+            phone,
+            preferred_bank: preferredBank,
+            country,
+            ...(accountNumber ? { account_number: accountNumber } : {}),
+            ...(bvn ? { bvn } : {}),
+            ...(bankCode ? { bank_code: bankCode } : {})
+        }, { headers: this._apiHeaders(), timeout: 20000 });
+
+        if (!response.data?.status) {
+            throw new Error(response.data?.message || 'Paystack DVA assignment failed');
+        }
+        return { success: true, status: 'pending', message: response.data.message || '', raw: response.data.data || null };
+    }
+
+    async fetchDedicatedVirtualAccount(dedicatedAccountId) {
+        if (dedicatedAccountId === undefined || dedicatedAccountId === null || dedicatedAccountId === '') {
+            const error = new Error('Paystack dedicated account ID is required');
+            error.code = 'PAYSTACK_DVA_IDENTIFIER_REQUIRED';
+            throw error;
+        }
+        try {
+            const response = await axios.get(`${this.baseUrl}/dedicated_account/${encodeURIComponent(dedicatedAccountId)}`, {
+                headers: this._apiHeaders(),
+                timeout: 20000
+            });
+            if (!response.data?.status || !response.data?.data) {
+                throw new Error(response.data?.message || 'Paystack DVA lookup failed');
+            }
+            return this._normalizeDedicatedAccount(response.data.data);
+        } catch (error) {
+            if (Number(error.response?.status) === 404) return null;
+            throw error;
+        }
+    }
+
+    async listDedicatedAccountProviders() {
+        const response = await axios.get(`${this.baseUrl}/dedicated_account/available_providers`, {
+            headers: this._apiHeaders(),
+            timeout: 20000
+        });
+        if (!response.data?.status || !Array.isArray(response.data?.data)) {
+            throw new Error(response.data?.message || 'Paystack DVA providers lookup failed');
+        }
+        return response.data.data.map(provider => ({
+            providerSlug: provider.provider_slug,
+            bankId: provider.bank_id === undefined || provider.bank_id === null ? '' : String(provider.bank_id),
+            bankName: provider.bank_name || ''
+        }));
     }
 
     async initializePayment({ user, amount, channel, channels, reference, callbackUrl, metadata = {}, isDirectTransfer = false }) {
@@ -162,9 +390,11 @@ class PaystackAdapter extends BasePaymentAdapter {
                 reference: data.reference || reference,
                 providerTransactionId: String(data.id || ''),
                 amount: amountNaira,
+                amountKobo: Number(data.amount),
                 currency,
                 message: data.gateway_response || resData.message || '',
                 metadata: data.metadata,
+                dedicatedNuban: this._normalizeDedicatedNubanDeposit(data),
                 raw: data
             };
         } catch (err) {
@@ -190,11 +420,56 @@ class PaystackAdapter extends BasePaymentAdapter {
 
         const buf = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody || '', 'utf8');
         const expected = crypto.createHmac('sha512', this.webhookSecret || this.secretKey).update(buf).digest('hex');
-        return expected === signature;
+        if (!/^[a-f\d]{128}$/i.test(signature)) return false;
+        return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(signature, 'hex'));
     }
 
     normalizeWebhook(payload) {
         const eventData = payload?.data || {};
+        const eventType = payload?.event || 'unknown';
+        if (['dedicatedaccount.assign.success', 'dedicatedaccount.assign.failed'].includes(eventType)) {
+            const accountData = eventData.dedicated_account || eventData.dedicatedAccount || eventData.account || eventData;
+            const customerData = accountData.customer || eventData.customer || {};
+            const providerCustomerId = customerData.id ?? eventData.customer_id;
+            const providerCustomerCode = customerData.customer_code || eventData.customer_code || '';
+            const hasAccountEvidence = !!(
+                accountData.account_number
+                || eventData.dedicated_account
+                || eventData.dedicatedAccount
+                || eventData.account
+            );
+            const account = hasAccountEvidence
+                ? this._normalizeDedicatedAccount({
+                    ...accountData,
+                    customer: {
+                        ...customerData,
+                        ...(providerCustomerId !== undefined ? { id: providerCustomerId } : {}),
+                        ...(providerCustomerCode ? { customer_code: providerCustomerCode } : {})
+                    }
+                })
+                : null;
+            const payloadDigest = crypto
+                .createHash('sha256')
+                .update(JSON.stringify(payload || {}))
+                .digest('hex');
+
+            return {
+                eventId: `paystack-dva:${eventType}:${payloadDigest}`,
+                eventType,
+                eventDomain: 'virtual_account_provisioning',
+                status: eventType.endsWith('.success') ? 'success' : 'failed',
+                virtualAccount: {
+                    providerCustomerId: providerCustomerId === undefined || providerCustomerId === null
+                        ? ''
+                        : String(providerCustomerId),
+                    providerCustomerCode,
+                    account,
+                    reason: eventData.reason || eventData.message || 'Paystack DVA assignment failed'
+                },
+                raw: eventData
+            };
+        }
+
         const meta = typeof eventData.metadata === 'string'
             ? (() => { try { return JSON.parse(eventData.metadata); } catch (e) { return {}; } })()
             : (eventData.metadata || {});
@@ -204,14 +479,16 @@ class PaystackAdapter extends BasePaymentAdapter {
 
         return {
             eventId: String(eventData.id || `PS_${eventData.reference}_${Date.now()}`),
-            eventType: payload.event || 'unknown',
+            eventType,
             status: isSuccess ? 'success' : (isFailed ? 'failed' : 'pending'),
             reference: eventData.reference || meta.refId,
             providerTransactionId: String(eventData.id || ''),
             amount: (eventData.amount || 0) / 100,
+            amountKobo: Number(eventData.amount),
             currency: (eventData.currency || 'NGN').toUpperCase(),
             userId: meta.userId,
             metadata: meta,
+            dedicatedNuban: this._normalizeDedicatedNubanDeposit(eventData),
             raw: eventData
         };
     }

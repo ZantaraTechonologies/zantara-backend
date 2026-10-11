@@ -250,11 +250,17 @@ async function runStatusEnforcementTests() {
         const origCompare = require('bcryptjs').compare;
         const origActivityCreate = require('../models/ActivityLog').create;
         const origSendInApp = require('../services/notification.service').sendInApp;
+        const virtualAccountService = require('../services/virtualAccount.service');
+        const origProvisionEligible = virtualAccountService.provisionEligible;
 
         User.findOne = () => ({ ...mockUsers[0], select: async function () { return this; } });
         require('bcryptjs').compare = async () => true;
         require('../models/ActivityLog').create = async () => ({});
         require('../services/notification.service').sendInApp = async () => {};
+        virtualAccountService.provisionEligible = async () => ({
+            paystack: { status: 'skipped' },
+            monnify: { status: 'active', accounts: [] }
+        });
 
         const authController = require('../controllers/authController');
         const res = makeRes();
@@ -272,6 +278,7 @@ async function runStatusEnforcementTests() {
         require('bcryptjs').compare = origCompare;
         require('../models/ActivityLog').create = origActivityCreate;
         require('../services/notification.service').sendInApp = origSendInApp;
+        virtualAccountService.provisionEligible = origProvisionEligible;
     });
 
     // ─── SECTION C: verifyJWT must hydrate req.user with CURRENT DB roles ──

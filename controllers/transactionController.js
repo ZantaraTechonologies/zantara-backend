@@ -5,6 +5,7 @@ const {
     serializeCustomerTransaction,
     serializeCustomerTransactions,
 } = require('../utils/customerTransactionSerializer')
+const { serializeAdminUsers } = require('../utils/virtualAccountSerializer')
 
 const getUserTransactions = async (req, res) => {
     const limit = parseInt(req.query.limit) || 20;
@@ -115,7 +116,7 @@ const getAllUsers = async (req, res) => {
 
         res.status(200).json({ 
             success: true, 
-            data: users,
+            data: serializeAdminUsers(users),
             pagination: { total, page, limit, pages: Math.ceil(total / limit) }
         });
     } catch (error) {

@@ -23,6 +23,7 @@ const transactionStatusSchema = new mongoose.Schema({
     reconciliationReason: { type: String },             // security / anomaly justification
     channels: [{ type: String, enum: ['card', 'ussd', 'bank_transfer', 'virtual_account'] }],
     provider: { type: String, default: 'paystack' },    // gateway code e.g. 'paystack', 'monnify'
+    gatewayId: { type: String },                       // exact gateway configuration used for provider-owned deposits
     service: { type: String, default: '' },             // human-readable gateway name e.g. 'Paystack'
     gatewayConfigSnapshot: { type: mongoose.Schema.Types.Mixed, select: false },
     initializationOutcome: {

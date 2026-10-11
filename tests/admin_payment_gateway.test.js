@@ -25,6 +25,7 @@ const PaymentGateway = require('../models/PaymentGateway');
 const TransactionStatus = require('../models/TransactionStatus');
 const WebhookEvent = require('../models/WebhookEvent');
 const AuditLog = require('../models/AuditLog');
+const User = require('../models/User');
 
 const adminGatewayController = require('../controllers/adminPaymentGatewayController');
 const { sanitizePaymentGateway, sanitizePaymentGatewayForClient } = require('../utils/paymentGatewaySerializer');
@@ -96,11 +97,14 @@ async function runAdminPaymentGatewayTests() {
     const origCreate = PaymentGateway.create;
     const origCountDocuments = PaymentGateway.countDocuments;
     const origFindByIdAndDelete = PaymentGateway.findByIdAndDelete;
+    const origUpdateOne = PaymentGateway.updateOne;
     const origSetDefault = PaymentGateway.setDefault;
+    const origStartSession = mongoose.startSession;
 
     const origTxFind = TransactionStatus.find;
     const origTxCount = TransactionStatus.countDocuments;
     const origWhCount = WebhookEvent.countDocuments;
+    const origUserCount = User.countDocuments;
     const origAuditCreate = AuditLog.create;
 
     // Install mocks
@@ -145,6 +149,13 @@ async function runAdminPaymentGatewayTests() {
         }
         return null;
     };
+    PaymentGateway.updateOne = async () => ({ matchedCount: 1 });
+    mongoose.startSession = async () => ({
+        startTransaction() {},
+        async commitTransaction() {},
+        async abortTransaction() {},
+        async endSession() {}
+    });
     PaymentGateway.setDefault = async (id) => {
         gatewaysDB.forEach(g => {
             if (String(g._id) !== String(id)) g.isDefault = false;
@@ -174,6 +185,7 @@ async function runAdminPaymentGatewayTests() {
         }
         return webhooksDB.length;
     };
+    User.countDocuments = async () => 0;
 
     TransactionStatus.find = (filter) => ({
         sort: () => ({
@@ -571,6 +583,7 @@ async function runAdminPaymentGatewayTests() {
                     assert.ok(m.code);
                     assert.ok(m.name);
                     assert.ok(m.supportedChannels);
+                    assert.ok(m.virtualAccounts);
                     assert.strictEqual(m.secretKey, undefined);
                     assert.strictEqual(m.secretKeyConfigured, undefined, 'Client view must not expose credential indicators');
                     assert.strictEqual(m.lastHealthCheck, undefined, 'Client view must not expose internal health telemetry');
@@ -588,11 +601,14 @@ async function runAdminPaymentGatewayTests() {
         PaymentGateway.create = origCreate;
         PaymentGateway.countDocuments = origCountDocuments;
         PaymentGateway.findByIdAndDelete = origFindByIdAndDelete;
+        PaymentGateway.updateOne = origUpdateOne;
         PaymentGateway.setDefault = origSetDefault;
+        mongoose.startSession = origStartSession;
 
         TransactionStatus.find = origTxFind;
         TransactionStatus.countDocuments = origTxCount;
         WebhookEvent.countDocuments = origWhCount;
+        User.countDocuments = origUserCount;
         AuditLog.create = origAuditCreate;
     }
 

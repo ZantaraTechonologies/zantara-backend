@@ -1,5 +1,6 @@
 'use strict';
 
+const mongoose = require('mongoose');
 const PaymentGateway = require('../models/PaymentGateway');
 const TransactionStatus = require('../models/TransactionStatus');
 const WebhookEvent = require('../models/WebhookEvent');
@@ -15,11 +16,6 @@ const {
 } = require('../adapters/payment/paymentAdapterRegistry');
 
 /**
- * Ensures initial default payment gateways exist if the collection is empty.
- * Migrates env credentials for Paystack, Monnify, Flutterwave safely.
- */
-
-/**
  * Normalizes and validates the gateway routing priority.
  * Returns 1 for undefined/blank (schema default), the floored positive integer
  * for valid inputs, or null for invalid (negative, zero, non-numeric).
@@ -31,87 +27,70 @@ function normalizePriority(value) {
     return Math.floor(n);
 }
 
-async function ensureDefaultGateways() {
-    const count = await PaymentGateway.countDocuments();
-    if (count > 0) return;
+const queryWithSession = (query, session) => (
+    session && typeof query?.session === 'function' ? query.session(session) : query
+);
 
-    console.log('[PaymentGateway] Initializing default gateways in database...');
+const mutationMatched = result => Number(result?.matchedCount ?? result?.n ?? 0) === 1;
 
-    const paystackSecret = process.env.PAYSTACK_SECRET_KEY || '';
-    const paystackPublic = process.env.PAYSTACK_PUBLIC_KEY || '';
-    const paystackBaseUrl = process.env.PAYSTACK_BASE_URL || 'https://api.paystack.co';
-
-    const monnifyApiKey = process.env.MONNIFY_API_KEY || '';
-    const monnifySecretKey = process.env.MONNIFY_SECRET_KEY || '';
-    const monnifyContractCode = process.env.MONNIFY_CONTRACT_CODE || '';
-    const monnifyBaseUrl = process.env.MONNIFY_BASE_URL || 'https://sandbox.monnify.com';
-
-    const flwSecret = process.env.FLUTTERWAVE_SECRET_KEY || '';
-    const flwPublic = process.env.FLUTTERWAVE_PUBLIC_KEY || '';
-    const flwHash = process.env.FLUTTERWAVE_HASH || '';
-    const flwBaseUrl = process.env.FLUTTERWAVE_BASE_URL || 'https://api.flutterwave.com/v3';
-
-    try {
-        // 1. Paystack (Default Active Gateway)
-        const paystack = new PaymentGateway({
-            name: 'Paystack',
-            code: 'paystack',
-            adapterType: 'paystack',
-            status: paystackSecret ? 'active' : 'inactive',
-            environment: paystackSecret && paystackSecret.startsWith('sk_live_') ? 'live' : 'test',
-            isDefault: true,
-            priority: 1,
-            publicKey: paystackPublic,
-            secretKey: paystackSecret ? (isEncrypted(paystackSecret) ? paystackSecret : encryptSecret(paystackSecret)) : '',
-            webhookSecret: paystackSecret ? (isEncrypted(paystackSecret) ? paystackSecret : encryptSecret(paystackSecret)) : '',
-            baseUrl: paystackBaseUrl,
-            supportedChannels: ['card', 'bank_transfer', 'ussd'],
-            metadata: {}
-        });
-        await paystack.save();
-
-        // 2. Monnify (Secondary Gateway - Inactive by default until configured)
-        const monnify = new PaymentGateway({
-            name: 'Monnify',
-            code: 'monnify',
-            adapterType: 'monnify',
-            status: (monnifyApiKey && monnifySecretKey) ? 'active' : 'inactive',
-            environment: monnifyBaseUrl.includes('sandbox') ? 'test' : 'live',
-            isDefault: false,
-            priority: 2,
-            publicKey: monnifyApiKey,
-            secretKey: monnifySecretKey ? (isEncrypted(monnifySecretKey) ? monnifySecretKey : encryptSecret(monnifySecretKey)) : '',
-            webhookSecret: monnifySecretKey ? (isEncrypted(monnifySecretKey) ? monnifySecretKey : encryptSecret(monnifySecretKey)) : '',
-            baseUrl: monnifyBaseUrl,
-            supportedChannels: ['card', 'bank_transfer', 'virtual_account'],
-            metadata: {
-                contractCode: monnifyContractCode
-            }
-        });
-        await monnify.save();
-
-        // 3. Flutterwave (Tertiary Gateway - Inactive by default)
-        const flutterwave = new PaymentGateway({
-            name: 'Flutterwave',
-            code: 'flutterwave',
-            adapterType: 'flutterwave',
-            status: flwSecret ? 'active' : 'inactive',
-            environment: flwSecret.startsWith('FLWSECK_TEST') ? 'test' : 'live',
-            isDefault: false,
-            priority: 3,
-            publicKey: flwPublic,
-            secretKey: flwSecret ? (isEncrypted(flwSecret) ? flwSecret : encryptSecret(flwSecret)) : '',
-            webhookSecret: flwHash ? (isEncrypted(flwHash) ? flwHash : encryptSecret(flwHash)) : '',
-            baseUrl: flwBaseUrl,
-            supportedChannels: ['card', 'bank_transfer', 'ussd'],
-            metadata: {}
-        });
-        await flutterwave.save();
-
-        console.log('[PaymentGateway] Default gateways seeded successfully.');
-    } catch (err) {
-        console.error('[PaymentGateway] Seeding error:', err.message);
+async function loadGatewayForMutation(id, session) {
+    let query = PaymentGateway.findById(id);
+    if (typeof query?.select === 'function') {
+        query = query.select('+webhookVerificationSnapshots +virtualAccountMutationVersion');
     }
+    return queryWithSession(query, session);
+}
+
+function requiresGatewayMutationFence(gateway, body = {}) {
+    const nonBlank = value => typeof value === 'string' && value.trim() !== '';
+    return (body.adapterType !== undefined
+            && String(body.adapterType).toLowerCase() !== String(gateway.adapterType || '').toLowerCase())
+        || (body.baseUrl !== undefined && body.baseUrl.trim() !== String(gateway.baseUrl || ''))
+        || (body.publicKey !== undefined && body.publicKey.trim() !== String(gateway.publicKey || ''))
+        || nonBlank(body.secretKey)
+        || nonBlank(body.webhookSecret)
+        || (body.environment !== undefined && body.environment !== gateway.environment)
+        || body.metadata !== undefined;
+}
+
+function virtualAccountReferenceFilter(gateway) {
+    const adapterType = String(gateway.adapterType || '').toLowerCase();
+    if (adapterType === 'paystack') {
+        return {
+            virtualAccounts: {
+                $elemMatch: {
+                    provider: 'paystack',
+                    gatewayId: String(gateway._id)
+                }
+            }
+        };
+    }
+    if (String(gateway.code || '').toLowerCase() === 'monnify') {
+        return {
+            $or: [
+                { virtualAccounts: { $elemMatch: { provider: 'monnify' } } },
+                {
+                    virtualAccounts: {
+                        $elemMatch: {
+                            provider: { $exists: false },
+                            accountNumber: { $exists: true }
+                        }
+                    }
+                }
+            ]
+        };
+    }
+    if (adapterType === 'monnify') {
+        return {
+            virtualAccounts: {
+                $elemMatch: {
+                    provider: 'monnify',
+                    gatewayId: String(gateway._id)
+                }
+            }
+        };
+    }
+    return null;
 }
 
 /**
@@ -120,7 +99,6 @@ async function ensureDefaultGateways() {
  */
 const getAllGateways = async (req, res) => {
     try {
-        await ensureDefaultGateways();
         const gateways = await PaymentGateway.find().sort({ priority: 1, createdAt: 1 });
         const sanitized = gateways.map(g => sanitizePaymentGateway(g));
 
@@ -289,9 +267,11 @@ const createGateway = async (req, res) => {
  * RULE: Blank secretKey / webhookSecret retains existing encrypted values.
  */
 const updateGateway = async (req, res) => {
+    let mutationSession = null;
+    let mutationFinished = false;
     try {
         const { id } = req.params;
-        const gateway = await PaymentGateway.findById(id);
+        let gateway = await loadGatewayForMutation(id, null);
         if (!gateway) {
             return res.status(404).json({ success: false, message: 'Payment gateway not found' });
         }
@@ -311,12 +291,61 @@ const updateGateway = async (req, res) => {
             metadata
         } = req.body;
 
+        if (requiresGatewayMutationFence(gateway, req.body)) {
+            mutationSession = await mongoose.startSession();
+            mutationSession.startTransaction();
+            gateway = await loadGatewayForMutation(id, mutationSession);
+            if (!gateway) {
+                return res.status(404).json({ success: false, message: 'Payment gateway not found' });
+            }
+            const fence = await PaymentGateway.updateOne(
+                { _id: id },
+                { $inc: { virtualAccountMutationVersion: 1 } },
+                { session: mutationSession }
+            );
+            if (!mutationMatched(fence)) {
+                return res.status(409).json({
+                    success: false,
+                    message: 'Payment gateway changed concurrently. Please retry.'
+                });
+            }
+            gateway.virtualAccountMutationVersion = Number(gateway.virtualAccountMutationVersion || 0) + 1;
+        }
+
         let isSecretRotated = false;
         let isWebhookRotated = false;
         let isEnvChanged = false;
         let isStatusChanged = false;
         const previousEnv = gateway.environment;
         const previousStatus = gateway.status;
+        const currentAdapter = String(gateway.adapterType || '').toLowerCase();
+        const requestedAdapter = adapterType ? String(adapterType).toLowerCase() : currentAdapter;
+        const isPaystack = currentAdapter === 'paystack';
+        const paystackVerificationChanged = isPaystack && (
+            (secretKey && typeof secretKey === 'string' && secretKey.trim() !== '')
+            || (webhookSecret && typeof webhookSecret === 'string' && webhookSecret.trim() !== '')
+            || (baseUrl !== undefined && baseUrl.trim() !== String(gateway.baseUrl || ''))
+            || (environment && environment !== gateway.environment)
+        );
+        const requiresPaystackDvaCheck = isPaystack
+            && (requestedAdapter !== 'paystack' || paystackVerificationChanged);
+        const paystackDvaUsers = requiresPaystackDvaCheck
+            ? await queryWithSession(User.countDocuments({
+                virtualAccounts: {
+                    $elemMatch: {
+                        provider: 'paystack',
+                        gatewayId: String(gateway._id)
+                    }
+                }
+            }), mutationSession)
+            : 0;
+
+        if (paystackDvaUsers > 0 && requestedAdapter !== 'paystack') {
+            return res.status(409).json({
+                success: false,
+                message: `Cannot change the Paystack adapter while ${paystackDvaUsers} user(s) have dedicated virtual accounts.`
+            });
+        }
 
         const verificationConfigChanged = (
             (adapterType && adapterType.toLowerCase() !== gateway.adapterType)
@@ -328,10 +357,10 @@ const updateGateway = async (req, res) => {
             || metadata !== undefined
         );
         if (verificationConfigChanged) {
-            const unresolvedPayments = await TransactionStatus.countDocuments({
+            const unresolvedPayments = await queryWithSession(TransactionStatus.countDocuments({
                 provider: gateway.code,
                 status: { $in: ['pending', 'processing', 'settlement_pending', 'reconciliation_required'] }
-            });
+            }), mutationSession);
             if (unresolvedPayments > 0) {
                 return res.status(409).json({
                     success: false,
@@ -340,7 +369,43 @@ const updateGateway = async (req, res) => {
             }
         }
 
-        const virtualAccountConfigChanged = gateway.code === 'monnify' && (
+        if (paystackVerificationChanged) {
+            const snapshot = paymentGatewayService._snapshotGatewayConfig(gateway);
+            const hydratedSnapshot = paymentGatewayService._hydrateGatewayCredentials(snapshot);
+            const unreadableSecret = !hydratedSnapshot.secretKey || isEncrypted(hydratedSnapshot.secretKey);
+            const unreadableWebhookSecret = snapshot.webhookSecret
+                && (!hydratedSnapshot.webhookSecret || isEncrypted(hydratedSnapshot.webhookSecret));
+            if (paystackDvaUsers > 0 && (unreadableSecret || unreadableWebhookSecret)) {
+                return res.status(409).json({
+                    success: false,
+                    message: 'Cannot rotate Paystack verification settings while DVA users exist because the previous verification credentials are unavailable.'
+                });
+            }
+            const nextSecretKey = secretKey && typeof secretKey === 'string' && secretKey.trim() !== ''
+                ? secretKey.trim()
+                : hydratedSnapshot.secretKey;
+            const nextWebhookSecret = webhookSecret && typeof webhookSecret === 'string' && webhookSecret.trim() !== ''
+                ? webhookSecret.trim()
+                : hydratedSnapshot.webhookSecret;
+            const currentSigningSecret = hydratedSnapshot.webhookSecret || hydratedSnapshot.secretKey;
+            const nextSigningSecret = nextWebhookSecret || nextSecretKey;
+            const apiContextChanged = nextSecretKey !== hydratedSnapshot.secretKey
+                || (baseUrl !== undefined && baseUrl.trim() !== String(hydratedSnapshot.baseUrl || ''))
+                || (environment && environment !== hydratedSnapshot.environment);
+            if (paystackDvaUsers > 0 && apiContextChanged && nextSigningSecret === currentSigningSecret) {
+                return res.status(409).json({
+                    success: false,
+                    message: 'Paystack API settings cannot change for existing DVA users while retaining the same webhook signing secret.'
+                });
+            }
+            gateway.webhookVerificationSnapshots = [
+                ...(Array.isArray(gateway.webhookVerificationSnapshots) ? gateway.webhookVerificationSnapshots : []),
+                snapshot
+            ];
+            gateway.markModified('webhookVerificationSnapshots');
+        }
+
+        const virtualAccountConfigChanged = currentAdapter === 'monnify' && (
             (adapterType && adapterType.toLowerCase() !== gateway.adapterType)
             || baseUrl !== undefined
             || publicKey !== undefined
@@ -348,12 +413,10 @@ const updateGateway = async (req, res) => {
             || metadata !== undefined
         );
         if (virtualAccountConfigChanged) {
-            const virtualAccountUsers = await User.countDocuments({
-                $or: [
-                    { virtualAccounts: { $elemMatch: { provider: 'monnify' } } },
-                    { 'virtualAccounts.0': { $exists: true }, 'virtualAccounts.provider': { $exists: false } },
-                ]
-            });
+            const virtualAccountUsers = await queryWithSession(
+                User.countDocuments(virtualAccountReferenceFilter(gateway)),
+                mutationSession
+            );
             if (virtualAccountUsers > 0) {
                 return res.status(409).json({
                     success: false,
@@ -443,7 +506,7 @@ const updateGateway = async (req, res) => {
             }
         }
 
-        await gateway.save();
+        await gateway.save(mutationSession ? { session: mutationSession } : undefined);
 
         // Default Gateway Handling
         if (isDefault === true && !gateway.isDefault) {
@@ -453,11 +516,16 @@ const updateGateway = async (req, res) => {
                     message: `Cannot set gateway '${gateway.name}' as default because it is not active. Please activate it first.`
                 });
             }
-            await PaymentGateway.setDefault(gateway._id);
+            await PaymentGateway.setDefault(gateway._id, mutationSession ? { session: mutationSession } : undefined);
             gateway.isDefault = true;
         } else if (isDefault === false && gateway.isDefault) {
             gateway.isDefault = false;
-            await gateway.save();
+            await gateway.save(mutationSession ? { session: mutationSession } : undefined);
+        }
+
+        if (mutationSession) {
+            await mutationSession.commitTransaction();
+            mutationFinished = true;
         }
 
         // Audit Logging
@@ -501,7 +569,18 @@ const updateGateway = async (req, res) => {
 
         res.json({ success: true, data: sanitizePaymentGateway(gateway) });
     } catch (error) {
+        if (mutationSession && !mutationFinished) {
+            try { await mutationSession.abortTransaction(); } catch (_) {}
+            mutationFinished = true;
+        }
         res.status(400).json({ success: false, message: error.message });
+    } finally {
+        if (mutationSession) {
+            if (!mutationFinished) {
+                try { await mutationSession.abortTransaction(); } catch (_) {}
+            }
+            await mutationSession.endSession();
+        }
     }
 };
 
@@ -644,20 +723,41 @@ const testGatewayConnection = async (req, res) => {
  * SAFETY RULE: Prevents deletion if any historical transactions or webhooks reference this gateway code.
  */
 const deleteGateway = async (req, res) => {
+    let mutationSession = null;
+    let mutationFinished = false;
     try {
         const { id } = req.params;
-        const gateway = await PaymentGateway.findById(id);
+        mutationSession = await mongoose.startSession();
+        mutationSession.startTransaction();
+        const gateway = await loadGatewayForMutation(id, mutationSession);
         if (!gateway) {
             return res.status(404).json({ success: false, message: 'Payment gateway not found' });
         }
 
-        const [txCount, whCount, virtualAccountUsers] = await Promise.all([
+        const fence = await PaymentGateway.updateOne(
+            { _id: id },
+            { $inc: { virtualAccountMutationVersion: 1 } },
+            { session: mutationSession }
+        );
+        if (!mutationMatched(fence)) {
+            return res.status(409).json({
+                success: false,
+                message: 'Payment gateway changed concurrently. Please retry.'
+            });
+        }
+
+        const referenceFilter = virtualAccountReferenceFilter(gateway);
+        const txCount = await queryWithSession(
             TransactionStatus.countDocuments({ provider: gateway.code }),
+            mutationSession
+        );
+        const whCount = await queryWithSession(
             WebhookEvent.countDocuments({ provider: gateway.code }),
-            gateway.code === 'monnify'
-                ? User.countDocuments({ 'virtualAccounts.0': { $exists: true } })
-                : Promise.resolve(0)
-        ]);
+            mutationSession
+        );
+        const virtualAccountUsers = referenceFilter
+            ? await queryWithSession(User.countDocuments(referenceFilter), mutationSession)
+            : 0;
 
         if (txCount > 0 || whCount > 0 || virtualAccountUsers > 0) {
             return res.status(400).json({
@@ -666,14 +766,9 @@ const deleteGateway = async (req, res) => {
             });
         }
 
-        if (paymentGatewayService._getLegacyGatewayFallback(gateway.code)) {
-            return res.status(400).json({
-                success: false,
-                message: `Cannot delete gateway '${gateway.name}' while its legacy environment credentials remain configured. Deactivate it or remove those credentials first.`
-            });
-        }
-
-        await PaymentGateway.findByIdAndDelete(id);
+        await PaymentGateway.findByIdAndDelete(id, { session: mutationSession });
+        await mutationSession.commitTransaction();
+        mutationFinished = true;
 
         const adminId = req.user?._id || req.user?.id;
         const operatorName = req.user?.name || req.user?.email || 'SuperAdmin';
@@ -688,7 +783,18 @@ const deleteGateway = async (req, res) => {
             message: `Gateway '${gateway.name}' deleted successfully.`
         });
     } catch (error) {
+        if (mutationSession && !mutationFinished) {
+            try { await mutationSession.abortTransaction(); } catch (_) {}
+            mutationFinished = true;
+        }
         res.status(500).json({ success: false, message: error.message });
+    } finally {
+        if (mutationSession) {
+            if (!mutationFinished) {
+                try { await mutationSession.abortTransaction(); } catch (_) {}
+            }
+            await mutationSession.endSession();
+        }
     }
 };
 
@@ -831,7 +937,6 @@ const resolveReconciliationTransaction = async (req, res) => {
 };
 
 module.exports = {
-    ensureDefaultGateways,
     getAllGateways,
     getGatewayById,
     getAdapterCapabilities,

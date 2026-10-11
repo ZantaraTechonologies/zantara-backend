@@ -159,6 +159,15 @@ async function runCapabilitiesTests() {
             const paystack = caps.find(c => c.code === 'paystack');
             assert.strictEqual(paystack.label, 'Paystack');
             assert.deepStrictEqual(paystack.supportedChannels, ['card', 'bank_transfer', 'ussd']);
+            assert.deepStrictEqual(paystack.virtualAccounts, {
+                supported: true,
+                type: 'dedicated',
+                providerSlugs: ['wema-bank', 'titan-paystack', 'test-bank'],
+                providerSlugsByEnvironment: {
+                    live: ['wema-bank', 'titan-paystack'],
+                    test: ['test-bank']
+                }
+            });
             assert.ok(paystack.credentialFields.some(f => f.key === 'publicKey' && f.sensitive === false));
             assert.ok(paystack.credentialFields.some(f => f.key === 'secretKey' && f.sensitive === true));
 
@@ -166,6 +175,8 @@ async function runCapabilitiesTests() {
             const monnify = caps.find(c => c.code === 'monnify');
             assert.strictEqual(monnify.label, 'Monnify');
             assert.ok(monnify.supportedChannels.includes('virtual_account'));
+            assert.strictEqual(monnify.virtualAccounts.supported, true);
+            assert.strictEqual(monnify.virtualAccounts.type, 'reserved');
             assert.ok(monnify.metadataFields.some(m => m.key === 'contractCode' && m.required === true));
         });
 
@@ -242,6 +253,7 @@ async function runCapabilitiesTests() {
             assert.strictEqual(res.responseData?.success, true);
             assert.strictEqual(res.responseData?.data?.code, 'monnify_direct');
             assert.ok(res.responseData?.data?.supportedChannels.includes('virtual_account'));
+            assert.strictEqual(res.responseData?.data?.virtualAccounts?.supported, false);
         });
 
         // Test 6: Inactive gateway cannot be set as default on creation

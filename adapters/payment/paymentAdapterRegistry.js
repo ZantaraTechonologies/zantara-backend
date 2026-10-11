@@ -35,6 +35,15 @@ const ADAPTER_REGISTRY = {
         label: 'Paystack',
         defaultBaseUrl: 'https://api.paystack.co',
         supportedChannels: ['card', 'bank_transfer', 'ussd'],
+        virtualAccounts: {
+            supported: true,
+            type: 'dedicated',
+            providerSlugs: ['wema-bank', 'titan-paystack', 'test-bank'],
+            providerSlugsByEnvironment: {
+                live: ['wema-bank', 'titan-paystack'],
+                test: ['test-bank']
+            }
+        },
         credentialFields: [
             {
                 key: 'publicKey',
@@ -69,6 +78,11 @@ const ADAPTER_REGISTRY = {
         label: 'Monnify',
         defaultBaseUrl: 'https://sandbox.monnify.com',
         supportedChannels: ['card', 'bank_transfer', 'virtual_account'],
+        virtualAccounts: {
+            supported: true,
+            type: 'reserved',
+            providerSlugs: []
+        },
         credentialFields: [
             {
                 key: 'publicKey',
@@ -112,6 +126,11 @@ const ADAPTER_REGISTRY = {
         label: 'Flutterwave',
         defaultBaseUrl: 'https://api.flutterwave.com/v3',
         supportedChannels: ['card', 'bank_transfer', 'ussd'],
+        virtualAccounts: {
+            supported: false,
+            type: null,
+            providerSlugs: []
+        },
         credentialFields: [
             {
                 key: 'publicKey',
@@ -166,6 +185,17 @@ function getPublicCapabilities() {
             label: spec.label,
             defaultBaseUrl: spec.defaultBaseUrl,
             supportedChannels: spec.supportedChannels,
+            virtualAccounts: {
+                supported: !!spec.virtualAccounts?.supported,
+                type: spec.virtualAccounts?.type || null,
+                providerSlugs: [...(spec.virtualAccounts?.providerSlugs || [])],
+                ...(spec.virtualAccounts?.providerSlugsByEnvironment ? {
+                    providerSlugsByEnvironment: Object.fromEntries(
+                        Object.entries(spec.virtualAccounts.providerSlugsByEnvironment)
+                            .map(([environment, slugs]) => [environment, [...slugs]])
+                    )
+                } : {})
+            },
             credentialFields: spec.credentialFields.map(f => ({
                 key: f.key,
                 label: f.label,

@@ -57,6 +57,13 @@ const paymentGatewaySchema = new mongoose.Schema({
         trim: true,
         default: ''
     },
+    // Previous trusted verification configurations are retained so permanent
+    // accounts remain verifiable after an approved credential rotation.
+    webhookVerificationSnapshots: {
+        type: [mongoose.Schema.Types.Mixed],
+        select: false,
+        default: undefined
+    },
     baseUrl: {
         type: String,
         trim: true,
@@ -134,7 +141,7 @@ paymentGatewaySchema.pre('save', async function (next) {
 // at the application level by Step 1 and race-protected at DB level by the index.
 //
 // If Step 2 fails (e.g. invalid id), no gateway has isDefault=true, which is
-// a safe state — getDefaultGateway() returns null and falls back to env or error.
+// a safe state: getDefaultGateway() returns null.
 //
 paymentGatewaySchema.statics.setDefault = async function (gatewayId) {
     if (!gatewayId) throw new Error('gatewayId is required to set a default gateway');

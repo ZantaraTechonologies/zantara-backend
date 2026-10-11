@@ -298,6 +298,7 @@ async function runMultigatewayUnifiedWebhookTests() {
             const spec = ADAPTER_REGISTRY[cap.code];
             assert.ok(spec, `capability ${cap.code} must exist in registry`);
             assert.deepStrictEqual(cap.supportedChannels, spec.supportedChannels);
+            assert.deepStrictEqual(cap.virtualAccounts, spec.virtualAccounts);
             // Public capabilities must carry zero secret values
             assert.strictEqual(cap.secretKey, undefined);
             assert.strictEqual(cap.apiKey, undefined);

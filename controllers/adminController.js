@@ -5,6 +5,7 @@ const mongoose = require('mongoose')
 const { EVENTS } = require('../utils/pricingLogger')
 const notificationService = require('../services/notification.service');
 const settingsService = require('../services/settings.service');
+const { serializeAdminUser, serializeAdminUsers } = require('../utils/virtualAccountSerializer');
 
 const CACHED_PUBLIC_SETTING_KEYS = new Set([
     'SITE_NAME',
@@ -85,7 +86,7 @@ const getAllUsers = async (req, res) => {
         res.json({ 
             success: true, 
             data: {
-                users,
+                users: serializeAdminUsers(users),
                 pagination: {
                     totalUsers,
                     totalPages: Math.ceil(totalUsers / limit),
@@ -138,7 +139,7 @@ const updateUserRole = async (req, res) => {
             await logAction(req.user.id, req.user.name, 'ROLE_CHANGE', `User: ${user.name} (${user.phone})`, { oldRole: oldUser.role, newRole: role }, 'success', req);
         }
 
-        res.json({ success: true, data: user });
+        res.json({ success: true, data: serializeAdminUser(user) });
     } catch (e) {
         res.status(500).json({ message: e.message });
     }
@@ -382,7 +383,7 @@ const getUserById = async (req, res) => {
             monthlyVolume: monthlyStats[0]?.total || 0
         };
 
-        res.json({ success: true, data: userData });
+        res.json({ success: true, data: serializeAdminUser(userData) });
     } catch (e) {
         console.error('GetUserById error:', e);
         res.status(500).json({ message: e.message });

@@ -4,6 +4,7 @@ const { verifyJWT } = require('../middlewares/auth')
 const requireLegalCompliance = require('../middlewares/requireLegalCompliance')
 const { fundWallet, verifyFunding } = require('../controllers/walletFundingController')
 const { getFundingMethods } = require('../controllers/adminPaymentGatewayController')
+const { provisionVirtualAccount } = require('../controllers/virtualAccountController')
 
 const router = express.Router()
 
@@ -15,5 +16,6 @@ router.post('/transfer', verifyJWT, requireLegalCompliance, walletController.tra
 router.get('/funding-methods', verifyJWT, getFundingMethods)
 router.post('/fund', verifyJWT, requireLegalCompliance, fundWallet)
 router.get('/verify', verifyJWT, verifyFunding)
+router.post('/virtual-accounts/:provider', verifyJWT, requireLegalCompliance, provisionVirtualAccount)
 
 module.exports = router

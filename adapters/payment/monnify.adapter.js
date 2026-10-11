@@ -39,6 +39,15 @@ class MonnifyAdapter extends BasePaymentAdapter {
         throw this._definitiveInitializationError(response.data?.responseMessage || 'Monnify Authentication Failed');
     }
 
+    assertVirtualAccountCustomer(user) {
+        if (!user?.email && !user?.phone) {
+            const error = new Error('Email or phone is required for Monnify virtual-account provisioning');
+            error.code = 'MONNIFY_CUSTOMER_DATA_INVALID';
+            throw error;
+        }
+        return true;
+    }
+
     async initializePayment({ user, amount, channel, channels, reference, callbackUrl, metadata = {} }) {
         if (!user || (!user.email && !user.phone)) {
             throw this._definitiveInitializationError('MonnifyAdapter: customer email or phone is required');
@@ -93,9 +102,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
     }
 
     async createReservedAccount(user) {
-        if (!user?.email && !user?.phone) {
-            throw new Error('Monnify Reserved: Email or phone is required');
-        }
+        this.assertVirtualAccountCustomer(user);
         const token = await this.getAccessToken();
         const accountReference = `VIRTUAL_${user._id}`;
         const response = await axios.post(

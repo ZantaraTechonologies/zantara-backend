@@ -72,12 +72,46 @@ const userSchema = new mongoose.Schema({
     }],
     virtualAccounts: [{
         bankName: String,
+        bankCode: String,
+        bankSlug: String,
         accountName: String,
         accountNumber: String,
+        currency: String,
         provider: String,
         gatewayId: String,
         accountReference: String,
+        providerAccountId: String,
+        providerCustomerId: String,
+        providerCustomerCode: String,
+        preferredBank: String,
+        consentGrantedAt: Date,
+        active: Boolean,
+        assigned: Boolean,
+        provisioningKey: String,
+        provisioningStatus: {
+            type: String,
+            enum: ['pending', 'active', 'failed']
+        },
+        provisioningToken: { type: String, select: false },
+        provisioningGatewayContext: { type: String, select: false },
+        provisioningDispatchState: {
+            type: String,
+            enum: ['not_started', 'customer_creating', 'customer_ready', 'dispatching', 'awaiting_assignment', 'reconciling', 'retryable', 'complete']
+        },
+        provisioningAttemptCount: { type: Number, default: 0 },
+        provisioningLastDispatchAt: Date,
+        provisioningStartedAt: Date,
+        provisioningExpiresAt: Date,
+        provisioningExpectedAccountCount: Number,
+        provisionedAt: Date,
+        provisioningFailure: String,
     }],
+    virtualAccountPreferences: {
+        paystack: {
+            preferredBank: String,
+            consentGrantedAt: Date,
+        }
+    },
     virtualAccountGatewaySnapshots: {
         type: Map,
         of: mongoose.Schema.Types.Mixed,
