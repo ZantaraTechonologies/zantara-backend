@@ -8,7 +8,7 @@ class PaystackAdapter extends BasePaymentAdapter {
         this.baseUrl = (this.baseUrl || 'https://api.paystack.co').replace(/\/$/, '');
         this.secretKey = this.secretKey || '';
         this.publicKey = this.publicKey || '';
-        this.webhookSecret = this.webhookSecret || this.secretKey;
+        this.webhookSecret = this.secretKey;
     }
 
     _apiHeaders() {

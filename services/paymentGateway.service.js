@@ -305,11 +305,6 @@ class PaymentGatewayService {
         'Database-managed Paystack credentials must be encrypted at rest'
       )
     }
-    if (gateway.webhookSecret && gateway.webhookSecret !== gateway.secretKey) {
-      throw new Error(
-        'Paystack webhook secret must match the Paystack API secret'
-      )
-    }
     if (requireLive && gateway.environment !== 'live') {
       throw new Error(
         'Production requires a live Paystack gateway configuration'
