@@ -1,188 +1,209 @@
 // Import the Express framework to create the server
-const express = require('express');
-const mongoose = require('mongoose');
-const cron = require('node-cron');
-const morgan = require('morgan');
-const { sanitizeUrl } = require('./utils/logSanitizer');
-const { createGracefulShutdown, registerShutdownSignals } = require('./utils/gracefulShutdown');
-const cors = require('cors');
-require('dotenv').config();
-const { validateEncryptionConfiguration } = require('./utils/crypto');
+const express = require('express')
+const mongoose = require('mongoose')
+const cron = require('node-cron')
+const morgan = require('morgan')
+const { sanitizeUrl } = require('./utils/logSanitizer')
+const {
+  createGracefulShutdown,
+  registerShutdownSignals
+} = require('./utils/gracefulShutdown')
+const cors = require('cors')
+require('dotenv').config()
+const { validateEncryptionConfiguration } = require('./utils/crypto')
 
 // Fail before binding the HTTP port if the permanent production key is unsafe.
-validateEncryptionConfiguration();
+validateEncryptionConfiguration()
 
-const app = express();
+const app = express()
 
-app.set('trust proxy', 1); // you're on Render
+app.set('trust proxy', 1) // you're on Render
 
 // Middlewares that don't touch the request body payload
-const cookieParser = require('cookie-parser');
-app.use(cookieParser());
+const cookieParser = require('cookie-parser')
+app.use(cookieParser())
 
-const allowedOrigins = process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : ['http://localhost:5173'];
-app.use(cors({
+const allowedOrigins = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(',')
+  : ['http://localhost:5173']
+app.use(
+  cors({
     origin: allowedOrigins,
     credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key"]
-}));
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key']
+  })
+)
 
 // ---- WEBHOOK ROUTES (RAW BODY) — MUST BE BEFORE express.json() ----
 // Unified payment gateway webhook endpoint. express.raw() conserves the exact
 // raw HTTP body for signature verification; JSON parsing is deferred to
 // paymentGatewayService.routeWebhook() after signature validation.
-app.use('/api/webhooks', require('./routes/webhooks'));
+app.use('/api/webhooks', require('./routes/webhooks'))
 
 // ---- PAYSTACK WEBHOOK (RAW BODY) — MUST BE BEFORE express.json() ----
-const { webhook } = require('./controllers/paystackController');
-const paystackRawBody = express.raw({ type: '*/*' });
+const { webhook } = require('./controllers/paystackController')
+const paystackRawBody = express.raw({ type: '*/*' })
 // Keep every externally reachable compatibility URL on the same verified path.
-app.post('/webhooks/paystack', paystackRawBody, webhook);
-app.post('/api/paystack/webhook', paystackRawBody, webhook);
-app.post('/api/wallet/paystack/webhook', paystackRawBody, webhook);
+app.post('/webhooks/paystack', paystackRawBody, webhook)
+app.post('/api/paystack/webhook', paystackRawBody, webhook)
+app.post('/api/wallet/paystack/webhook', paystackRawBody, webhook)
 
 // ---- MONNIFY WEBHOOK ----
-const { webhook: monnifyWebhook } = require('./controllers/monnifyController');
-app.post('/webhooks/monnify', express.raw({ type: 'application/json' }), monnifyWebhook);
+const { webhook: monnifyWebhook } = require('./controllers/monnifyController')
+app.post(
+  '/webhooks/monnify',
+  express.raw({ type: 'application/json' }),
+  monnifyWebhook
+)
 // --------------------------------------------------------------------
 // --------------------------------------------------------------------
 
 // Body parsers for the rest of your API
-app.use(express.json());                         // Parse JSON
-app.use(express.urlencoded({ extended: true })); // Parse form data
+app.use(express.json()) // Parse JSON
+app.use(express.urlencoded({ extended: true })) // Parse form data
 
 // ---- FLUTTERWAVE WEBHOOK (JSON BODY) ----
-const { webhook: flutterwaveWebhook } = require('./controllers/flutterwaveController');
-app.post('/webhooks/flutterwave', flutterwaveWebhook);
+const {
+  webhook: flutterwaveWebhook
+} = require('./controllers/flutterwaveController')
+app.post('/webhooks/flutterwave', flutterwaveWebhook)
 // --------------------------------------------------------------------
 
 // Logging, caching headers, etc.
-const isProduction = process.env.NODE_ENV === 'production';
+const isProduction = process.env.NODE_ENV === 'production'
 morgan.token('url', req => {
-    const url = req.originalUrl || req.url || '';
-    return sanitizeUrl(url);
-});
-app.use(morgan(isProduction ? 'combined' : 'dev'));
+  const url = req.originalUrl || req.url || ''
+  return sanitizeUrl(url)
+})
+app.use(morgan(isProduction ? 'combined' : 'dev'))
 
 // ---- MAINTENANCE MODE MIDDLEWARE ----
 app.use((req, res, next) => {
-    if (process.env.MAINTENANCE_MODE === 'true' && req.path !== '/') {
-        return res.status(503).json({ 
-            code: 'SYSTEM_MAINTENANCE',
-            error: 'System Maintenance', 
-            message: 'Zantara is currently undergoing a scheduled update. Please try again later.' 
-        });
-    }
-    next();
-});
+  if (process.env.MAINTENANCE_MODE === 'true' && req.path !== '/') {
+    return res.status(503).json({
+      code: 'SYSTEM_MAINTENANCE',
+      error: 'System Maintenance',
+      message:
+        'Zantara is currently undergoing a scheduled update. Please try again later.'
+    })
+  }
+  next()
+})
 
-app.set('etag', false); // avoid 304s based on ETag
+app.set('etag', false) // avoid 304s based on ETag
 app.use((req, res, next) => {
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.set('Pragma', 'no-cache');
-    res.set('Expires', '0');
-    next();
-});
+  res.set(
+    'Cache-Control',
+    'no-store, no-cache, must-revalidate, proxy-revalidate'
+  )
+  res.set('Pragma', 'no-cache')
+  res.set('Expires', '0')
+  next()
+})
 
 // Routes
-const index = require('./routes/index');
-const analyticsRoutes = require('./routes/analytics');
-const authRoutes = require('./routes/auth');
-const adminAuthRoutes = require('./routes/adminAuth');
-const adminRoutes = require('./routes/admin'); // Main admin Actions
-const walletRoutes = require('./routes/wallet');
-const paystackRoutes = require('./routes/paystack');
-const monnifyRoutes = require('./routes/monnify');
-const flutterwaveRoutes = require('./routes/flutterwave');
-const transactionRoutes = require('./routes/transaction');
-const servicesRoutes = require('./routes/services');
-const kycRoutes = require('./routes/kyc');
-const supportRoutes = require('./routes/support');
-const notificationRoutes = require('./routes/notification');
-const adminNotificationRoutes = require('./routes/adminNotification');
-const bankAccountRoutes = require('./routes/bankAccount');
-const businessRoutes = require('./routes/business');
-const auditRoutes = require('./routes/audit');
-const userEarningsRoutes = require('./routes/userEarnings');
-const withdrawalRoutes = require('./routes/withdrawal');
-const systemRoutes = require('./routes/system');
-const investmentRoutes = require('./routes/investment');
-const catalogV2Routes = require('./routes/v2/catalog');
-const pricingV1Routes = require('./routes/v1/pricing');
-const legalRoutes = require('./routes/legal');
-const errorHandler = require('./middlewares/errorHandler');
+const index = require('./routes/index')
+const analyticsRoutes = require('./routes/analytics')
+const authRoutes = require('./routes/auth')
+const adminAuthRoutes = require('./routes/adminAuth')
+const adminRoutes = require('./routes/admin') // Main admin Actions
+const walletRoutes = require('./routes/wallet')
+const paystackRoutes = require('./routes/paystack')
+const monnifyRoutes = require('./routes/monnify')
+const flutterwaveRoutes = require('./routes/flutterwave')
+const transactionRoutes = require('./routes/transaction')
+const servicesRoutes = require('./routes/services')
+const kycRoutes = require('./routes/kyc')
+const supportRoutes = require('./routes/support')
+const notificationRoutes = require('./routes/notification')
+const adminNotificationRoutes = require('./routes/adminNotification')
+const bankAccountRoutes = require('./routes/bankAccount')
+const businessRoutes = require('./routes/business')
+const auditRoutes = require('./routes/audit')
+const userEarningsRoutes = require('./routes/userEarnings')
+const withdrawalRoutes = require('./routes/withdrawal')
+const systemRoutes = require('./routes/system')
+const investmentRoutes = require('./routes/investment')
+const catalogV2Routes = require('./routes/v2/catalog')
+const pricingV1Routes = require('./routes/v1/pricing')
+const legalRoutes = require('./routes/legal')
+const errorHandler = require('./middlewares/errorHandler')
 
-app.use('/api', index);
-app.use('/api/auth', authRoutes);
-app.get('/api/admin/auth/me', adminAuthRoutes); // maintain backward compat if needed, or point to new generic
-app.use('/api/admin', adminRoutes);
-app.use('/api/admin/auth', adminAuthRoutes);
-app.use('/api/wallet', walletRoutes);
-app.use('/api/bank-accounts', bankAccountRoutes);
-app.use('/api/admin/stats', analyticsRoutes);
-app.use('/api/paystack', paystackRoutes);
-app.use('/api/monnify', monnifyRoutes);
-app.use('/api/flutterwave', flutterwaveRoutes);
-app.use('/api/transaction-logs', transactionRoutes);
-app.use('/api/services', servicesRoutes);
-app.use('/api/kyc', kycRoutes);
-app.use('/api/support', supportRoutes);
-app.use('/api/admin/support', supportRoutes);
-app.use('/api/notifications', notificationRoutes);
-app.use('/api/admin/notifications', adminNotificationRoutes);
-app.use('/api/admin/payment-gateways', require('./routes/adminPaymentGateway'));
-app.use('/api/admin/business', businessRoutes);
-app.use('/api/settings', require('./routes/settings'));
-app.use('/api/admin/audit-logs', auditRoutes);
-app.use('/api/withdrawal', withdrawalRoutes);
-app.use('/api/admin/withdrawals', withdrawalRoutes);
-app.use('/api/user/earnings', userEarningsRoutes);
-app.use('/api/admin/system', systemRoutes);
-app.use('/api/investment', investmentRoutes);
-app.use('/api/v2/catalog', catalogV2Routes);
-app.use('/api/v1/pricing', pricingV1Routes);
-app.use('/api/legal', legalRoutes);
+app.use('/api', index)
+app.use('/api/auth', authRoutes)
+app.get('/api/admin/auth/me', adminAuthRoutes) // maintain backward compat if needed, or point to new generic
+app.use('/api/admin', adminRoutes)
+app.use('/api/admin/auth', adminAuthRoutes)
+app.use('/api/wallet', walletRoutes)
+app.use('/api/bank-accounts', bankAccountRoutes)
+app.use('/api/admin/stats', analyticsRoutes)
+app.use('/api/paystack', paystackRoutes)
+app.use('/api/monnify', monnifyRoutes)
+app.use('/api/flutterwave', flutterwaveRoutes)
+app.use('/api/transaction-logs', transactionRoutes)
+app.use('/api/services', servicesRoutes)
+app.use('/api/kyc', kycRoutes)
+app.use('/api/support', supportRoutes)
+app.use('/api/admin/support', supportRoutes)
+app.use('/api/notifications', notificationRoutes)
+app.use('/api/admin/notifications', adminNotificationRoutes)
+app.use('/api/admin/payment-gateways', require('./routes/adminPaymentGateway'))
+app.use('/api/admin/business', businessRoutes)
+app.use('/api/settings', require('./routes/settings'))
+app.use('/api/admin/audit-logs', auditRoutes)
+app.use('/api/withdrawal', withdrawalRoutes)
+app.use('/api/admin/withdrawals', withdrawalRoutes)
+app.use('/api/user/earnings', userEarningsRoutes)
+app.use('/api/admin/system', systemRoutes)
+app.use('/api/investment', investmentRoutes)
+app.use('/api/v2/catalog', catalogV2Routes)
+app.use('/api/v1/pricing', pricingV1Routes)
+app.use('/api/legal', legalRoutes)
 
 // Global error handler (keep last)
-app.use(errorHandler);
+app.use(errorHandler)
 
 // Health
 app.get('/', (req, res) => {
-    res.send('API is live');
-});
+  res.send('API is live')
+})
 
 // Boot
-const PORT = process.env.PORT || 7000;
-const MONGOURI = process.env.MONGO_URI;
-let server = null;
+const PORT = process.env.PORT || 7000
+const MONGOURI = process.env.MONGO_URI
+let server = null
 
 const gracefulShutdown = createGracefulShutdown({
-    getServer: () => server,
-    cron,
-    mongoose
-});
-registerShutdownSignals({ shutdown: gracefulShutdown.shutdown });
+  getServer: () => server,
+  cron,
+  mongoose
+})
+registerShutdownSignals({ shutdown: gracefulShutdown.shutdown })
 
-mongoose.connect(MONGOURI).then(async () => {
-    if (gracefulShutdown.isShuttingDown()) return;
+mongoose
+  .connect(MONGOURI)
+  .then(async () => {
+    if (gracefulShutdown.isShuttingDown()) return
 
-    if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') {
-        await require('./services/paymentGateway.service').assertDatabaseManagedPaystackReady({
-            requireLive: process.env.NODE_ENV === 'production'
-        });
+    if (
+      process.env.NODE_ENV === 'production' ||
+      process.env.NODE_ENV === 'staging'
+    ) {
+      await require('./services/paymentGateway.service').assertDatabaseManagedPaystackReady()
     }
 
-    server = app.listen(PORT, () => console.log(`API is Live on port ${PORT}`));
+    server = app.listen(PORT, () => console.log(`API is Live on port ${PORT}`))
     // Start the monthly dividend cron job
-    const { startDividendCron } = require('./utils/dividendCron');
-    startDividendCron();
+    const { startDividendCron } = require('./utils/dividendCron')
+    startDividendCron()
     // Start the periodic settlement/transaction recovery cron (idempotent, exactly-once)
-    require('./cron/transactionRetryCron');
-}).catch((err) => {
-    if (gracefulShutdown.isShuttingDown()) return;
+    require('./cron/transactionRetryCron')
+  })
+  .catch(err => {
+    if (gracefulShutdown.isShuttingDown()) return
 
-    console.error('CRITICAL: Database connection failed!');
-    console.error('Reason:', err.message || err);
-    process.exit(1); // Force exit so nodemon can try again or the user sees the hard crash
-});
+    console.error('CRITICAL: Database connection failed!')
+    console.error('Reason:', err.message || err)
+    process.exit(1) // Force exit so nodemon can try again or the user sees the hard crash
+  })

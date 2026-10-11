@@ -64,6 +64,18 @@ const paymentGatewaySchema = new mongoose.Schema({
         select: false,
         default: undefined
     },
+    virtualAccountMutationVersion: {
+        type: Number,
+        default: 0,
+        min: 0,
+        select: false
+    },
+    virtualAccountClaimVersion: {
+        type: Number,
+        default: 0,
+        min: 0,
+        select: false
+    },
     baseUrl: {
         type: String,
         trim: true,
@@ -143,16 +155,18 @@ paymentGatewaySchema.pre('save', async function (next) {
 // If Step 2 fails (e.g. invalid id), no gateway has isDefault=true, which is
 // a safe state: getDefaultGateway() returns null.
 //
-paymentGatewaySchema.statics.setDefault = async function (gatewayId) {
+paymentGatewaySchema.statics.setDefault = async function (gatewayId, options = {}) {
     if (!gatewayId) throw new Error('gatewayId is required to set a default gateway');
+    const session = options.session;
 
     // Step 1: Atomically clear any existing default
-    await this.updateMany({ isDefault: true }, { $set: { isDefault: false } });
+    await this.updateMany({ isDefault: true }, { $set: { isDefault: false } }, { session });
 
     // Step 2: Atomically set the new default
     const result = await this.updateOne(
         { _id: gatewayId, status: 'active' },
-        { $set: { isDefault: true } }
+        { $set: { isDefault: true } },
+        { session }
     );
 
     if (result.modifiedCount !== 1) {
@@ -163,4 +177,3 @@ paymentGatewaySchema.statics.setDefault = async function (gatewayId) {
 };
 
 module.exports = mongoose.model('PaymentGateway', paymentGatewaySchema);
-
