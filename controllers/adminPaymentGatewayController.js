@@ -514,13 +514,24 @@ const updateGateway = async (req, res) => {
       gateway.markModified('webhookVerificationSnapshots')
     }
 
+    const currentMetadata = gateway.metadata || {}
+    const requestedMetadata = metadata || {}
+
+    const metadataChanged =
+      JSON.stringify(currentMetadata) !== JSON.stringify(requestedMetadata)
+
     const virtualAccountConfigChanged =
       currentAdapter === 'monnify' &&
-      ((adapterType && adapterType.toLowerCase() !== gateway.adapterType) ||
-        baseUrl !== undefined ||
-        publicKey !== undefined ||
-        (environment && environment !== gateway.environment) ||
-        metadata !== undefined)
+      ((adapterType &&
+        adapterType.toLowerCase() !==
+          String(gateway.adapterType || '').toLowerCase()) ||
+        (baseUrl !== undefined &&
+          baseUrl.trim() !== String(gateway.baseUrl || '').trim()) ||
+        (publicKey !== undefined &&
+          publicKey.trim() !== String(gateway.publicKey || '').trim()) ||
+        (environment &&
+          environment !== gateway.environment) ||
+        (metadata !== undefined && metadataChanged))
     if (virtualAccountConfigChanged) {
       const virtualAccountUsers = await queryWithSession(
         User.countDocuments(virtualAccountReferenceFilter(gateway)),
