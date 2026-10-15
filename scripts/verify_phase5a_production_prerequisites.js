@@ -3,6 +3,13 @@
 require('dotenv').config();
 const mongoose = require('mongoose');
 const { isDeepStrictEqual } = require('node:util');
+const {
+    hasExplicitDatabaseName,
+    validateDatabaseTargetConfiguration,
+    databaseTargetConnectionOptions,
+    assertConnectedDatabaseName,
+    sanitizeDatabaseErrorMessage
+} = require('../config/db');
 
 const REQUIRED_INDEXES = Object.freeze({
     transactionstatuses: [
@@ -27,14 +34,6 @@ const REQUIRED_INDEXES = Object.freeze({
     transactions: [{ name: 'transactionId_1', key: { transactionId: 1 }, unique: true }],
     wallets: [{ name: 'userId_1_unique', key: { userId: 1 }, unique: true }]
 });
-
-function hasExplicitDatabaseName(uri) {
-    if (typeof uri !== 'string' || !/^mongodb(?:\+srv)?:\/\//i.test(uri)) return false;
-    const withoutQuery = uri.split('?')[0];
-    const authorityStart = withoutQuery.indexOf('://') + 3;
-    const pathStart = withoutQuery.indexOf('/', authorityStart);
-    return pathStart >= 0 && withoutQuery.slice(pathStart + 1).trim().length > 0;
-}
 
 function indexMatches(actual, expected) {
     return !!actual
@@ -165,12 +164,20 @@ function assertDvaOwnershipSafe(report) {
 async function run() {
     const mongoUri = process.env.MONGO_URI;
     if (!mongoUri) throw new Error('MONGO_URI is required');
-    if (!hasExplicitDatabaseName(mongoUri)) {
-        throw new Error('MONGO_URI must explicitly include the approved target database name');
-    }
+    const expectedDatabaseName = validateDatabaseTargetConfiguration({
+        mongoUri,
+        databaseName: process.env.MONGO_DB_NAME,
+        expectedDatabaseName: process.env.EXPECTED_DB_NAME,
+        nodeEnv: process.env.NODE_ENV
+    });
 
-    await mongoose.connect(mongoUri, { autoIndex: false, autoCreate: false });
+    await mongoose.connect(mongoUri, {
+        autoIndex: false,
+        autoCreate: false,
+        ...databaseTargetConnectionOptions({ mongoUri, databaseName: process.env.MONGO_DB_NAME })
+    });
     try {
+        assertConnectedDatabaseName(mongoose.connection.name, expectedDatabaseName);
         const client = mongoose.connection.getClient();
         const hello = await mongoose.connection.db.admin().command({ hello: 1 });
         const topologyType = client.topology?.description?.type || '';
@@ -231,7 +238,7 @@ async function run() {
 
 if (require.main === module) {
     run().catch(error => {
-        console.error(`[Phase 5A Prerequisite Verification] ${error.message}`);
+        console.error(`[Phase 5A Prerequisite Verification] ${sanitizeDatabaseErrorMessage(error, process.env.MONGO_URI)}`);
         process.exitCode = 1;
     });
 }

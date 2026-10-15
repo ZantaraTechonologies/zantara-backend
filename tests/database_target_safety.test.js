@@ -8,9 +8,11 @@ const {
     hasExplicitDatabaseName,
     requiresExpectedDatabaseName,
     validateDatabaseTargetConfiguration,
+    databaseTargetConnectionOptions,
     assertConnectedDatabaseName,
     sanitizeDatabaseErrorMessage
 } = require('../config/db');
+const { validateEncryptionConfiguration } = require('../utils/crypto');
 const {
     APPLY_CONFIRMATION: TRANSACTION_CONFIRMATION,
     run: runTransactionMigration
@@ -21,6 +23,7 @@ const {
 } = require('../scripts/migrate_phase5a_wallet_identity_index');
 
 const MONGO_URI = 'mongodb://user:secret@database.example.test:27017/zantara';
+const PATHLESS_MONGO_URI = 'mongodb://user:secret@database.example.test:27017/';
 
 function mismatchedMongoose() {
     const state = { connectOptions: null, collectionAccesses: 0, disconnects: 0 };
@@ -42,7 +45,7 @@ function mismatchedMongoose() {
     };
 }
 
-test('database target configuration keeps local validation optional and deployment/apply fail closed', () => {
+test('database target configuration supports explicit URI and pathless selector modes', () => {
     assert.equal(hasExplicitDatabaseName('mongodb://localhost:27017/zantara'), true);
     assert.equal(hasExplicitDatabaseName('mongodb+srv://user:secret@example.test/zantara?retryWrites=true'), true);
     assert.equal(hasExplicitDatabaseName('mongodb://localhost:27017'), false);
@@ -52,12 +55,27 @@ test('database target configuration keeps local validation optional and deployme
     assert.equal(requiresExpectedDatabaseName({ nodeEnv: 'test' }), false);
     assert.equal(requiresExpectedDatabaseName({ nodeEnv: 'production' }), true);
     assert.equal(requiresExpectedDatabaseName({ nodeEnv: 'staging' }), true);
+    assert.equal(requiresExpectedDatabaseName({ nodeEnv: ' Production ' }), true);
+    assert.equal(requiresExpectedDatabaseName({ nodeEnv: 'STAGING' }), true);
     assert.equal(requiresExpectedDatabaseName({ nodeEnv: 'development', apply: true }), true);
 
     assert.equal(validateDatabaseTargetConfiguration({
         mongoUri: MONGO_URI,
         nodeEnv: 'test'
-    }), '');
+    }), 'zantara');
+    assert.deepEqual(databaseTargetConnectionOptions({
+        mongoUri: MONGO_URI,
+        databaseName: 'zantara'
+    }), {});
+    assert.equal(validateDatabaseTargetConfiguration({
+        mongoUri: PATHLESS_MONGO_URI,
+        databaseName: 'test',
+        nodeEnv: 'test'
+    }), 'test');
+    assert.deepEqual(databaseTargetConnectionOptions({
+        mongoUri: PATHLESS_MONGO_URI,
+        databaseName: 'test'
+    }), { dbName: 'test' });
     assert.throws(() => validateDatabaseTargetConfiguration({
         mongoUri: MONGO_URI,
         nodeEnv: 'production'
@@ -68,10 +86,22 @@ test('database target configuration keeps local validation optional and deployme
         apply: true
     }), /EXPECTED_DB_NAME/);
     assert.throws(() => validateDatabaseTargetConfiguration({
-        mongoUri: 'mongodb://localhost:27017',
+        mongoUri: PATHLESS_MONGO_URI,
+        expectedDatabaseName: 'test',
+        nodeEnv: 'production'
+    }), /MONGO_DB_NAME/);
+    assert.throws(() => validateDatabaseTargetConfiguration({
+        mongoUri: MONGO_URI,
+        databaseName: 'other',
         expectedDatabaseName: 'zantara',
         nodeEnv: 'production'
-    }), /explicitly include/);
+    }), /MONGO_DB_NAME does not match/);
+    assert.throws(() => validateDatabaseTargetConfiguration({
+        mongoUri: PATHLESS_MONGO_URI,
+        databaseName: 'test',
+        expectedDatabaseName: 'other',
+        nodeEnv: 'production'
+    }), /Configured database does not match/);
 });
 
 test('connected database checks are exact and do not disclose configured values', () => {
@@ -91,6 +121,21 @@ test('connected database checks are exact and do not disclose configured values'
     assert.equal(sanitized.includes(MONGO_URI), false);
     assert.equal(sanitized.includes('user'), false);
     assert.equal(sanitized.includes('secret'), false);
+});
+
+test('deployment environment normalization remains fail closed for encryption configuration', () => {
+    const originalEnvironment = process.env.NODE_ENV;
+    const originalKey = process.env.PROVIDER_CREDENTIAL_ENCRYPTION_KEY;
+    try {
+        process.env.NODE_ENV = ' Production ';
+        delete process.env.PROVIDER_CREDENTIAL_ENCRYPTION_KEY;
+        assert.throws(() => validateEncryptionConfiguration(), /PROVIDER_CREDENTIAL_ENCRYPTION_KEY/);
+    } finally {
+        if (originalEnvironment === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = originalEnvironment;
+        if (originalKey === undefined) delete process.env.PROVIDER_CREDENTIAL_ENCRYPTION_KEY;
+        else process.env.PROVIDER_CREDENTIAL_ENCRYPTION_KEY = originalKey;
+    }
 });
 
 test('transaction migration checks connected identity before collection access', async () => {
@@ -113,6 +158,28 @@ test('transaction migration checks connected identity before collection access',
     });
     assert.equal(mongooseInstance.state.collectionAccesses, 0);
     assert.equal(mongooseInstance.state.disconnects, 1);
+});
+
+test('pathless migration connection uses approved dbName and still verifies connected identity', async () => {
+    const mongooseInstance = mismatchedMongoose();
+    await assert.rejects(runTransactionMigration({
+        env: {
+            NODE_ENV: 'development',
+            MONGO_URI: PATHLESS_MONGO_URI,
+            MONGO_DB_NAME: 'test',
+            EXPECTED_DB_NAME: 'test'
+        },
+        argv: ['node', 'migration'],
+        mongooseInstance,
+        logger: { log() {} }
+    }), /does not match EXPECTED_DB_NAME/);
+
+    assert.deepEqual(mongooseInstance.state.connectOptions, {
+        autoIndex: false,
+        autoCreate: false,
+        dbName: 'test'
+    });
+    assert.equal(mongooseInstance.state.collectionAccesses, 0);
 });
 
 test('wallet migration checks connected identity before collection access', async () => {

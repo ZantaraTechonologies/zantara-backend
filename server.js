@@ -13,6 +13,7 @@ require('dotenv').config()
 const { validateEncryptionConfiguration } = require('./utils/crypto')
 const {
   validateDatabaseTargetConfiguration,
+  databaseTargetConnectionOptions,
   assertConnectedDatabaseName,
   sanitizeDatabaseErrorMessage
 } = require('./config/db')
@@ -82,7 +83,7 @@ app.post('/webhooks/flutterwave', flutterwaveWebhook)
 // --------------------------------------------------------------------
 
 // Logging, caching headers, etc.
-const isProduction = process.env.NODE_ENV === 'production'
+const isProduction = runtimeConfiguration.nodeEnv === 'production'
 morgan.token('url', req => {
   const url = req.originalUrl || req.url || ''
   return sanitizeUrl(url)
@@ -196,12 +197,17 @@ registerShutdownSignals({ shutdown: gracefulShutdown.shutdown })
 
 const expectedDatabaseName = validateDatabaseTargetConfiguration({
   mongoUri: MONGOURI,
+  databaseName: process.env.MONGO_DB_NAME,
   expectedDatabaseName: process.env.EXPECTED_DB_NAME,
-  nodeEnv: process.env.NODE_ENV
+  nodeEnv: runtimeConfiguration.nodeEnv
+})
+const databaseConnectionOptions = databaseTargetConnectionOptions({
+  mongoUri: MONGOURI,
+  databaseName: process.env.MONGO_DB_NAME
 })
 
 mongoose
-  .connect(MONGOURI)
+  .connect(MONGOURI, databaseConnectionOptions)
   .then(async () => {
     if (gracefulShutdown.isShuttingDown()) return
 
@@ -211,8 +217,8 @@ mongoose
     )
 
     if (
-      process.env.NODE_ENV === 'production' ||
-      process.env.NODE_ENV === 'staging'
+      runtimeConfiguration.nodeEnv === 'production' ||
+      runtimeConfiguration.nodeEnv === 'staging'
     ) {
       await require('./services/paymentGateway.service').assertDatabaseManagedPaystackReady()
     }

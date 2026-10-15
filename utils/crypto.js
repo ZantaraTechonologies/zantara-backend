@@ -8,7 +8,8 @@ const crypto = require('crypto');
  */
 function getSecretKeyBuffer() {
     const keyEnv = process.env.PROVIDER_CREDENTIAL_ENCRYPTION_KEY;
-    const isProdOrStaging = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging';
+    const environment = String(process.env.NODE_ENV || '').trim().toLowerCase();
+    const isProdOrStaging = environment === 'production' || environment === 'staging';
 
     if (!keyEnv) {
         if (isProdOrStaging) {
@@ -39,7 +40,8 @@ function getSecretKeyBuffer() {
 }
 
 function validateEncryptionConfiguration() {
-    if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') getSecretKeyBuffer();
+    const environment = String(process.env.NODE_ENV || '').trim().toLowerCase();
+    if (environment === 'production' || environment === 'staging') getSecretKeyBuffer();
     return true;
 }
 

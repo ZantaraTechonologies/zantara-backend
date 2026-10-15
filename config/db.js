@@ -1,26 +1,44 @@
 'use strict';
 
-function hasExplicitDatabaseName(uri) {
-    if (typeof uri !== 'string' || !/^mongodb(?:\+srv)?:\/\//i.test(uri)) return false;
+function explicitDatabaseNameFromUri(uri) {
+    if (typeof uri !== 'string' || !/^mongodb(?:\+srv)?:\/\//i.test(uri)) return '';
     const withoutQuery = uri.split('?')[0];
     const authorityStart = withoutQuery.indexOf('://') + 3;
     const pathStart = withoutQuery.indexOf('/', authorityStart);
-    return pathStart >= 0 && withoutQuery.slice(pathStart + 1).trim().length > 0;
+    if (pathStart < 0) return '';
+    const databaseName = withoutQuery.slice(pathStart + 1).trim();
+    if (!databaseName) return '';
+    try {
+        return decodeURIComponent(databaseName);
+    } catch (_) {
+        throw new Error('MONGO_URI contains an invalid database name');
+    }
+}
+
+function hasExplicitDatabaseName(uri) {
+    return Boolean(explicitDatabaseNameFromUri(uri));
 }
 
 function requiresExpectedDatabaseName({ nodeEnv, apply = false } = {}) {
-    return apply || nodeEnv === 'production' || nodeEnv === 'staging';
+    const environment = typeof nodeEnv === 'string' ? nodeEnv.trim().toLowerCase() : '';
+    return apply || environment === 'production' || environment === 'staging';
 }
 
 function validateDatabaseTargetConfiguration({
     mongoUri,
+    databaseName,
     expectedDatabaseName,
     nodeEnv,
     apply = false
 } = {}) {
     if (!mongoUri) throw new Error('MONGO_URI is required');
-    if (!hasExplicitDatabaseName(mongoUri)) {
-        throw new Error('MONGO_URI must explicitly include the approved target database name');
+    const uriDatabaseName = explicitDatabaseNameFromUri(mongoUri);
+    const configuredDatabaseName = typeof databaseName === 'string' ? databaseName.trim() : '';
+    if (!uriDatabaseName && !configuredDatabaseName) {
+        throw new Error('MONGO_DB_NAME is required when MONGO_URI does not include a database name');
+    }
+    if (uriDatabaseName && configuredDatabaseName && uriDatabaseName !== configuredDatabaseName) {
+        throw new Error('MONGO_DB_NAME does not match the database selected by MONGO_URI');
     }
 
     const expected = typeof expectedDatabaseName === 'string'
@@ -29,7 +47,17 @@ function validateDatabaseTargetConfiguration({
     if (!expected && requiresExpectedDatabaseName({ nodeEnv, apply })) {
         throw new Error('EXPECTED_DB_NAME is required in production/staging and for --apply');
     }
-    return expected;
+    const selectedDatabaseName = uriDatabaseName || configuredDatabaseName;
+    if (expected && selectedDatabaseName !== expected) {
+        throw new Error('Configured database does not match EXPECTED_DB_NAME');
+    }
+    return expected || selectedDatabaseName;
+}
+
+function databaseTargetConnectionOptions({ mongoUri, databaseName } = {}) {
+    if (hasExplicitDatabaseName(mongoUri)) return {};
+    const configuredDatabaseName = typeof databaseName === 'string' ? databaseName.trim() : '';
+    return configuredDatabaseName ? { dbName: configuredDatabaseName } : {};
 }
 
 function assertConnectedDatabaseName(connectedDatabaseName, expectedDatabaseName) {
@@ -65,9 +93,11 @@ function sanitizeDatabaseErrorMessage(error, mongoUri) {
 }
 
 module.exports = {
+    explicitDatabaseNameFromUri,
     hasExplicitDatabaseName,
     requiresExpectedDatabaseName,
     validateDatabaseTargetConfiguration,
+    databaseTargetConnectionOptions,
     assertConnectedDatabaseName,
     sanitizeDatabaseErrorMessage
 };

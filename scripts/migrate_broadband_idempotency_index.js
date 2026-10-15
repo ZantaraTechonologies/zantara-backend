@@ -3,6 +3,12 @@
 const dotenv = require('dotenv');
 const mongoose = require('mongoose');
 const { isDeepStrictEqual } = require('node:util');
+const {
+    validateDatabaseTargetConfiguration,
+    databaseTargetConnectionOptions,
+    assertConnectedDatabaseName,
+    sanitizeDatabaseErrorMessage
+} = require('../config/db');
 const { decryptSecretStrict, isEncrypted } = require('../utils/crypto');
 const { decodeBroadbandRecoveryPayload } = require('../utils/broadbandRecoveryPayload');
 const { PROVIDER_OPERATIONS, supportsProviderOperation } = require('../adapters/providerAdapterRegistry');
@@ -428,9 +434,6 @@ async function run(options = {}) {
     const logger = options.logger || console;
     const mongoUri = env.MONGO_URI;
     if (!mongoUri) throw new Error('MONGO_URI is required');
-    if (!hasExplicitDatabaseName(mongoUri)) {
-        throw new Error('MONGO_URI must explicitly include the approved target database name');
-    }
     const apply = argv.includes('--apply');
     if (apply && env.BROADBAND_IDEMPOTENCY_MIGRATION_CONFIRM !== APPLY_CONFIRMATION) {
         throw new Error(`Refusing --apply without BROADBAND_IDEMPOTENCY_MIGRATION_CONFIRM=${APPLY_CONFIRMATION}`);
@@ -439,13 +442,25 @@ async function run(options = {}) {
     if (apply && !expectedDatabase) {
         throw new Error('Refusing --apply without BROADBAND_IDEMPOTENCY_EXPECTED_DB');
     }
+    const approvedDatabaseName = validateDatabaseTargetConfiguration({
+        mongoUri,
+        databaseName: env.MONGO_DB_NAME,
+        expectedDatabaseName: env.EXPECTED_DB_NAME,
+        nodeEnv: env.NODE_ENV,
+        apply
+    });
+    if (apply && expectedDatabase !== approvedDatabaseName) {
+        throw new Error('BROADBAND_IDEMPOTENCY_EXPECTED_DB does not match EXPECTED_DB_NAME');
+    }
 
-    await mongooseInstance.connect(mongoUri, { autoIndex: false, autoCreate: false });
+    await mongooseInstance.connect(mongoUri, {
+        autoIndex: false,
+        autoCreate: false,
+        ...databaseTargetConnectionOptions({ mongoUri, databaseName: env.MONGO_DB_NAME })
+    });
     try {
         const connectedDatabase = String(mongooseInstance.connection.name || '');
-        if (apply && connectedDatabase !== expectedDatabase) {
-            throw new Error('Connected database does not match BROADBAND_IDEMPOTENCY_EXPECTED_DB');
-        }
+        assertConnectedDatabaseName(connectedDatabase, approvedDatabaseName);
         const collection = mongooseInstance.connection.collection(COLLECTION_NAME);
         const [indexes, report] = await Promise.all([
             readIndexes(collection),
@@ -487,7 +502,7 @@ async function run(options = {}) {
 if (require.main === module) {
     dotenv.config();
     run().catch(error => {
-        console.error(`[Broadband Idempotency Migration] ${error.message}`);
+        console.error(`[Broadband Idempotency Migration] ${sanitizeDatabaseErrorMessage(error, process.env.MONGO_URI)}`);
         process.exitCode = 1;
     });
 }

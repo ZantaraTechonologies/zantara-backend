@@ -6,6 +6,7 @@ const { isDeepStrictEqual } = require('util');
 const {
     hasExplicitDatabaseName,
     validateDatabaseTargetConfiguration,
+    databaseTargetConnectionOptions,
     assertConnectedDatabaseName,
     sanitizeDatabaseErrorMessage
 } = require('../config/db');
@@ -149,7 +150,12 @@ function publicIndexDefinition(index) {
 async function run() {
     const mongoUri = process.env.MONGO_URI;
     if (!mongoUri) throw new Error('MONGO_URI is required');
-    const databaseName = databaseNameFromArgs();
+    const argumentDatabaseName = databaseNameFromArgs();
+    const environmentDatabaseName = String(process.env.MONGO_DB_NAME || '').trim();
+    if (argumentDatabaseName && environmentDatabaseName && argumentDatabaseName !== environmentDatabaseName) {
+        throw new Error('Explicit database arguments do not match MONGO_DB_NAME');
+    }
+    const databaseName = argumentDatabaseName || environmentDatabaseName;
     const apply = process.argv.includes('--apply');
     const confirmed = process.env.KYC_PENDING_INDEX_MIGRATION_CONFIRM === APPLY_CONFIRMATION
         || process.argv.includes(`--confirm=${APPLY_CONFIRMATION}`);
@@ -158,6 +164,7 @@ async function run() {
     }
     const expectedDatabaseName = validateDatabaseTargetConfiguration({
         mongoUri,
+        databaseName,
         expectedDatabaseName: process.env.EXPECTED_DB_NAME,
         nodeEnv: process.env.NODE_ENV,
         apply
@@ -168,7 +175,7 @@ async function run() {
     await mongoose.connect(mongoUri, {
         autoIndex: false,
         autoCreate: false,
-        ...(databaseName ? { dbName: databaseName } : {})
+        ...databaseTargetConnectionOptions({ mongoUri, databaseName })
     });
     try {
         assertConnectedDatabaseName(mongoose.connection.name, expectedDatabaseName);

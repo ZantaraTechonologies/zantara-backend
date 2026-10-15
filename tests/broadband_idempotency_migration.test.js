@@ -24,6 +24,7 @@ function fakeMigration({
     const state = {
         connected: 0,
         disconnected: 0,
+        connectOptions: null,
         collectionCalls: 0,
         createCalls: [],
         writes: []
@@ -60,7 +61,10 @@ function fakeMigration({
                 return name === 'transactions' ? collection : referenceCollection(name);
             }
         },
-        async connect() { state.connected++; },
+        async connect(_uri, options) {
+            state.connected++;
+            state.connectOptions = options;
+        },
         async disconnect() { state.disconnected++; }
     };
     return { state, mongooseInstance, collection, referenceCollection };
@@ -221,10 +225,33 @@ async function main() {
         assert.ok(logs.some(message => String(message).includes('validation-only')));
     });
 
+    await test('pathless URI validation uses the configured database name', async () => {
+        const fake = fakeMigration();
+        await run({
+            env: {
+                MONGO_URI: 'mongodb://example.invalid/',
+                MONGO_DB_NAME: 'target',
+                EXPECTED_DB_NAME: 'target'
+            },
+            argv: ['node', 'migration'],
+            mongooseInstance: fake.mongooseInstance,
+            logger: { log() {} }
+        });
+        assert.deepStrictEqual(fake.state.connectOptions, {
+            autoIndex: false,
+            autoCreate: false,
+            dbName: 'target'
+        });
+    });
+
     await test('--apply without confirmation aborts before connecting', async () => {
         const fake = fakeMigration();
         await assert.rejects(run({
-            env: { ...baseEnv, BROADBAND_IDEMPOTENCY_EXPECTED_DB: 'target' },
+            env: {
+                ...baseEnv,
+                EXPECTED_DB_NAME: 'target',
+                BROADBAND_IDEMPOTENCY_EXPECTED_DB: 'target'
+            },
             argv: ['node', 'migration', '--apply'],
             mongooseInstance: fake.mongooseInstance,
             logger: { log() {} }
@@ -232,7 +259,7 @@ async function main() {
         assert.strictEqual(fake.state.connected, 0);
     });
 
-    await test('--apply without expected database aborts before connecting', async () => {
+    await test('--apply without migration-specific expected database aborts before connecting', async () => {
         const fake = fakeMigration();
         await assert.rejects(run({
             env: { ...baseEnv, BROADBAND_IDEMPOTENCY_MIGRATION_CONFIRM: APPLY_CONFIRMATION },
@@ -243,11 +270,27 @@ async function main() {
         assert.strictEqual(fake.state.connected, 0);
     });
 
+    await test('--apply without EXPECTED_DB_NAME aborts before connecting', async () => {
+        const fake = fakeMigration();
+        await assert.rejects(run({
+            env: {
+                ...baseEnv,
+                BROADBAND_IDEMPOTENCY_MIGRATION_CONFIRM: APPLY_CONFIRMATION,
+                BROADBAND_IDEMPOTENCY_EXPECTED_DB: 'target'
+            },
+            argv: ['node', 'migration', '--apply'],
+            mongooseInstance: fake.mongooseInstance,
+            logger: { log() {} }
+        }), /EXPECTED_DB_NAME/);
+        assert.strictEqual(fake.state.connected, 0);
+    });
+
     await test('connected database mismatch aborts before collection access', async () => {
         const fake = fakeMigration({ databaseName: 'wrong-target' });
         await assert.rejects(run({
             env: {
                 ...baseEnv,
+                EXPECTED_DB_NAME: 'target',
                 BROADBAND_IDEMPOTENCY_MIGRATION_CONFIRM: APPLY_CONFIRMATION,
                 BROADBAND_IDEMPOTENCY_EXPECTED_DB: 'target'
             },
@@ -264,6 +307,7 @@ async function main() {
         const options = {
             env: {
                 ...baseEnv,
+                EXPECTED_DB_NAME: 'target',
                 BROADBAND_IDEMPOTENCY_MIGRATION_CONFIRM: APPLY_CONFIRMATION,
                 BROADBAND_IDEMPOTENCY_EXPECTED_DB: 'target'
             },
@@ -446,6 +490,7 @@ async function main() {
         await assert.rejects(run({
             env: {
                 ...baseEnv,
+                EXPECTED_DB_NAME: 'target',
                 BROADBAND_IDEMPOTENCY_MIGRATION_CONFIRM: APPLY_CONFIRMATION,
                 BROADBAND_IDEMPOTENCY_EXPECTED_DB: 'target'
             },
@@ -464,6 +509,7 @@ async function main() {
         await assert.rejects(run({
             env: {
                 ...baseEnv,
+                EXPECTED_DB_NAME: 'target',
                 BROADBAND_IDEMPOTENCY_MIGRATION_CONFIRM: APPLY_CONFIRMATION,
                 BROADBAND_IDEMPOTENCY_EXPECTED_DB: 'target'
             },

@@ -6,6 +6,7 @@ const { isDeepStrictEqual } = require('util');
 const {
     hasExplicitDatabaseName,
     validateDatabaseTargetConfiguration,
+    databaseTargetConnectionOptions,
     assertConnectedDatabaseName,
     sanitizeDatabaseErrorMessage
 } = require('../config/db');
@@ -509,21 +510,23 @@ async function indexStatus(collection, expected, collectionName) {
 async function run() {
     const mongoUri = process.env.MONGO_URI;
     if (!mongoUri) throw new Error('MONGO_URI is required');
-    if (!hasExplicitDatabaseName(mongoUri)) {
-        throw new Error('MONGO_URI must explicitly include the approved target database name');
-    }
     const apply = process.argv.includes('--apply');
     if (apply && process.env.BATCH3_FINANCIAL_MIGRATION_CONFIRM !== APPLY_CONFIRMATION) {
         throw new Error(`Refusing --apply without BATCH3_FINANCIAL_MIGRATION_CONFIRM=${APPLY_CONFIRMATION}`);
     }
     const expectedDatabaseName = validateDatabaseTargetConfiguration({
         mongoUri,
+        databaseName: process.env.MONGO_DB_NAME,
         expectedDatabaseName: process.env.EXPECTED_DB_NAME,
         nodeEnv: process.env.NODE_ENV,
         apply
     });
 
-    await mongoose.connect(mongoUri, { autoIndex: false, autoCreate: false });
+    await mongoose.connect(mongoUri, {
+        autoIndex: false,
+        autoCreate: false,
+        ...databaseTargetConnectionOptions({ mongoUri, databaseName: process.env.MONGO_DB_NAME })
+    });
     try {
         assertConnectedDatabaseName(mongoose.connection.name, expectedDatabaseName);
         const collections = {

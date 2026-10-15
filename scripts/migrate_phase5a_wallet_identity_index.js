@@ -6,6 +6,7 @@ const { isDeepStrictEqual } = require('node:util');
 const {
     hasExplicitDatabaseName,
     validateDatabaseTargetConfiguration,
+    databaseTargetConnectionOptions,
     assertConnectedDatabaseName,
     sanitizeDatabaseErrorMessage
 } = require('../config/db');
@@ -66,12 +67,17 @@ async function run(options = {}) {
     }
     const expectedDatabaseName = validateDatabaseTargetConfiguration({
         mongoUri,
+        databaseName: env.MONGO_DB_NAME,
         expectedDatabaseName: env.EXPECTED_DB_NAME,
         nodeEnv: env.NODE_ENV,
         apply
     });
 
-    await mongooseInstance.connect(mongoUri, { autoIndex: false, autoCreate: false });
+    await mongooseInstance.connect(mongoUri, {
+        autoIndex: false,
+        autoCreate: false,
+        ...databaseTargetConnectionOptions({ mongoUri, databaseName: env.MONGO_DB_NAME })
+    });
     try {
         const connectedDatabaseName = mongooseInstance.connection.name;
         assertConnectedDatabaseName(connectedDatabaseName, expectedDatabaseName);

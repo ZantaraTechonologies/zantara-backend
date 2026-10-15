@@ -4,6 +4,7 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const {
     validateDatabaseTargetConfiguration,
+    databaseTargetConnectionOptions,
     assertConnectedDatabaseName,
     sanitizeDatabaseErrorMessage
 } = require('../config/db');
@@ -189,12 +190,17 @@ async function run() {
     }
     const expectedDatabaseName = validateDatabaseTargetConfiguration({
         mongoUri,
+        databaseName: process.env.MONGO_DB_NAME,
         expectedDatabaseName: process.env.EXPECTED_DB_NAME,
         nodeEnv: process.env.NODE_ENV,
         apply
     });
 
-    await mongoose.connect(mongoUri, { autoIndex: false, autoCreate: false });
+    await mongoose.connect(mongoUri, {
+        autoIndex: false,
+        autoCreate: false,
+        ...databaseTargetConnectionOptions({ mongoUri, databaseName: process.env.MONGO_DB_NAME })
+    });
     try {
         assertConnectedDatabaseName(mongoose.connection.name, expectedDatabaseName);
         const collection = mongoose.connection.collection(COLLECTION_NAME);
