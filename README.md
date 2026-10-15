@@ -217,21 +217,19 @@ Create a `.env` file in the root directory.
 Example variables:
 
 ```
-PORT=5000
+PORT=8000
 MONGO_URI=mongodb://localhost/zantara
-
-JWT_SECRET=your_jwt_secret
-
-PAYSTACK_SECRET_KEY=your_key
-PAYSTACK_WEBHOOK_SECRET=your_secret
-
-EMAIL_HOST=smtp.mail.com
-EMAIL_USER=example@mail.com
-EMAIL_PASS=password
-
-VTPASS_API_KEY=api_key
-VTPASS_SECRET=secret_key
+JWT_SECRET=<strong-random-secret>
+MAIL_USER=<smtp-username>
+MAIL_PASS=<smtp-password>
+EMAIL_OTP_SECRET=<strong-random-secret>
+CLIENT_BASE_URL=https://<web-host>
+CORS_ORIGIN=https://<web-host>
+ONBOARDING_ENFORCEMENT_MODE=off
+PAYMENT_GATEWAY_REQUIRE_LIVE=false
 ```
+
+Paystack runtime credentials are managed in the payment-gateway database records. See `.env.example` for the complete deployment contract and seed-tool placeholders.
 
 Never commit `.env` files to version control.
 
@@ -615,9 +613,13 @@ Analytics endpoints provide:
 
 Run automated tests:
 
-```
+```bash
 npm test
 ```
+
+The default suite is serial and blocks non-loopback network access. It does not
+run the explicitly opted-in real-database KYC invariant test or any scripts
+under `scripts/`.
 
 Testing should cover:
 

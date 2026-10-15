@@ -3,6 +3,12 @@
 require('dotenv').config();
 const mongoose = require('mongoose');
 const { isDeepStrictEqual } = require('util');
+const {
+    hasExplicitDatabaseName,
+    validateDatabaseTargetConfiguration,
+    assertConnectedDatabaseName,
+    sanitizeDatabaseErrorMessage
+} = require('../config/db');
 
 const COLLECTION_NAME = 'kycs';
 const APPLY_CONFIRMATION = 'kyc-pending-index';
@@ -14,15 +20,6 @@ const TARGET_INDEX = {
         partialFilterExpression: { status: 'pending' }
     }
 };
-
-function hasExplicitDatabaseName(uri) {
-    if (typeof uri !== 'string' || !/^mongodb(?:\+srv)?:\/\//i.test(uri)) return false;
-    const withoutQuery = uri.split('?')[0];
-    const authorityStart = withoutQuery.indexOf('://') + 3;
-    const pathStart = withoutQuery.indexOf('/', authorityStart);
-    if (pathStart < 0) return false;
-    return withoutQuery.slice(pathStart + 1).split('/')[0].trim().length > 0;
-}
 
 function databaseNameFromArgs(args = process.argv) {
     const argument = args.find(value => value.startsWith('--database='));
@@ -153,16 +150,18 @@ async function run() {
     const mongoUri = process.env.MONGO_URI;
     if (!mongoUri) throw new Error('MONGO_URI is required');
     const databaseName = databaseNameFromArgs();
-    if (!hasExplicitDatabaseName(mongoUri) && !databaseName) {
-        throw new Error('MONGO_URI or --database must include an explicit database name');
-    }
-
     const apply = process.argv.includes('--apply');
     const confirmed = process.env.KYC_PENDING_INDEX_MIGRATION_CONFIRM === APPLY_CONFIRMATION
         || process.argv.includes(`--confirm=${APPLY_CONFIRMATION}`);
     if (apply && !confirmed) {
         throw new Error(`Refusing --apply without KYC_PENDING_INDEX_MIGRATION_CONFIRM=${APPLY_CONFIRMATION}`);
     }
+    const expectedDatabaseName = validateDatabaseTargetConfiguration({
+        mongoUri,
+        expectedDatabaseName: process.env.EXPECTED_DB_NAME,
+        nodeEnv: process.env.NODE_ENV,
+        apply
+    });
 
     mongoose.set('autoIndex', false);
     mongoose.set('autoCreate', false);
@@ -172,6 +171,7 @@ async function run() {
         ...(databaseName ? { dbName: databaseName } : {})
     });
     try {
+        assertConnectedDatabaseName(mongoose.connection.name, expectedDatabaseName);
         const collection = mongoose.connection.collection(COLLECTION_NAME);
         const currentIndexes = await readIndexes(collection);
         assertNoIndexConflict(currentIndexes);
@@ -203,7 +203,7 @@ async function run() {
 
 if (require.main === module) {
     run().catch(error => {
-        console.error(`[KYC Pending Index Migration] ${error.message}`);
+        console.error(`[KYC Pending Index Migration] ${sanitizeDatabaseErrorMessage(error, process.env.MONGO_URI)}`);
         process.exitCode = 1;
     });
 }

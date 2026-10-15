@@ -303,15 +303,15 @@ test('shutdown state prevents listener and cron startup after a pending connecti
     assert.equal(cronStarts, 0);
 
     const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-    const guardIndex = serverSource.indexOf('if (gracefulShutdown.isShuttingDown()) return;');
+    const guardIndex = serverSource.indexOf('if (gracefulShutdown.isShuttingDown()) return');
     const listenIndex = serverSource.indexOf('server = app.listen');
-    const cronIndex = serverSource.indexOf('startDividendCron();');
+    const cronIndex = serverSource.indexOf('startDividendCron()');
     assert.ok(guardIndex >= 0 && guardIndex < listenIndex && listenIndex < cronIndex);
 });
 
 test('MongoDB startup failure behavior remains exit 1 outside shutdown', () => {
     const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-    assert.match(serverSource, /\.catch\(\(err\) => \{[\s\S]*if \(gracefulShutdown\.isShuttingDown\(\)\) return;[\s\S]*process\.exit\(1\)/);
+    assert.match(serverSource, /\.catch\(\s*\(?err\)?\s*=>\s*\{[\s\S]*if \(gracefulShutdown\.isShuttingDown\(\)\) return;?[\s\S]*process\.exit\(1\)/);
 });
 
 test('detached promises remain outside the guaranteed shutdown drain', async () => {

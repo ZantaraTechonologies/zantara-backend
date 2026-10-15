@@ -1,8 +1,16 @@
 'use strict';
 
-require('dotenv').config();
+const dotenv = require('dotenv');
 const mongoose = require('mongoose');
 const { isDeepStrictEqual } = require('node:util');
+const {
+    hasExplicitDatabaseName,
+    validateDatabaseTargetConfiguration,
+    assertConnectedDatabaseName,
+    sanitizeDatabaseErrorMessage
+} = require('../config/db');
+
+dotenv.config();
 
 const COLLECTION_NAME = 'transactions';
 const APPLY_CONFIRMATION = 'transaction-reference-identity';
@@ -31,14 +39,6 @@ const REQUIRED_INDEXES = [
         }
     }
 ];
-
-function hasExplicitDatabaseName(uri) {
-    if (typeof uri !== 'string' || !/^mongodb(?:\+srv)?:\/\//i.test(uri)) return false;
-    const withoutQuery = uri.split('?')[0];
-    const authorityStart = withoutQuery.indexOf('://') + 3;
-    const pathStart = withoutQuery.indexOf('/', authorityStart);
-    return pathStart >= 0 && withoutQuery.slice(pathStart + 1).trim().length > 0;
-}
 
 function isExactKey(index, expected) {
     return isDeepStrictEqual(index.key || {}, expected);
@@ -144,30 +144,37 @@ function verifyIndexes(indexes) {
     }
 }
 
-async function run() {
-    const mongoUri = process.env.MONGO_URI;
-    if (!mongoUri) throw new Error('MONGO_URI is required');
-    if (!hasExplicitDatabaseName(mongoUri)) {
-        throw new Error('MONGO_URI must explicitly include the approved target database name');
-    }
-
-    const apply = process.argv.includes('--apply');
-    if (apply && process.env.TRANSACTION_IDENTIFIER_MIGRATION_CONFIRM !== APPLY_CONFIRMATION) {
+async function run(options = {}) {
+    const env = options.env || process.env;
+    const argv = options.argv || process.argv;
+    const mongooseInstance = options.mongooseInstance || mongoose;
+    const logger = options.logger || console;
+    const mongoUri = env.MONGO_URI;
+    const apply = argv.includes('--apply');
+    if (apply && env.TRANSACTION_IDENTIFIER_MIGRATION_CONFIRM !== APPLY_CONFIRMATION) {
         throw new Error(`Refusing --apply without TRANSACTION_IDENTIFIER_MIGRATION_CONFIRM=${APPLY_CONFIRMATION}`);
     }
+    const expectedDatabaseName = validateDatabaseTargetConfiguration({
+        mongoUri,
+        expectedDatabaseName: env.EXPECTED_DB_NAME,
+        nodeEnv: env.NODE_ENV,
+        apply
+    });
 
-    await mongoose.connect(mongoUri, { autoIndex: false });
+    await mongooseInstance.connect(mongoUri, { autoIndex: false, autoCreate: false });
     try {
-        const collection = mongoose.connection.collection(COLLECTION_NAME);
+        const connectedDatabaseName = mongooseInstance.connection.name;
+        assertConnectedDatabaseName(connectedDatabaseName, expectedDatabaseName);
+        const collection = mongooseInstance.connection.collection(COLLECTION_NAME);
         const [report, indexes] = await Promise.all([
             inspectData(collection),
             readIndexes(collection)
         ]);
         assertNoIndexConflicts(indexes);
 
-        console.log(JSON.stringify({
+        logger.log(JSON.stringify({
             mode: apply ? 'apply' : 'validation-only',
-            targetDatabase: mongoose.connection.name,
+            targetDatabase: connectedDatabaseName,
             collection: COLLECTION_NAME,
             currentIndexes: indexes.map(index => ({
                 name: index.name,
@@ -180,7 +187,7 @@ async function run() {
 
         assertDataSafe(report);
         if (!apply) {
-            console.log('Validation passed. No data or indexes were changed.');
+            logger.log('Validation passed. No data or indexes were changed.');
             return;
         }
 
@@ -194,21 +201,22 @@ async function run() {
 
         const finalIndexes = await readIndexes(collection);
         verifyIndexes(finalIndexes);
-        console.log('Transaction identifier indexes created and verified. No transaction data was modified.');
+        logger.log('Transaction identifier indexes created and verified. No transaction data was modified.');
     } finally {
-        await mongoose.disconnect();
+        await mongooseInstance.disconnect();
     }
 }
 
 if (require.main === module) {
     run().catch(error => {
-        console.error(`[Transaction Identifier Migration] ${error.message}`);
+        console.error(`[Transaction Identifier Migration] ${sanitizeDatabaseErrorMessage(error, process.env.MONGO_URI)}`);
         process.exitCode = 1;
     });
 }
 
 module.exports = {
     REQUIRED_INDEXES,
+    APPLY_CONFIRMATION,
     hasExplicitDatabaseName,
     isExactKey,
     findDuplicates,
@@ -216,5 +224,6 @@ module.exports = {
     inspectData,
     assertDataSafe,
     assertNoIndexConflicts,
-    verifyIndexes
+    verifyIndexes,
+    run
 };

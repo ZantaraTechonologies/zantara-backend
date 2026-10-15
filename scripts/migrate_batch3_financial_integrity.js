@@ -3,6 +3,12 @@
 require('dotenv').config();
 const mongoose = require('mongoose');
 const { isDeepStrictEqual } = require('util');
+const {
+    hasExplicitDatabaseName,
+    validateDatabaseTargetConfiguration,
+    assertConnectedDatabaseName,
+    sanitizeDatabaseErrorMessage
+} = require('../config/db');
 
 const APPLY_CONFIRMATION = 'batch3-financial-integrity';
 const SUPPORTED_PROVIDERS = new Set(['paystack', 'monnify', 'flutterwave']);
@@ -58,16 +64,6 @@ const SHARE_EXIT_FIELDS = [
     'exitFeeCharged', 'netAmount', 'reservationVersion', 'reservedShares'
 ];
 const USER_SHARE_FIELDS = ['sharesOwned', 'frozenShares', 'isShareholder'];
-
-function hasExplicitDatabaseName(uri) {
-    if (typeof uri !== 'string' || !/^mongodb(?:\+srv)?:\/\//i.test(uri)) return false;
-    const withoutQuery = uri.split('?')[0];
-    const authorityStart = withoutQuery.indexOf('://') + 3;
-    const pathStart = withoutQuery.indexOf('/', authorityStart);
-    if (pathStart < 0) return false;
-    const databaseName = withoutQuery.slice(pathStart + 1).split('/')[0];
-    return databaseName.trim().length > 0;
-}
 
 function exactKey(actual = {}, expected = {}) {
     return isDeepStrictEqual(Object.entries(actual), Object.entries(expected));
@@ -520,9 +516,16 @@ async function run() {
     if (apply && process.env.BATCH3_FINANCIAL_MIGRATION_CONFIRM !== APPLY_CONFIRMATION) {
         throw new Error(`Refusing --apply without BATCH3_FINANCIAL_MIGRATION_CONFIRM=${APPLY_CONFIRMATION}`);
     }
+    const expectedDatabaseName = validateDatabaseTargetConfiguration({
+        mongoUri,
+        expectedDatabaseName: process.env.EXPECTED_DB_NAME,
+        nodeEnv: process.env.NODE_ENV,
+        apply
+    });
 
-    await mongoose.connect(mongoUri, { autoIndex: false });
+    await mongoose.connect(mongoUri, { autoIndex: false, autoCreate: false });
     try {
+        assertConnectedDatabaseName(mongoose.connection.name, expectedDatabaseName);
         const collections = {
             transactionStatuses: mongoose.connection.collection('transactionstatuses'),
             walletLedgers: mongoose.connection.collection('walletledgers'),
@@ -597,7 +600,7 @@ async function run() {
 
 if (require.main === module) {
     run().catch(error => {
-        console.error(`[Batch 3 Financial Migration] ${error.message}`);
+        console.error(`[Batch 3 Financial Migration] ${sanitizeDatabaseErrorMessage(error, process.env.MONGO_URI)}`);
         process.exitCode = 1;
     });
 }

@@ -2,6 +2,11 @@
 
 require('dotenv').config();
 const mongoose = require('mongoose');
+const {
+    validateDatabaseTargetConfiguration,
+    assertConnectedDatabaseName,
+    sanitizeDatabaseErrorMessage
+} = require('../config/db');
 
 const COLLECTION_NAME = 'webhookevents';
 const COMPOUND_INDEX_NAME = 'provider_1_eventId_1';
@@ -182,9 +187,16 @@ async function run() {
     if (apply && process.env.WEBHOOK_EVENT_INDEX_MIGRATION_CONFIRM !== APPLY_CONFIRMATION) {
         throw new Error(`Refusing --apply without WEBHOOK_EVENT_INDEX_MIGRATION_CONFIRM=${APPLY_CONFIRMATION}`);
     }
+    const expectedDatabaseName = validateDatabaseTargetConfiguration({
+        mongoUri,
+        expectedDatabaseName: process.env.EXPECTED_DB_NAME,
+        nodeEnv: process.env.NODE_ENV,
+        apply
+    });
 
-    await mongoose.connect(mongoUri, { autoIndex: false });
+    await mongoose.connect(mongoUri, { autoIndex: false, autoCreate: false });
     try {
+        assertConnectedDatabaseName(mongoose.connection.name, expectedDatabaseName);
         const collection = mongoose.connection.collection(COLLECTION_NAME);
         await migrateCollection(collection, { apply });
     } finally {
@@ -194,7 +206,7 @@ async function run() {
 
 if (require.main === module) {
     run().catch(error => {
-        console.error(`[Webhook Index Migration] ${error.message}`);
+        console.error(`[Webhook Index Migration] ${sanitizeDatabaseErrorMessage(error, process.env.MONGO_URI)}`);
         process.exitCode = 1;
     });
 }

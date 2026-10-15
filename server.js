@@ -11,9 +11,19 @@ const {
 const cors = require('cors')
 require('dotenv').config()
 const { validateEncryptionConfiguration } = require('./utils/crypto')
+const {
+  validateDatabaseTargetConfiguration,
+  assertConnectedDatabaseName,
+  sanitizeDatabaseErrorMessage
+} = require('./config/db')
+const { assertOnboardingConfiguration } = require('./config/onboarding')
+const { validateRuntimeConfiguration } = require('./config/runtime')
+const securityHeaders = require('./middlewares/securityHeaders')
 
 // Fail before binding the HTTP port if the permanent production key is unsafe.
 validateEncryptionConfiguration()
+assertOnboardingConfiguration()
+const runtimeConfiguration = validateRuntimeConfiguration()
 
 const app = express()
 
@@ -22,9 +32,10 @@ app.set('trust proxy', 1) // you're on Render
 // Middlewares that don't touch the request body payload
 const cookieParser = require('cookie-parser')
 app.use(cookieParser())
+app.use(securityHeaders)
 
-const allowedOrigins = process.env.CORS_ORIGIN
-  ? process.env.CORS_ORIGIN.split(',')
+const allowedOrigins = runtimeConfiguration.corsOrigins.length
+  ? runtimeConfiguration.corsOrigins
   : ['http://localhost:5173']
 app.use(
   cors({
@@ -128,6 +139,7 @@ const investmentRoutes = require('./routes/investment')
 const catalogV2Routes = require('./routes/v2/catalog')
 const pricingV1Routes = require('./routes/v1/pricing')
 const legalRoutes = require('./routes/legal')
+const onboardingRoutes = require('./routes/onboarding')
 const errorHandler = require('./middlewares/errorHandler')
 
 app.use('/api', index)
@@ -160,6 +172,7 @@ app.use('/api/investment', investmentRoutes)
 app.use('/api/v2/catalog', catalogV2Routes)
 app.use('/api/v1/pricing', pricingV1Routes)
 app.use('/api/legal', legalRoutes)
+app.use('/api/onboarding', onboardingRoutes)
 
 // Global error handler (keep last)
 app.use(errorHandler)
@@ -181,10 +194,21 @@ const gracefulShutdown = createGracefulShutdown({
 })
 registerShutdownSignals({ shutdown: gracefulShutdown.shutdown })
 
+const expectedDatabaseName = validateDatabaseTargetConfiguration({
+  mongoUri: MONGOURI,
+  expectedDatabaseName: process.env.EXPECTED_DB_NAME,
+  nodeEnv: process.env.NODE_ENV
+})
+
 mongoose
   .connect(MONGOURI)
   .then(async () => {
     if (gracefulShutdown.isShuttingDown()) return
+
+    assertConnectedDatabaseName(
+      mongoose.connection.name,
+      expectedDatabaseName
+    )
 
     if (
       process.env.NODE_ENV === 'production' ||
@@ -204,6 +228,6 @@ mongoose
     if (gracefulShutdown.isShuttingDown()) return
 
     console.error('CRITICAL: Database connection failed!')
-    console.error('Reason:', err.message || err)
+    console.error('Reason:', sanitizeDatabaseErrorMessage(err, MONGOURI))
     process.exit(1) // Force exit so nodemon can try again or the user sees the hard crash
   })

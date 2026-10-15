@@ -98,8 +98,7 @@ test('Paystack runtime configuration is database-only and fails closed', async t
             [{ ...valid, secretKey: '' }, /unavailable or unreadable/],
             [{ ...valid, secretKey: 'enc:v1:unreadable' }, /unavailable or unreadable/],
             [{ ...valid, webhookSecret: 'enc:v1:unreadable' }, /webhook secret is unreadable/],
-            [hydrate({ secretKey: 'sk_live_plaintext' }), /encrypted at rest/],
-            [hydrate({ webhookSecret: encryptSecret('different_signing_secret') }), /must match the Paystack API secret/]
+            [hydrate({ secretKey: 'sk_live_plaintext' }), /encrypted at rest/]
         ];
         try {
             for (const [gateway, expected] of cases) {
@@ -319,7 +318,7 @@ test('Paystack DVA gateway lifecycle retains verification and blocks deletion', 
         assert.notEqual(gateway.secretKey, snapshot.secretKey);
     });
 
-    await t.test('API context rotation cannot retain an ambiguous signing secret for DVA users', async () => {
+    await t.test('Paystack API secret rotation also rotates the webhook signing context', async () => {
         const res = response();
         const previousSecret = gateway.secretKey;
         await adminGatewayController.updateGateway({
@@ -330,10 +329,10 @@ test('Paystack DVA gateway lifecycle retains verification and blocks deletion', 
             ip: '127.0.0.1'
         }, res);
 
-        assert.equal(res.statusCode, 409);
-        assert.match(res.body.message, /same webhook signing secret/);
-        assert.equal(gateway.secretKey, previousSecret);
-        assert.equal(gateway.webhookVerificationSnapshots.length, 1);
+        assert.equal(res.statusCode, 200);
+        assert.notEqual(gateway.secretKey, previousSecret);
+        assert.equal(gateway.webhookVerificationSnapshots.length, 2);
+        assert.equal(gateway.webhookVerificationSnapshots[1].secretKey, previousSecret);
     });
 
     await t.test('stored historical secret verifies exact raw webhook after rotation', () => {
