@@ -120,7 +120,7 @@ test('login, password reset, and transfer lookup all accept legacy phone represe
 test('new-user registration requires matching password confirmation before writes', async () => {
     let writes = 0;
     await withPatched([
-        { target: onboardingService, key: 'requiresConfirmationForNewUser', value: () => true },
+        { target: onboardingService, key: 'getRegistrationPolicy', value: async () => ({ requiresPasswordConfirmation: true, fields: { onboardingPolicyVersion: 1 } }) },
         { target: User, key: 'create', value: async () => { writes++; } },
         { target: mongoose, key: 'startSession', value: async () => { writes++; } }
     ], async () => {
@@ -149,7 +149,7 @@ test('new-user registration requires matching password confirmation before write
 test('registration rejects malformed customer identity while onboarding enforcement is off', async () => {
     let writes = 0;
     await withPatched([
-        { target: onboardingService, key: 'requiresConfirmationForNewUser', value: () => false },
+        { target: onboardingService, key: 'getRegistrationPolicy', value: async () => ({ requiresPasswordConfirmation: false, fields: {} }) },
         { target: User, key: 'findOne', value: async () => { writes++; return null; } },
         { target: mongoose, key: 'startSession', value: async () => { writes++; } }
     ], async () => {
@@ -180,7 +180,7 @@ test('legacy registration may omit confirmation and preserves referral, legal, a
     };
     const created = [];
     const logs = [];
-    const onboarding = { currentStep: 'contact_verification', dashboardAllowed: true };
+    const onboarding = { currentStep: null, dashboardAllowed: true };
     const user = {
         _id: 'new-user', name: 'Ada Lovelace', email: 'ada@example.com', phone: '+2348012345678',
         role: 'user', roles: ['user'], status: true, isPhoneVerified: false, isEmailVerified: false,
@@ -188,8 +188,7 @@ test('legacy registration may omit confirmation and preserves referral, legal, a
     };
 
     await withPatched([
-        { target: onboardingService, key: 'requiresConfirmationForNewUser', value: () => false },
-        { target: onboardingService, key: 'registrationPolicyFields', value: () => ({}) },
+        { target: onboardingService, key: 'getRegistrationPolicy', value: async () => ({ requiresPasswordConfirmation: false, fields: {} }) },
         { target: onboardingService, key: 'getStateForResponse', value: async () => onboarding },
         {
             target: User,
@@ -294,13 +293,13 @@ test('enforced PIN setup requires the correct step and matching confirmation', a
     });
 });
 
-test('enforced PIN setup cannot skip contact verification', async () => {
+test('enforced PIN setup still rejects any non-PIN authoritative step', async () => {
     let setCalls = 0;
     await withPatched([
         {
             target: onboardingService,
             key: 'getStateForResponse',
-            value: async () => ({ enforced: true, currentStep: 'contact_verification' })
+            value: async () => ({ enforced: true, currentStep: 'basic_kyc' })
         },
         { target: pinService, key: 'setPin', value: async () => { setCalls++; } }
     ], async () => {
@@ -321,7 +320,7 @@ test('login, profile, and status endpoints expose the same interrupted onboardin
         enrolled: true,
         enforced: true,
         status: 'incomplete',
-        currentStep: 'contact_verification',
+        currentStep: 'transaction_pin',
         complete: false,
         dashboardAllowed: false
     };

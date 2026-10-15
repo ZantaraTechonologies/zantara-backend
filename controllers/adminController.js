@@ -200,6 +200,11 @@ const updateSetting = async (req, res) => {
     try {
         const { key } = req.body;
         let { value } = req.body;
+        if (key === 'ONBOARDING_ENFORCEMENT_MODE') {
+            return res.status(400).json({
+                message: 'Use the dedicated onboarding enforcement endpoint for this setting'
+            });
+        }
         const investmentService = require('../services/investment.service');
         if (investmentService.INVESTMENT_SETTING_KEYS.includes(key)) {
             value = investmentService.validateInvestmentSetting(key, value);

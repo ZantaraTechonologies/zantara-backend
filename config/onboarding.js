@@ -7,6 +7,12 @@ const ONBOARDING_ENFORCEMENT_MODES = Object.freeze([
     'new_users'
 ]);
 
+const ONBOARDING_MODE_RANK = Object.freeze({
+    off: 0,
+    observe: 1,
+    new_users: 2
+});
+
 function getOnboardingConfig() {
     const configuredMode = String(process.env.ONBOARDING_ENFORCEMENT_MODE || '').trim();
     const environment = String(process.env.NODE_ENV || '').trim().toLowerCase();
@@ -34,6 +40,39 @@ function getOnboardingConfig() {
     };
 }
 
+function resolveEffectiveOnboardingMode(databaseMode, environmentCeilingMode) {
+    const requested = String(databaseMode || '').trim().toLowerCase();
+    const ceiling = String(environmentCeilingMode || '').trim().toLowerCase();
+    if (!ONBOARDING_ENFORCEMENT_MODES.includes(requested)) {
+        const error = new Error(
+            `Stored onboarding mode must be one of: ${ONBOARDING_ENFORCEMENT_MODES.join(', ')}`
+        );
+        error.code = 'ONBOARDING_CONFIGURATION_INVALID';
+        throw error;
+    }
+    if (!ONBOARDING_ENFORCEMENT_MODES.includes(ceiling)) {
+        const error = new Error(
+            `Onboarding environment ceiling must be one of: ${ONBOARDING_ENFORCEMENT_MODES.join(', ')}`
+        );
+        error.code = 'ONBOARDING_CONFIGURATION_INVALID';
+        throw error;
+    }
+    return ONBOARDING_MODE_RANK[requested] <= ONBOARDING_MODE_RANK[ceiling]
+        ? requested
+        : ceiling;
+}
+
+function onboardingConfigForMode(mode, extras = {}) {
+    return {
+        mode,
+        policyVersion: ONBOARDING_POLICY_VERSION,
+        observeOnly: mode === 'observe',
+        enrollNewUsers: mode === 'new_users',
+        enforceEnrolledUsers: mode === 'new_users',
+        ...extras
+    };
+}
+
 function assertOnboardingConfiguration() {
     return getOnboardingConfig();
 }
@@ -41,6 +80,9 @@ function assertOnboardingConfiguration() {
 module.exports = {
     ONBOARDING_POLICY_VERSION,
     ONBOARDING_ENFORCEMENT_MODES,
+    ONBOARDING_MODE_RANK,
     getOnboardingConfig,
-    assertOnboardingConfiguration
+    assertOnboardingConfiguration,
+    resolveEffectiveOnboardingMode,
+    onboardingConfigForMode
 };

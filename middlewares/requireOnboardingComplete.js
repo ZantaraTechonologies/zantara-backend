@@ -1,7 +1,7 @@
 'use strict';
 
 const onboardingService = require('../services/onboarding.service');
-const { getOnboardingConfig } = require('../config/onboarding');
+const onboardingConfigService = require('../services/onboardingConfig.service');
 
 const staffRoles = new Set(['admin', 'superAdmin']);
 
@@ -16,7 +16,7 @@ const requireOnboardingComplete = async (req, res, next) => {
 
     let config;
     try {
-        config = getOnboardingConfig();
+        config = await onboardingConfigService.getConfig();
     } catch (_) {
         return res.status(503).json({
             success: false,
@@ -28,7 +28,7 @@ const requireOnboardingComplete = async (req, res, next) => {
     if (config.mode === 'off') return next();
 
     try {
-        const onboarding = await onboardingService.getState({ userId: req.user.id });
+        const onboarding = await onboardingService.getState({ userId: req.user.id, config });
         req.onboarding = onboarding;
         if (config.observeOnly) return next();
         if (onboarding.dashboardAllowed) return next();

@@ -66,20 +66,24 @@ const stateFor = async ({ user, legal = {}, kyc = null, mode = 'new_users' }) =>
     }
 ], () => onboardingService.getState({ userId: user._id })));
 
-test('authoritative state follows basic profile, contacts, legal acceptance, PIN, and completion order', async () => {
+test('authoritative state requires only PIN while profile, contacts, and legal status remain truthful', async () => {
     const basic = await stateFor({ user: baseUser({ name: ' ' }) });
-    assert.equal(basic.currentStep, 'basic_kyc');
+    assert.equal(basic.currentStep, 'transaction_pin');
     assert.deepEqual(basic.basicKyc.missingFields, ['name']);
 
     const contacts = await stateFor({ user: baseUser() });
-    assert.equal(contacts.currentStep, 'contact_verification');
+    assert.equal(contacts.currentStep, 'transaction_pin');
     assert.deepEqual(contacts.contactVerification.missing, ['phone', 'email']);
+    assert.equal(contacts.contactVerification.status, 'unverified');
+    assert.equal(contacts.contactVerification.requiredForOnboarding, false);
 
     const legal = await stateFor({
         user: baseUser({ isPhoneVerified: true, isEmailVerified: true }),
         legal: { missingAcceptances: ['privacy'] }
     });
-    assert.equal(legal.currentStep, 'legal_acceptance');
+    assert.equal(legal.currentStep, 'transaction_pin');
+    assert.equal(legal.legalAcceptance.status, 'required');
+    assert.equal(legal.legalAcceptance.requiredForOnboarding, false);
 
     const pin = await stateFor({
         user: baseUser({ isPhoneVerified: true, isEmailVerified: true })
@@ -227,29 +231,23 @@ test('guard blocks only enforced incomplete customers and fails closed on lookup
     });
 });
 
-test('guard reports unavailable legal requirements as a dependency failure', async () => {
+test('missing onboarding legal information does not block dashboard completion', async () => {
     const onboarding = await stateFor({
         user: baseUser({ isPhoneVerified: true, isEmailVerified: true }),
         legal: { missingMandatoryDocuments: ['privacy'] }
     });
-    assert.equal(onboarding.status, 'unavailable');
+    assert.equal(onboarding.status, 'incomplete');
+    assert.equal(onboarding.currentStep, 'transaction_pin');
     assert.equal(onboarding.legalAcceptance.status, 'unavailable');
+    assert.equal(onboarding.legalAcceptance.requiredForOnboarding, false);
 
-    await withMode('new_users', () => withPatched([{
-        target: onboardingService,
-        key: 'getState',
-        value: async () => onboarding
-    }], async () => {
-        const res = {
-            statusCode: 200,
-            body: null,
-            status(code) { this.statusCode = code; return this; },
-            json(body) { this.body = body; return this; }
-        };
-        await requireOnboardingComplete({ user: { id: 'user-1', roles: ['user'] } }, res, () => {});
-        assert.equal(res.statusCode, 503);
-        assert.equal(res.body.code, 'ONBOARDING_DEPENDENCY_UNAVAILABLE');
-    }));
+    const complete = await stateFor({
+        user: baseUser({ transactionPin: 'bcrypt-hash' }),
+        legal: { missingMandatoryDocuments: ['privacy'] }
+    });
+    assert.equal(complete.currentStep, 'complete');
+    assert.equal(complete.dashboardAllowed, true);
+    assert.equal(complete.legalAcceptance.status, 'unavailable');
 });
 
 test('off and observe modes never block customer routes', async () => {

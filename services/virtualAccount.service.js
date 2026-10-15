@@ -7,7 +7,7 @@ const PaymentGateway = require('../models/PaymentGateway');
 const paymentGatewayService = require('./paymentGateway.service');
 const onboardingService = require('./onboarding.service');
 const legalService = require('./legalDocument.service');
-const { getOnboardingConfig } = require('../config/onboarding');
+const onboardingConfigService = require('./onboardingConfig.service');
 const { getAdapterSpec } = require('../adapters/payment/paymentAdapterRegistry');
 
 const PROVISIONING_LEASE_MS = 15 * 60 * 1000;
@@ -817,10 +817,10 @@ class VirtualAccountService {
     }
 
     async _assertOnboardingEligibility(userId) {
-        const config = getOnboardingConfig();
+        const config = await onboardingConfigService.getConfig();
         if (!config.enforceEnrolledUsers) return null;
 
-        const onboarding = await this.onboardingService.getState({ userId });
+        const onboarding = await this.onboardingService.getState({ userId, config });
         if (onboarding.enrolled && !onboarding.complete) {
             throw this._error(
                 'Complete onboarding before provisioning a virtual account',

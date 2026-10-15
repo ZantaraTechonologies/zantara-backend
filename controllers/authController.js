@@ -39,6 +39,17 @@ const register = async (req, res) => {
     // Normalize referral code naming (Web vs Mobile mismatch)
     const activeReferrerCode = (referrerCode || referralCode || "").trim().toLowerCase();
 
+    let registrationPolicy;
+    try {
+        registrationPolicy = await onboardingService.getRegistrationPolicy();
+    } catch (_) {
+        return res.status(503).json({
+            success: false,
+            code: 'ONBOARDING_CONFIGURATION_INVALID',
+            message: 'Registration policy is temporarily unavailable.'
+        });
+    }
+
     // Email, Phone, Name, and Password are REQUIRED
     if (!name || !phone || !email || !password) {
         return res.status(400).json({ message: "Name, email, phone and password are required" });
@@ -51,7 +62,7 @@ const register = async (req, res) => {
             message: 'Password confirmation does not match'
         });
     }
-    if (onboardingService.requiresConfirmationForNewUser() && passwordConfirmation === undefined) {
+    if (registrationPolicy.requiresPasswordConfirmation && passwordConfirmation === undefined) {
         return res.status(400).json({
             success: false,
             code: 'PASSWORD_CONFIRMATION_REQUIRED',
@@ -115,7 +126,7 @@ const register = async (req, res) => {
             isPhoneVerified: false,
             isEmailVerified: false,
             status: true,
-            ...onboardingService.registrationPolicyFields()
+            ...registrationPolicy.fields
         };
 
         if (email && email.trim()) {
@@ -356,7 +367,7 @@ const updateUser = async (req, res) => {
             email: updateFields.email ?? currentUser.email,
             phone: updateFields.phone ?? currentUser.phone
         })
-        if (onboardingService.requiresProfileValidation(currentUser) && !profile.complete) {
+        if (await onboardingService.requiresProfileValidation(currentUser) && !profile.complete) {
             return res.status(400).json({
                 success: false,
                 code: 'CUSTOMER_PROFILE_INVALID',

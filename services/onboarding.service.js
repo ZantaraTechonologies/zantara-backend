@@ -3,6 +3,7 @@
 const User = require('../models/User');
 const Kyc = require('../models/Kyc');
 const legalService = require('./legalDocument.service');
+const onboardingConfigService = require('./onboardingConfig.service');
 const { getOnboardingConfig } = require('../config/onboarding');
 const { validateCustomerProfile } = require('../utils/customerProfile');
 
@@ -27,12 +28,12 @@ const manualIdentityStatus = kyc => {
 };
 
 class OnboardingService {
-    async getState({ userId } = {}) {
+    async getState({ userId, config: suppliedConfig } = {}) {
         if (!userId) {
             throw createOnboardingError('Authenticated user is required', 'ONBOARDING_USER_REQUIRED', 401);
         }
 
-        const config = getOnboardingConfig();
+        const config = suppliedConfig || await onboardingConfigService.getConfig();
         const userQuery = User.findById(userId);
         const user = typeof userQuery?.select === 'function'
             ? await userQuery.select(
@@ -67,30 +68,27 @@ class OnboardingService {
         const latestKycPromise = typeof kycQuery?.sort === 'function'
             ? kycQuery.sort({ createdAt: -1 })
             : kycQuery;
-        const [legalRequirements, latestKyc] = await Promise.all([
+        const [legalResult, kycResult] = await Promise.allSettled([
             legalService.getRequirements({ userId: String(user._id) }),
             latestKycPromise
         ]);
+        const legalRequirements = legalResult.status === 'fulfilled' ? legalResult.value : null;
+        const latestKyc = kycResult.status === 'fulfilled' ? kycResult.value : null;
 
         const profile = validateCustomerProfile(user);
         const missingContacts = [
             ...(user.isPhoneVerified === true ? [] : ['phone']),
             ...(user.isEmailVerified === true ? [] : ['email'])
         ];
-        const missingLegal = Array.isArray(legalRequirements.missingAcceptances)
+        const missingLegal = Array.isArray(legalRequirements?.missingAcceptances)
             ? legalRequirements.missingAcceptances
             : [];
-        const missingMandatoryDocuments = Array.isArray(legalRequirements.missingMandatoryDocuments)
+        const missingMandatoryDocuments = Array.isArray(legalRequirements?.missingMandatoryDocuments)
             ? legalRequirements.missingMandatoryDocuments
             : [];
-        const legalUnavailable = missingMandatoryDocuments.length > 0;
         const pinSet = typeof user.transactionPin === 'string' && user.transactionPin.length > 0;
 
-        let currentStep = 'complete';
-        if (!profile.complete) currentStep = 'basic_kyc';
-        else if (missingContacts.length > 0) currentStep = 'contact_verification';
-        else if (missingMandatoryDocuments.length > 0 || missingLegal.length > 0) currentStep = 'legal_acceptance';
-        else if (!pinSet) currentStep = 'transaction_pin';
+        const currentStep = pinSet ? 'complete' : 'transaction_pin';
 
         const complete = currentStep === 'complete';
         return {
@@ -99,7 +97,7 @@ class OnboardingService {
             enrolled,
             enforced,
             observed: config.observeOnly,
-            status: legalUnavailable ? 'unavailable' : complete ? 'complete' : 'incomplete',
+            status: complete ? 'complete' : 'incomplete',
             currentStep,
             complete,
             dashboardAllowed: !enforced || complete,
@@ -109,15 +107,17 @@ class OnboardingService {
                 invalidFields: profile.invalidFields
             },
             contactVerification: {
-                status: missingContacts.length === 0 ? 'complete' : 'required',
+                status: missingContacts.length === 0 ? 'complete' : 'unverified',
+                requiredForOnboarding: false,
                 phoneVerified: user.isPhoneVerified === true,
                 emailVerified: user.isEmailVerified === true,
                 missing: missingContacts
             },
             legalAcceptance: {
-                status: missingMandatoryDocuments.length > 0
+                status: legalResult.status === 'rejected' || missingMandatoryDocuments.length > 0
                     ? 'unavailable'
                     : missingLegal.length > 0 ? 'required' : 'complete',
+                requiredForOnboarding: false,
                 missingDocumentTypes: missingLegal,
                 missingMandatoryDocuments
             },
@@ -125,7 +125,9 @@ class OnboardingService {
                 status: pinSet ? 'complete' : 'required',
                 isSet: pinSet
             },
-            identityVerification: manualIdentityStatus(latestKyc)
+            identityVerification: kycResult.status === 'fulfilled'
+                ? manualIdentityStatus(latestKyc)
+                : { status: 'unavailable', tier: null }
         };
     }
 
@@ -133,7 +135,12 @@ class OnboardingService {
         try {
             return await this.getState({ userId });
         } catch (_) {
-            const config = getOnboardingConfig();
+            let config;
+            try {
+                config = await onboardingConfigService.getConfig();
+            } catch (_) {
+                config = getOnboardingConfig();
+            }
             return {
                 policyVersion: null,
                 mode: config.mode,
@@ -149,8 +156,7 @@ class OnboardingService {
         }
     }
 
-    registrationPolicyFields(now = new Date()) {
-        const config = getOnboardingConfig();
+    registrationPolicyFields(config, now = new Date()) {
         if (!config.enrollNewUsers) return {};
         return {
             onboardingPolicyVersion: config.policyVersion,
@@ -158,13 +164,19 @@ class OnboardingService {
         };
     }
 
-    requiresConfirmationForNewUser() {
-        return getOnboardingConfig().enrollNewUsers;
+    async getRegistrationPolicy(now = new Date()) {
+        const config = await onboardingConfigService.getConfig();
+        return {
+            config,
+            requiresPasswordConfirmation: config.enrollNewUsers,
+            fields: this.registrationPolicyFields(config, now)
+        };
     }
 
-    requiresProfileValidation(user) {
+    async requiresProfileValidation(user) {
         const storedPolicyVersion = Number(user?.onboardingPolicyVersion);
-        return getOnboardingConfig().enforceEnrolledUsers
+        const config = await onboardingConfigService.getConfig();
+        return config.enforceEnrolledUsers
             && Number.isSafeInteger(storedPolicyVersion)
             && storedPolicyVersion > 0;
     }

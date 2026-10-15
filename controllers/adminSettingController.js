@@ -1,4 +1,5 @@
 const settingsService = require('../services/settings.service');
+const onboardingConfigService = require('../services/onboardingConfig.service');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const HTTPS_URL_RE = /^https:\/\/.+$/i;
@@ -173,5 +174,57 @@ exports.updateNotificationSettings = async (req, res) => {
         res.json({ success: true, message: 'Notification settings updated successfully' });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+exports.getOnboardingSettings = async (req, res) => {
+    try {
+        const config = await onboardingConfigService.getConfig();
+        res.json({
+            success: true,
+            data: {
+                databaseMode: config.databaseMode,
+                environmentCeilingMode: config.environmentCeilingMode,
+                effectiveMode: config.effectiveMode,
+                policyVersion: config.policyVersion,
+                capped: config.capped
+            }
+        });
+    } catch (error) {
+        res.status(error.statusCode || 503).json({
+            success: false,
+            code: error.code || 'ONBOARDING_CONFIGURATION_INVALID',
+            message: error.message
+        });
+    }
+};
+
+exports.updateOnboardingSettings = async (req, res) => {
+    try {
+        const config = await onboardingConfigService.changeMode({
+            mode: req.body?.mode,
+            expectedCurrentMode: req.body?.expectedCurrentMode,
+            confirmation: req.body?.confirmOnboardingModeChange,
+            actor: req.user,
+            request: req
+        });
+        res.json({
+            success: true,
+            message: config.changed ? 'Onboarding enforcement updated' : 'Onboarding enforcement unchanged',
+            data: {
+                databaseMode: config.databaseMode,
+                environmentCeilingMode: config.environmentCeilingMode,
+                effectiveMode: config.effectiveMode,
+                policyVersion: config.policyVersion,
+                capped: config.capped,
+                changed: config.changed
+            }
+        });
+    } catch (error) {
+        res.status(error.statusCode || 500).json({
+            success: false,
+            code: error.code || 'ONBOARDING_SETTING_UPDATE_FAILED',
+            message: error.message
+        });
     }
 };

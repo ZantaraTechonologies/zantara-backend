@@ -216,6 +216,8 @@ mongoose
       expectedDatabaseName
     )
 
+    await require('./services/onboardingConfig.service').initialize()
+
     if (
       runtimeConfiguration.nodeEnv === 'production' ||
       runtimeConfiguration.nodeEnv === 'staging'
