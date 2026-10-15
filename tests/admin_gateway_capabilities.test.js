@@ -214,6 +214,84 @@ async function runCapabilitiesTests() {
             assert.ok(res.responseData?.message.includes('Invalid adapterType'));
         });
 
+        await test('Gateway creation rejects invalid environments instead of coercing to test', async () => {
+            const { req, res } = mockReqRes({
+                body: {
+                    name: 'Paystack Invalid Environment',
+                    code: 'paystack_invalid_environment',
+                    adapterType: 'paystack',
+                    environment: 'production',
+                    publicKey: 'pk_live_public',
+                    secretKey: 'sk_live_secret',
+                    supportedChannels: ['card']
+                }
+            });
+
+            await adminGatewayController.createGateway(req, res);
+            assert.strictEqual(res.statusCode, 400);
+            assert.strictEqual(res.responseData?.code, 'PAYMENT_GATEWAY_ENVIRONMENT_INVALID');
+        });
+
+        await test('Gateway creation rejects Paystack credentials from another environment', async () => {
+            const { req, res } = mockReqRes({
+                body: {
+                    name: 'Paystack Mismatched Credentials',
+                    code: 'paystack_mismatched_credentials',
+                    adapterType: 'paystack',
+                    environment: 'test',
+                    publicKey: 'pk_test_public',
+                    secretKey: 'sk_live_secret',
+                    supportedChannels: ['card']
+                }
+            });
+
+            await adminGatewayController.createGateway(req, res);
+            assert.strictEqual(res.statusCode, 409);
+            assert.strictEqual(res.responseData?.code, 'PAYMENT_GATEWAY_CREDENTIAL_ENVIRONMENT_MISMATCH');
+            assert.deepStrictEqual(res.responseData?.details?.mismatchedFields, ['secretKey']);
+        });
+
+        await test('Active Paystack creation rejects malformed non-empty credentials', async () => {
+            const { req, res } = mockReqRes({
+                body: {
+                    name: 'Paystack Malformed Credentials',
+                    code: 'paystack_malformed_credentials',
+                    adapterType: 'paystack',
+                    status: 'active',
+                    environment: 'test',
+                    publicKey: 'pk_test_public',
+                    secretKey: 'garbage',
+                    supportedChannels: ['card']
+                }
+            });
+
+            await adminGatewayController.createGateway(req, res);
+            assert.strictEqual(res.statusCode, 400);
+            assert.strictEqual(res.responseData?.code, 'PAYMENT_GATEWAY_CREDENTIAL_INVALID');
+            assert.deepStrictEqual(res.responseData?.details?.invalidFields, ['secretKey']);
+        });
+
+        await test('Creating a live gateway requires explicit confirmation', async () => {
+            const { req, res } = mockReqRes({
+                body: {
+                    name: 'Paystack Unconfirmed Live',
+                    code: 'paystack_unconfirmed_live',
+                    adapterType: 'paystack',
+                    environment: 'live',
+                    publicKey: 'pk_live_public',
+                    secretKey: 'sk_live_secret',
+                    supportedChannels: ['card']
+                }
+            });
+
+            await adminGatewayController.createGateway(req, res);
+            assert.strictEqual(res.statusCode, 409);
+            assert.strictEqual(res.responseData?.code, 'PAYMENT_GATEWAY_ENVIRONMENT_CONFIRMATION_REQUIRED');
+            assert.deepStrictEqual(res.responseData?.details?.requiredConfirmation, {
+                confirmEnvironmentChange: 'create-live'
+            });
+        });
+
         // Test 4: Reject unsupported channels for adapter
         await test('Gateway creation rejects channels unsupported by the chosen adapter', async () => {
             // Paystack does NOT support 'virtual_account' in its registry declaration
@@ -330,6 +408,33 @@ async function runCapabilitiesTests() {
             const updated = gatewaysDB.find(g => String(g._id) === String(gatewayDoc._id));
             assert.ok(isEncrypted(updated.secretKey));
             assert.strictEqual(decryptSecret(updated.secretKey), originalSecret);
+        });
+
+        await test('Status endpoint rejects activation with malformed Paystack credentials', async () => {
+            const gatewayDoc = await PaymentGateway.create({
+                name: 'Paystack Invalid Draft',
+                code: 'paystack_invalid_draft',
+                adapterType: 'paystack',
+                status: 'inactive',
+                environment: 'test',
+                supportedChannels: ['card'],
+                publicKey: 'pk_test_public',
+                secretKey: encryptSecret('malformed-secret')
+            });
+
+            const { req, res } = mockReqRes({
+                params: { id: String(gatewayDoc._id) },
+                body: { status: 'active' }
+            });
+
+            await adminGatewayController.updateGatewayStatus(req, res);
+            assert.strictEqual(res.statusCode, 400);
+            assert.strictEqual(res.responseData?.code, 'PAYMENT_GATEWAY_CREDENTIAL_INVALID');
+            assert.deepStrictEqual(res.responseData?.details?.invalidFields, ['secretKey']);
+            assert.strictEqual(
+                gatewaysDB.find(g => String(g._id) === String(gatewayDoc._id)).status,
+                'inactive'
+            );
         });
 
     } finally {

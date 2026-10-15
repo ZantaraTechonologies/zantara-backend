@@ -245,6 +245,7 @@ async function runAdminPaymentGatewayTests() {
                     adapterType: 'paystack',
                     status: 'active',
                     environment: 'live',
+                    confirmEnvironmentChange: 'create-live',
                     isDefault: true,
                     publicKey: 'pk_live_1234567890',
                     secretKey: 'sk_live_very_secret_key_abcdef',

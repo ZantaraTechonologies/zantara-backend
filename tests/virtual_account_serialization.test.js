@@ -170,7 +170,7 @@ test('profile serialization is a bare allowlisted user with safe virtual account
     assertNoInternalFields(res.body);
 });
 
-test('explicit provider-neutral provisioning serializes pending accounts', async () => {
+test('explicit provider-neutral provisioning does not expose pending account records', async () => {
     const res = makeRes();
     await withPatched([
         {
@@ -189,11 +189,42 @@ test('explicit provider-neutral provisioning serializes pending accounts', async
     }, res));
 
     assert.equal(res.statusCode, 202);
-    assert.equal(res.body.accounts[0].provisioningStatus, 'pending');
+    assert.deepEqual(res.body.accounts, []);
     assertNoInternalFields(res.body);
 });
 
-test('legacy Monnify provisioning serializes failed accounts', async () => {
+test('explicit provider-neutral provisioning returns persisted rejection as failure', async () => {
+    const res = makeRes();
+    let request;
+    await withPatched([
+        {
+            target: virtualAccountService,
+            key: 'provision',
+            value: async value => {
+                request = value;
+                return {
+                    status: 'failed',
+                    code: 'PAYSTACK_DVA_MERCHANT_RESTRICTED',
+                    message: 'Paystack DVA access is not enabled for this merchant.',
+                    existing: true,
+                    accounts: [accountFixture({ provisioningStatus: 'failed' })]
+                };
+            }
+        }
+    ], () => virtualAccountController.provisionVirtualAccount({
+        user: { id: 'user-1' },
+        params: { provider: 'paystack' },
+        body: { consent: true, retryRejected: true }
+    }, res));
+
+    assert.equal(request.retryRejected, true);
+    assert.equal(res.statusCode, 422);
+    assert.equal(res.body.success, false);
+    assert.equal(res.body.code, 'PAYSTACK_DVA_MERCHANT_RESTRICTED');
+    assertNoInternalFields(res.body);
+});
+
+test('legacy Monnify provisioning returns failure without exposing failed account records', async () => {
     const res = makeRes();
     await withPatched([
         {
@@ -205,11 +236,14 @@ test('legacy Monnify provisioning serializes failed accounts', async () => {
                 accounts: [accountFixture({ provider: 'monnify', provisioningStatus: 'failed' })]
             })
         }
-    ], () => monnifyController.generateVirtualAccounts({ user: { id: 'user-1' } }, res));
+    ], () => monnifyController.generateVirtualAccounts({
+        user: { id: 'user-1' },
+        body: { consent: true, consentVersion: 'permanent_virtual_account_v1' }
+    }, res));
 
-    assert.equal(res.statusCode, 200);
-    assert.equal(res.body.accounts[0].provider, 'monnify');
-    assert.equal(res.body.accounts[0].provisioningStatus, 'failed');
+    assert.equal(res.statusCode, 422);
+    assert.equal(res.body.success, false);
+    assert.deepEqual(res.body.accounts, []);
     assertNoInternalFields(res.body);
 });
 

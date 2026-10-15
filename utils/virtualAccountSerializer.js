@@ -90,6 +90,20 @@ const toPlainObject = value => {
     return value;
 };
 
+const isUsableVirtualAccount = value => {
+    const account = toPlainObject(value);
+    return ['paystack', 'monnify'].includes(String(account.provider || '').toLowerCase())
+        && !!account.gatewayId
+        && !!account.accountReference
+        && !!String(account.bankName || '').trim()
+        && !!String(account.accountName || '').trim()
+        && !!account.accountNumber
+        && account.currency === 'NGN'
+        && account.active === true
+        && account.assigned === true
+        && account.provisioningStatus === 'active';
+};
+
 const pickDefined = (value, fields) => {
     const source = toPlainObject(value);
     const result = {};
@@ -103,13 +117,14 @@ const serializeVirtualAccount = account => {
     const serialized = pickDefined(account, VIRTUAL_ACCOUNT_FIELDS);
 
     if (serialized._id !== undefined) serialized._id = String(serialized._id);
-    if (!serialized.provider && serialized.accountNumber) serialized.provider = 'monnify';
 
     return serialized;
 };
 
 const serializeVirtualAccounts = accounts => (
-    Array.isArray(accounts) ? accounts.map(serializeVirtualAccount) : []
+    Array.isArray(accounts)
+        ? accounts.filter(isUsableVirtualAccount).map(serializeVirtualAccount)
+        : []
 );
 
 const serializeLinkedAccounts = accounts => (
@@ -151,6 +166,7 @@ const serializeAdminUsers = users => (
 module.exports = {
     serializeVirtualAccount,
     serializeVirtualAccounts,
+    isUsableVirtualAccount,
     serializeUserProfile,
     serializeAdminUser,
     serializeAdminUsers

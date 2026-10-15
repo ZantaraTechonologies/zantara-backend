@@ -346,6 +346,17 @@ async function runPaymentGatewayTests() {
             assert.strictEqual(errCaught.code, 'PAYMENT_CHANNEL_UNSUPPORTED');
         });
 
+        await test('6b. Default gateway also rejects unsupported explicit channels', async () => {
+            await assert.rejects(
+                paymentGatewayService.initializeFunding({
+                    channels: ['virtual_account'],
+                    user: { _id: 'u-default-channel', email: 'default-channel@test.com' },
+                    amount: 1000
+                }),
+                error => error.code === 'PAYMENT_CHANNEL_UNSUPPORTED'
+            );
+        });
+
         await test('7. Active non-default gateway can be explicitly selected', async () => {
             // Paystack is default; explicitly request Monnify
             const monnifyAdapter = paymentGatewayService.adapters.monnify.prototype;
@@ -372,11 +383,15 @@ async function runPaymentGatewayTests() {
         await test('8. Default gateway is used when gatewayCode is omitted', async () => {
             const paystackAdapter = paymentGatewayService.adapters.paystack.prototype;
             const origInit = paystackAdapter.initializePayment;
-            paystackAdapter.initializePayment = async ({ reference }) => ({
-                success: true,
-                authorizationUrl: 'https://checkout.paystack.com/ps-test',
-                reference
-            });
+            let initializationOptions;
+            paystackAdapter.initializePayment = async (options) => {
+                initializationOptions = options;
+                return {
+                    success: true,
+                    authorizationUrl: 'https://checkout.paystack.com/ps-test',
+                    reference: options.reference
+                };
+            };
 
             const res = await paymentGatewayService.initializeFunding({
                 user: { _id: 'u-1', email: 'u1@test.com' },
@@ -387,6 +402,42 @@ async function runPaymentGatewayTests() {
 
             assert.strictEqual(res.success, true);
             assert.strictEqual(res.gateway, 'paystack', 'Must fall back to default gateway (Paystack)');
+            assert.strictEqual(initializationOptions.channel, undefined, 'Amount-only funding must not pin one channel');
+            assert.strictEqual(initializationOptions.channels, undefined, 'Amount-only funding must let hosted checkout expose merchant-enabled channels');
+            const tx = mockTransactions.find(t => t.refId === res.reference);
+            assert.deepStrictEqual(tx.channels, ['card', 'bank_transfer'], 'Configured capabilities remain recorded for audit');
+        });
+
+        await test('8b. Aliased gateways use their adapter callback path', async () => {
+            const originalGateways = mockGateways;
+            const paystackAdapter = paymentGatewayService.adapters.paystack.prototype;
+            const origInit = paystackAdapter.initializePayment;
+            mockGateways = [{
+                _id: 'gw-paystack-alias',
+                name: 'Primary Paystack',
+                code: 'primary-paystack',
+                adapterType: 'paystack',
+                status: 'active',
+                isDefault: true,
+                supportedChannels: ['card', 'bank_transfer']
+            }];
+            paystackAdapter.initializePayment = async ({ reference }) => ({
+                success: true,
+                authorizationUrl: 'https://checkout.paystack.com/alias-test',
+                reference
+            });
+            try {
+                const result = await paymentGatewayService.initializeFunding({
+                    user: { _id: 'u-alias', email: 'alias@test.com' },
+                    amount: 1000
+                });
+                assert.strictEqual(result.provider, 'primary-paystack');
+                assert.strictEqual(result.checkoutProvider, 'paystack');
+                assert.match(result.callbackUrl, /\/paystack\/return$/);
+            } finally {
+                paystackAdapter.initializePayment = origInit;
+                mockGateways = originalGateways;
+            }
         });
 
         // ─────────────────────────────────────────────────────────────────────
@@ -397,6 +448,21 @@ async function runPaymentGatewayTests() {
             const adapter = new PaystackAdapter({ secretKey: 'sk_test_mock', baseUrl: 'https://api.paystack.co' });
             assert.strictEqual(adapter.code, 'unknown'); // default
             assert.strictEqual(adapter.baseUrl, 'https://api.paystack.co');
+        });
+
+        await test('9b. Paystack omits channels for unrestricted checkout and preserves explicit restrictions', async () => {
+            const adapter = new PaystackAdapter({ secretKey: 'sk_test_mock', baseUrl: 'https://api.paystack.co' });
+            const origPost = require('axios').post;
+            const bodies = [];
+            require('axios').post = async (_url, body) => {
+                bodies.push(body);
+                return { data: { status: true, data: { authorization_url: 'https://checkout.paystack.com/mock', reference: body.reference } } };
+            };
+            await adapter.initializePayment({ user: { email: 'user@test.com' }, amount: 1000, reference: 'PS-OPEN' });
+            await adapter.initializePayment({ user: { email: 'user@test.com' }, amount: 1000, reference: 'PS-CARD', channel: 'card' });
+            require('axios').post = origPost;
+            assert.strictEqual('channels' in bodies[0], false);
+            assert.deepStrictEqual(bodies[1].channels, ['card']);
         });
 
         await test('10. Existing /api/wallet/fund remains backward compatible', async () => {
@@ -534,23 +600,65 @@ async function runPaymentGatewayTests() {
             adapter.getAccessToken = async () => 'mock_monnify_token';
             // Mock axios post
             const origPost = require('axios').post;
-            require('axios').post = async () => ({
-                data: {
-                    requestSuccessful: true,
-                    responseBody: { checkoutUrl: 'https://sandbox.monnify.com/pay', paymentReference: 'MNFY-REF-1' }
-                }
-            });
+            const bodies = [];
+            require('axios').post = async (_url, body) => {
+                bodies.push(body);
+                return {
+                    data: {
+                        requestSuccessful: true,
+                        responseBody: { checkoutUrl: 'https://sandbox.monnify.com/pay', paymentReference: body.paymentReference }
+                    }
+                };
+            };
 
             const res = await adapter.initializePayment({
                 user: { email: 'monnify@test.com', name: 'Monnify User' },
                 amount: 4000,
                 reference: 'MNFY-REF-1'
             });
+            await adapter.initializePayment({
+                user: { email: 'monnify@test.com', name: 'Monnify User' },
+                amount: 4000,
+                reference: 'MNFY-CARD',
+                channel: 'card'
+            });
 
             require('axios').post = origPost;
 
             assert.strictEqual(res.success, true);
             assert.strictEqual(res.authorizationUrl, 'https://sandbox.monnify.com/pay');
+            assert.strictEqual('paymentMethods' in bodies[0], false, 'Unrestricted checkout must defer methods to Monnify merchant configuration');
+            assert.deepStrictEqual(bodies[1].paymentMethods, ['CARD'], 'Explicitly restricted flows remain supported');
+        });
+
+        await test('15b. Monnify authentication transport failure is definitive before payment dispatch', async () => {
+            const adapter = new MonnifyAdapter({
+                baseUrl: 'https://sandbox.monnify.com',
+                publicKey: 'MK_TEST_123',
+                secretKey: 'SK_TEST_456',
+                metadata: { contractCode: '1234567890' }
+            });
+            const origPost = require('axios').post;
+            let calls = 0;
+            require('axios').post = async () => {
+                calls++;
+                const error = new Error('authentication timeout');
+                error.code = 'ECONNABORTED';
+                throw error;
+            };
+            try {
+                await assert.rejects(
+                    adapter.initializePayment({
+                        user: { email: 'monnify@test.com' },
+                        amount: 4000,
+                        reference: 'MNFY-AUTH-TIMEOUT'
+                    }),
+                    error => error.gatewayInitializationOutcome === 'definitive_failure'
+                );
+                assert.strictEqual(calls, 1, 'Only the authentication request may be attempted');
+            } finally {
+                require('axios').post = origPost;
+            }
         });
 
         await test('16. Monnify webhook signature validation works', () => {
@@ -1083,6 +1191,29 @@ async function runPaymentGatewayTests() {
             assert.strictEqual(tx.status, 'success');
         });
 
+        await test('43b. Unrestricted checkout notification does not invent a payment rail', async () => {
+            const currentSendFundingSuccess = notificationService.sendFundingSuccess;
+            let notificationPayload;
+            notificationService.sendFundingSuccess = async payload => {
+                notificationPayload = payload;
+            };
+            const tx = fundingRecord('HOSTED-METHOD-TX', {
+                userId: 'u-hosted-method',
+                channels: ['card', 'bank_transfer'],
+                service: 'Paystack'
+            });
+            mockTransactions.push(tx);
+            try {
+                await paymentGatewayService.finalizeFundingCredit({
+                    transactionStatus: tx,
+                    gatewayPaymentResult: successfulPayment('HOSTED-METHOD-TX', 1000)
+                });
+                assert.strictEqual(notificationPayload.method, 'Paystack');
+            } finally {
+                notificationService.sendFundingSuccess = currentSendFundingSuccess;
+            }
+        });
+
         await test('44. A second slow funding notification remains non-blocking', async () => {
             const currentSendFundingSuccess = notificationService.sendFundingSuccess;
             notificationService.sendFundingSuccess = async () => {
@@ -1157,9 +1288,11 @@ async function runPaymentGatewayTests() {
             // bank_transfer is supported by paystack (first in mock order) and monnify → paystack wins
             const paystackAdapter = paymentGatewayService.adapters.paystack.prototype;
             const origInit = paystackAdapter.initializePayment;
-            paystackAdapter.initializePayment = async ({ reference }) => ({
-                success: true, authorizationUrl: 'http://ps', reference
-            });
+            let initializationOptions;
+            paystackAdapter.initializePayment = async (options) => {
+                initializationOptions = options;
+                return { success: true, authorizationUrl: 'http://ps', reference: options.reference };
+            };
 
             const res = await paymentGatewayService.initializeFunding({
                 user: { _id: 'u-chan2', email: 'chan2@test.com' },
@@ -1173,6 +1306,7 @@ async function runPaymentGatewayTests() {
             const tx = mockTransactions.find(t => t.refId === res.reference);
             assert.ok(tx, 'TransactionStatus record must exist');
             assert.deepStrictEqual(tx.channels, ['bank_transfer'], 'Requested channel must be persisted');
+            assert.deepStrictEqual(initializationOptions.channels, ['bank_transfer'], 'Explicit channel restrictions must reach the adapter');
         });
 
         await test('48. No active gateway supporting the channel is rejected', async () => {

@@ -10,7 +10,12 @@ const {
   sanitizePaymentGateway,
   sanitizePaymentGatewayForClient
 } = require('../utils/paymentGatewaySerializer')
-const { encryptSecret, isEncrypted } = require('../utils/crypto')
+const { encryptSecret, decryptSecretStrict, isEncrypted } = require('../utils/crypto')
+const {
+  buildGatewayChangePlan,
+  paystackCredentialEnvironment,
+  isValidPaystackCredential
+} = require('../utils/paymentGatewayChangePlan')
 const { logAction } = require('./auditController')
 const {
   SUPPORTED_ADAPTER_CODES,
@@ -48,22 +53,129 @@ async function loadGatewayForMutation (id, session) {
   return queryWithSession(query, session)
 }
 
-function requiresGatewayMutationFence (gateway, body = {}) {
-  const nonBlank = value => typeof value === 'string' && value.trim() !== ''
-  return (
-    (body.adapterType !== undefined &&
-      String(body.adapterType).toLowerCase() !==
-        String(gateway.adapterType || '').toLowerCase()) ||
-    (body.baseUrl !== undefined &&
-      body.baseUrl.trim() !== String(gateway.baseUrl || '')) ||
-    (body.publicKey !== undefined &&
-      body.publicKey.trim() !== String(gateway.publicKey || '')) ||
-    nonBlank(body.secretKey) ||
-    nonBlank(body.webhookSecret) ||
-    (body.environment !== undefined &&
-      body.environment !== gateway.environment) ||
-    body.metadata !== undefined
-  )
+function validateGatewayUpdatePlan (gateway, changePlan, body) {
+  const nextStatus = body.status === undefined ? gateway.status : body.status
+  if (!['active', 'inactive', 'maintenance'].includes(nextStatus)) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        code: 'PAYMENT_GATEWAY_STATUS_INVALID',
+        message: "Status must be 'active', 'inactive', or 'maintenance'"
+      }
+    }
+  }
+  if (body.isDefault === true && nextStatus !== 'active') {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        code: 'PAYMENT_GATEWAY_DEFAULT_REQUIRES_ACTIVE',
+        message: 'A default gateway must be active.'
+      }
+    }
+  }
+  if (changePlan.changes.adapterType) {
+    return {
+      status: 409,
+      body: {
+        success: false,
+        code: 'PAYMENT_GATEWAY_ADAPTER_IMMUTABLE',
+        message:
+          'An existing gateway adapter type cannot be changed. Create a separate gateway configuration instead.',
+        details: { effectiveChanges: changePlan.effectiveChanges }
+      }
+    }
+  }
+  if (!['test', 'live'].includes(changePlan.next.environment)) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        code: 'PAYMENT_GATEWAY_ENVIRONMENT_INVALID',
+        message: "Environment must be 'test' or 'live'"
+      }
+    }
+  }
+  if (
+    changePlan.currentEnvironment === 'test' &&
+    changePlan.next.environment === 'live' &&
+    body.confirmEnvironmentChange !== 'test-to-live'
+  ) {
+    return {
+      status: 409,
+      body: {
+        success: false,
+        code: 'PAYMENT_GATEWAY_ENVIRONMENT_CONFIRMATION_REQUIRED',
+        message: 'Changing a gateway from test to live requires explicit confirmation.',
+        details: {
+          requiredConfirmation: { confirmEnvironmentChange: 'test-to-live' },
+          effectiveChanges: changePlan.effectiveChanges
+        }
+      }
+    }
+  }
+  if (
+    changePlan.currentAdapter === 'paystack' &&
+    (changePlan.changes.publicKey ||
+      changePlan.changes.secretKey ||
+      changePlan.changes.environment ||
+      body.status === 'active')
+  ) {
+    const nextSecretKey = changePlan.changes.secretKey ? body.secretKey : gateway.secretKey
+    const invalidFields = [
+      ...(!isValidPaystackCredential(changePlan.next.publicKey, 'public')
+        ? ['publicKey']
+        : []),
+      ...(!isValidPaystackCredential(nextSecretKey, 'secret')
+        ? ['secretKey']
+        : [])
+    ]
+    if (invalidFields.length > 0) {
+      return {
+        status: 400,
+        body: {
+          success: false,
+          code: 'PAYMENT_GATEWAY_CREDENTIAL_INVALID',
+          message: 'Active Paystack credentials must use valid public and secret key formats.',
+          details: { invalidFields }
+        }
+      }
+    }
+    const publicKeyEnvironment = paystackCredentialEnvironment(
+      changePlan.next.publicKey,
+      'public'
+    )
+    const secretKeyEnvironment = paystackCredentialEnvironment(
+      nextSecretKey,
+      'secret'
+    )
+    const mismatchedFields = [
+      ...(publicKeyEnvironment && publicKeyEnvironment !== changePlan.next.environment
+        ? ['publicKey']
+        : []),
+      ...(secretKeyEnvironment && secretKeyEnvironment !== changePlan.next.environment
+        ? ['secretKey']
+        : [])
+    ]
+    if (mismatchedFields.length > 0) {
+      return {
+        status: 409,
+        body: {
+          success: false,
+          code: 'PAYMENT_GATEWAY_CREDENTIAL_ENVIRONMENT_MISMATCH',
+          message:
+            'Paystack credential prefixes must match the selected gateway environment.',
+          details: {
+            environment: changePlan.next.environment,
+            mismatchedFields,
+            effectiveChanges: changePlan.effectiveChanges
+          }
+        }
+      }
+    }
+  }
+  return null
 }
 
 function virtualAccountReferenceFilter (gateway) {
@@ -192,6 +304,74 @@ const createGateway = async (req, res) => {
       })
     }
 
+    const normalizedEnvironment = String(environment).trim().toLowerCase()
+    if (!['test', 'live'].includes(normalizedEnvironment)) {
+      return res.status(400).json({
+        success: false,
+        code: 'PAYMENT_GATEWAY_ENVIRONMENT_INVALID',
+        message: "Environment must be 'test' or 'live'"
+      })
+    }
+    if (
+      normalizedEnvironment === 'live' &&
+      req.body.confirmEnvironmentChange !== 'create-live'
+    ) {
+      return res.status(409).json({
+        success: false,
+        code: 'PAYMENT_GATEWAY_ENVIRONMENT_CONFIRMATION_REQUIRED',
+        message: 'Creating a live gateway requires explicit confirmation.',
+        details: {
+          requiredConfirmation: { confirmEnvironmentChange: 'create-live' }
+        }
+      })
+    }
+    if (adapterType.toLowerCase() === 'paystack') {
+      const invalidFields = [
+        ...((status === 'active' || publicKey) && !isValidPaystackCredential(publicKey, 'public')
+          ? ['publicKey']
+          : []),
+        ...((status === 'active' || secretKey) && !isValidPaystackCredential(secretKey, 'secret')
+          ? ['secretKey']
+          : [])
+      ]
+      if (invalidFields.length > 0) {
+        return res.status(400).json({
+          success: false,
+          code: 'PAYMENT_GATEWAY_CREDENTIAL_INVALID',
+          message: 'Active Paystack credentials must use valid public and secret key formats.',
+          details: { invalidFields }
+        })
+      }
+      const publicKeyEnvironment = paystackCredentialEnvironment(publicKey, 'public')
+      const secretKeyEnvironment = paystackCredentialEnvironment(secretKey, 'secret')
+      const mismatchedFields = [
+        ...(publicKeyEnvironment && publicKeyEnvironment !== normalizedEnvironment
+          ? ['publicKey']
+          : []),
+        ...(secretKeyEnvironment && secretKeyEnvironment !== normalizedEnvironment
+          ? ['secretKey']
+          : [])
+      ]
+      if (mismatchedFields.length > 0) {
+        return res.status(409).json({
+          success: false,
+          code: 'PAYMENT_GATEWAY_CREDENTIAL_ENVIRONMENT_MISMATCH',
+          message:
+            'Paystack credential prefixes must match the selected gateway environment.',
+          details: { environment: normalizedEnvironment, mismatchedFields }
+        })
+      }
+    }
+    for (const [field, value] of [['secretKey', secretKey], ['webhookSecret', webhookSecret]]) {
+      if (isEncrypted(value) && !decryptSecretStrict(value)) {
+        return res.status(400).json({
+          success: false,
+          code: 'PAYMENT_GATEWAY_CREDENTIAL_INVALID',
+          message: `${field} contains unreadable encrypted data`
+        })
+      }
+    }
+
     const requestPriority = normalizePriority(priority)
     if (requestPriority === null) {
       return res.status(400).json({
@@ -257,7 +437,7 @@ const createGateway = async (req, res) => {
       code: normalizedCode,
       adapterType: adapterType.toLowerCase(),
       status,
-      environment: environment === 'live' ? 'live' : 'test',
+      environment: normalizedEnvironment,
       isDefault: false, // will assign via setDefault if requested
       priority: requestPriority,
       publicKey: publicKey.trim(),
@@ -338,7 +518,11 @@ const updateGateway = async (req, res) => {
       metadata
     } = req.body
 
-    if (requiresGatewayMutationFence(gateway, req.body)) {
+    let changePlan = buildGatewayChangePlan(gateway, req.body)
+    let validation = validateGatewayUpdatePlan(gateway, changePlan, req.body)
+    if (validation) return res.status(validation.status).json(validation.body)
+
+    if (changePlan.requiresMutationFence) {
       mutationSession = await mongoose.startSession()
       mutationSession.startTransaction()
       gateway = await loadGatewayForMutation(id, mutationSession)
@@ -347,19 +531,24 @@ const updateGateway = async (req, res) => {
           .status(404)
           .json({ success: false, message: 'Payment gateway not found' })
       }
-      const fence = await PaymentGateway.updateOne(
-        { _id: id },
-        { $inc: { virtualAccountMutationVersion: 1 } },
-        { session: mutationSession }
-      )
-      if (!mutationMatched(fence)) {
-        return res.status(409).json({
-          success: false,
-          message: 'Payment gateway changed concurrently. Please retry.'
-        })
+      changePlan = buildGatewayChangePlan(gateway, req.body)
+      validation = validateGatewayUpdatePlan(gateway, changePlan, req.body)
+      if (validation) return res.status(validation.status).json(validation.body)
+      if (changePlan.requiresMutationFence) {
+        const fence = await PaymentGateway.updateOne(
+          { _id: id },
+          { $inc: { virtualAccountMutationVersion: 1 } },
+          { session: mutationSession }
+        )
+        if (!mutationMatched(fence)) {
+          return res.status(409).json({
+            success: false,
+            message: 'Payment gateway changed concurrently. Please retry.'
+          })
+        }
+        gateway.virtualAccountMutationVersion =
+          Number(gateway.virtualAccountMutationVersion || 0) + 1
       }
-      gateway.virtualAccountMutationVersion =
-        Number(gateway.virtualAccountMutationVersion || 0) + 1
     }
 
     let isSecretRotated = false
@@ -369,21 +558,10 @@ const updateGateway = async (req, res) => {
     const previousEnv = gateway.environment
     const previousStatus = gateway.status
     const currentAdapter = String(gateway.adapterType || '').toLowerCase()
-    const requestedAdapter = adapterType
-      ? String(adapterType).toLowerCase()
-      : currentAdapter
+    const requestedAdapter = changePlan.next.adapterType
     const isPaystack = currentAdapter === 'paystack'
     const paystackVerificationChanged =
-      isPaystack &&
-      ((secretKey &&
-        typeof secretKey === 'string' &&
-        secretKey.trim() !== '') ||
-        (webhookSecret &&
-          typeof webhookSecret === 'string' &&
-          webhookSecret.trim() !== '') ||
-        (baseUrl !== undefined &&
-          baseUrl.trim() !== String(gateway.baseUrl || '')) ||
-        (environment && environment !== gateway.environment))
+      isPaystack && changePlan.paystackVerificationChanges.length > 0
     const requiresPaystackDvaCheck =
       isPaystack &&
       (requestedAdapter !== 'paystack' || paystackVerificationChanged)
@@ -408,42 +586,19 @@ const updateGateway = async (req, res) => {
       })
     }
 
-    const verificationConfigChanged =
-      (adapterType && adapterType.toLowerCase() !== gateway.adapterType) ||
-      baseUrl !== undefined ||
-      publicKey !== undefined ||
-      (secretKey && typeof secretKey === 'string' && secretKey.trim() !== '') ||
-      (webhookSecret &&
-        typeof webhookSecret === 'string' &&
-        webhookSecret.trim() !== '') ||
-      (environment && environment !== gateway.environment) ||
-      metadata !== undefined
+    const verificationConfigChanged = changePlan.requiresMutationFence
     if (verificationConfigChanged) {
-      // Recent pending payments remain protected because they may still complete.
-      // Old pending attempts are treated as abandoned for gateway-configuration
-      // purposes, but remain in the database for audit and possible late provider
-      // reconciliation. Transactions that have entered processing, settlement,
-      // or reconciliation-required states always remain blocking.
-      const pendingPaymentCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000)
-
       const unresolvedPayments = await queryWithSession(
         TransactionStatus.countDocuments({
           provider: gateway.code,
-          $or: [
-            {
-              status: {
-                $in: [
-                  'processing',
-                  'settlement_pending',
-                  'reconciliation_required'
-                ]
-              }
-            },
-            {
-              status: 'pending',
-              createdAt: { $gte: pendingPaymentCutoff }
-            }
-          ]
+          status: {
+            $in: [
+              'pending',
+              'processing',
+              'settlement_pending',
+              'reconciliation_required'
+            ]
+          }
         }),
         mutationSession
       )
@@ -451,9 +606,31 @@ const updateGateway = async (req, res) => {
       if (unresolvedPayments > 0) {
         return res.status(409).json({
           success: false,
-          message: `Cannot change gateway verification settings while ${unresolvedPayments} payment(s) remain unresolved.`
+          code: 'PAYMENT_GATEWAY_UNRESOLVED_TRANSACTIONS',
+          message: `Cannot change gateway verification settings while ${unresolvedPayments} payment(s) remain unresolved.`,
+          details: {
+            unresolvedTransactions: unresolvedPayments,
+            effectiveChanges: changePlan.effectiveChanges
+          }
         })
       }
+    }
+
+    if (
+      paystackDvaUsers > 0 &&
+      changePlan.changes.environment
+    ) {
+      return res.status(409).json({
+        success: false,
+        code: 'PAYMENT_GATEWAY_DVA_ENVIRONMENT_LOCKED',
+        message:
+          'Cannot change the Paystack environment while users have dedicated virtual accounts.',
+        details: {
+          currentEnvironment: changePlan.currentEnvironment,
+          requestedEnvironment: changePlan.next.environment,
+          effectiveChanges: changePlan.effectiveChanges
+        }
+      })
     }
 
     if (paystackVerificationChanged) {
@@ -462,14 +639,7 @@ const updateGateway = async (req, res) => {
         paymentGatewayService._hydrateGatewayCredentials(snapshot)
       const unreadableSecret =
         !hydratedSnapshot.secretKey || isEncrypted(hydratedSnapshot.secretKey)
-      const unreadableWebhookSecret =
-        snapshot.webhookSecret &&
-        (!hydratedSnapshot.webhookSecret ||
-          isEncrypted(hydratedSnapshot.webhookSecret))
-      if (
-        paystackDvaUsers > 0 &&
-        (unreadableSecret || unreadableWebhookSecret)
-      ) {
+      if (paystackDvaUsers > 0 && unreadableSecret) {
         return res.status(409).json({
           success: false,
           message:
@@ -480,20 +650,12 @@ const updateGateway = async (req, res) => {
         secretKey && typeof secretKey === 'string' && secretKey.trim() !== ''
           ? secretKey.trim()
           : hydratedSnapshot.secretKey
-      const nextWebhookSecret =
-        webhookSecret &&
-        typeof webhookSecret === 'string' &&
-        webhookSecret.trim() !== ''
-          ? webhookSecret.trim()
-          : hydratedSnapshot.webhookSecret
-      const currentSigningSecret =
-        hydratedSnapshot.webhookSecret || hydratedSnapshot.secretKey
-      const nextSigningSecret = nextWebhookSecret || nextSecretKey
+      const currentSigningSecret = hydratedSnapshot.secretKey
+      const nextSigningSecret = nextSecretKey
       const apiContextChanged =
-        nextSecretKey !== hydratedSnapshot.secretKey ||
-        (baseUrl !== undefined &&
-          baseUrl.trim() !== String(hydratedSnapshot.baseUrl || '')) ||
-        (environment && environment !== hydratedSnapshot.environment)
+        changePlan.changes.secretKey ||
+        changePlan.changes.baseUrl ||
+        changePlan.changes.environment
       if (
         paystackDvaUsers > 0 &&
         apiContextChanged &&
@@ -514,24 +676,12 @@ const updateGateway = async (req, res) => {
       gateway.markModified('webhookVerificationSnapshots')
     }
 
-    const currentMetadata = gateway.metadata || {}
-    const requestedMetadata = metadata || {}
-
-    const metadataChanged =
-      JSON.stringify(currentMetadata) !== JSON.stringify(requestedMetadata)
-
     const virtualAccountConfigChanged =
       currentAdapter === 'monnify' &&
-      ((adapterType &&
-        adapterType.toLowerCase() !==
-          String(gateway.adapterType || '').toLowerCase()) ||
-        (baseUrl !== undefined &&
-          baseUrl.trim() !== String(gateway.baseUrl || '').trim()) ||
-        (publicKey !== undefined &&
-          publicKey.trim() !== String(gateway.publicKey || '').trim()) ||
-        (environment &&
-          environment !== gateway.environment) ||
-        (metadata !== undefined && metadataChanged))
+      (changePlan.changes.baseUrl ||
+        changePlan.changes.publicKey ||
+        changePlan.changes.environment ||
+        changePlan.changes.metadata)
     if (virtualAccountConfigChanged) {
       const virtualAccountUsers = await queryWithSession(
         User.countDocuments(virtualAccountReferenceFilter(gateway)),
@@ -555,11 +705,11 @@ const updateGateway = async (req, res) => {
           )}`
         })
       }
-      gateway.adapterType = adapterType.toLowerCase()
+      gateway.adapterType = changePlan.next.adapterType
     }
 
-    if (baseUrl !== undefined) gateway.baseUrl = baseUrl.trim()
-    if (publicKey !== undefined) gateway.publicKey = publicKey.trim()
+    if (baseUrl !== undefined) gateway.baseUrl = changePlan.next.baseUrl
+    if (publicKey !== undefined) gateway.publicKey = changePlan.next.publicKey
     if (
       priority !== undefined &&
       priority !== null &&
@@ -603,14 +753,14 @@ const updateGateway = async (req, res) => {
       gateway.supportedChannels = supportedChannels
     }
 
-    if (metadata && typeof metadata === 'object') {
-      gateway.metadata = { ...(gateway.metadata || {}), ...metadata }
+    if (metadata !== undefined && changePlan.changes.metadata) {
+      gateway.metadata = changePlan.next.metadata
       gateway.markModified('metadata')
     }
 
     // Credentials Rotation: Update ONLY if non-empty string provided.
     // Blank string or undefined means "retain current configured secret".
-    if (secretKey && typeof secretKey === 'string' && secretKey.trim() !== '') {
+    if (changePlan.changes.secretKey) {
       gateway.secretKey = isEncrypted(secretKey.trim())
         ? secretKey.trim()
         : encryptSecret(secretKey.trim())
@@ -618,9 +768,7 @@ const updateGateway = async (req, res) => {
     }
 
     if (
-      webhookSecret &&
-      typeof webhookSecret === 'string' &&
-      webhookSecret.trim() !== ''
+      changePlan.changes.webhookSecret
     ) {
       gateway.webhookSecret = isEncrypted(webhookSecret.trim())
         ? webhookSecret.trim()
@@ -629,14 +777,8 @@ const updateGateway = async (req, res) => {
     }
 
     // Environment Switch Tracking
-    if (environment && environment !== gateway.environment) {
-      if (!['test', 'live'].includes(environment)) {
-        return res.status(400).json({
-          success: false,
-          message: "Environment must be 'test' or 'live'"
-        })
-      }
-      gateway.environment = environment
+    if (changePlan.changes.environment) {
+      gateway.environment = changePlan.next.environment
       isEnvChanged = true
     }
 
@@ -663,12 +805,6 @@ const updateGateway = async (req, res) => {
 
     // Default Gateway Handling
     if (isDefault === true && !gateway.isDefault) {
-      if (gateway.status !== 'active') {
-        return res.status(400).json({
-          success: false,
-          message: `Cannot set gateway '${gateway.name}' as default because it is not active. Please activate it first.`
-        })
-      }
       await PaymentGateway.setDefault(
         gateway._id,
         mutationSession ? { session: mutationSession } : undefined
@@ -757,7 +893,14 @@ const updateGateway = async (req, res) => {
       req
     )
 
-    res.json({ success: true, data: sanitizePaymentGateway(gateway) })
+    res.json({
+      success: true,
+      data: sanitizePaymentGateway(gateway),
+      diagnostics: {
+        effectiveChanges: changePlan.effectiveChanges,
+        verificationConfigurationChanged: changePlan.requiresMutationFence
+      }
+    })
   } catch (error) {
     if (mutationSession && !mutationFinished) {
       try {
@@ -801,6 +944,10 @@ const updateGatewayStatus = async (req, res) => {
         .status(404)
         .json({ success: false, message: 'Payment gateway not found' })
     }
+
+    const changePlan = buildGatewayChangePlan(gateway, { status })
+    const validation = validateGatewayUpdatePlan(gateway, changePlan, { status })
+    if (validation) return res.status(validation.status).json(validation.body)
 
     const oldStatus = gateway.status
     gateway.status = status

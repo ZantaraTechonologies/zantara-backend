@@ -1,6 +1,10 @@
 const axios = require('axios');
 const crypto = require('crypto');
 const BasePaymentAdapter = require('./base-payment.adapter');
+const {
+    normalizePaystackDvaError,
+    providerDeclaredPaystackError
+} = require('../../utils/paystackDvaError');
 
 class PaystackAdapter extends BasePaymentAdapter {
     constructor(gatewayConfig = {}) {
@@ -107,15 +111,23 @@ class PaystackAdapter extends BasePaymentAdapter {
             throw error;
         }
 
-        const response = await axios.post(`${this.baseUrl}/customer`, {
-            email,
-            first_name: firstName,
-            last_name: lastName,
-            phone
-        }, { headers: this._apiHeaders(), timeout: 20000 });
+        let response;
+        try {
+            response = await axios.post(`${this.baseUrl}/customer`, {
+                email,
+                first_name: firstName,
+                last_name: lastName,
+                phone
+            }, { headers: this._apiHeaders(), timeout: 20000 });
+        } catch (error) {
+            throw normalizePaystackDvaError(error, { operation: 'create_customer', mutation: true });
+        }
 
         if (!response.data?.status || !response.data?.data) {
-            throw new Error(response.data?.message || 'Paystack customer creation failed');
+            throw normalizePaystackDvaError(providerDeclaredPaystackError(response), {
+                operation: 'create_customer',
+                mutation: true
+            });
         }
         return this._normalizeCustomer(response.data.data);
     }
@@ -136,7 +148,7 @@ class PaystackAdapter extends BasePaymentAdapter {
             return this._normalizeCustomer(response.data.data);
         } catch (error) {
             if (Number(error.response?.status) === 404) return null;
-            throw error;
+            throw normalizePaystackDvaError(error, { operation: 'fetch_customer' });
         }
     }
 
@@ -159,13 +171,21 @@ class PaystackAdapter extends BasePaymentAdapter {
             ...(lastName ? { last_name: lastName } : {}),
             ...(phone ? { phone } : {})
         };
-        const response = await axios.post(`${this.baseUrl}/dedicated_account`, body, {
-            headers: this._apiHeaders(),
-            timeout: 20000
-        });
+        let response;
+        try {
+            response = await axios.post(`${this.baseUrl}/dedicated_account`, body, {
+                headers: this._apiHeaders(),
+                timeout: 20000
+            });
+        } catch (error) {
+            throw normalizePaystackDvaError(error, { operation: 'create_dedicated_account', mutation: true });
+        }
 
         if (!response.data?.status) {
-            throw new Error(response.data?.message || 'Paystack DVA creation failed');
+            throw normalizePaystackDvaError(providerDeclaredPaystackError(response), {
+                operation: 'create_dedicated_account',
+                mutation: true
+            });
         }
         const account = response.data.data
             ? this._normalizeDedicatedAccount(response.data.data)
@@ -185,20 +205,28 @@ class PaystackAdapter extends BasePaymentAdapter {
             error.code = 'PAYSTACK_CUSTOMER_DATA_INVALID';
             throw error;
         }
-        const response = await axios.post(`${this.baseUrl}/dedicated_account/assign`, {
-            email,
-            first_name: firstName,
-            last_name: lastName,
-            phone,
-            preferred_bank: preferredBank,
-            country,
-            ...(accountNumber ? { account_number: accountNumber } : {}),
-            ...(bvn ? { bvn } : {}),
-            ...(bankCode ? { bank_code: bankCode } : {})
-        }, { headers: this._apiHeaders(), timeout: 20000 });
+        let response;
+        try {
+            response = await axios.post(`${this.baseUrl}/dedicated_account/assign`, {
+                email,
+                first_name: firstName,
+                last_name: lastName,
+                phone,
+                preferred_bank: preferredBank,
+                country,
+                ...(accountNumber ? { account_number: accountNumber } : {}),
+                ...(bvn ? { bvn } : {}),
+                ...(bankCode ? { bank_code: bankCode } : {})
+            }, { headers: this._apiHeaders(), timeout: 20000 });
+        } catch (error) {
+            throw normalizePaystackDvaError(error, { operation: 'assign_dedicated_account', mutation: true });
+        }
 
         if (!response.data?.status) {
-            throw new Error(response.data?.message || 'Paystack DVA assignment failed');
+            throw normalizePaystackDvaError(providerDeclaredPaystackError(response), {
+                operation: 'assign_dedicated_account',
+                mutation: true
+            });
         }
         return { success: true, status: 'pending', message: response.data.message || '', raw: response.data.data || null };
     }
@@ -220,17 +248,24 @@ class PaystackAdapter extends BasePaymentAdapter {
             return this._normalizeDedicatedAccount(response.data.data);
         } catch (error) {
             if (Number(error.response?.status) === 404) return null;
-            throw error;
+            throw normalizePaystackDvaError(error, { operation: 'fetch_dedicated_account' });
         }
     }
 
     async listDedicatedAccountProviders() {
-        const response = await axios.get(`${this.baseUrl}/dedicated_account/available_providers`, {
-            headers: this._apiHeaders(),
-            timeout: 20000
-        });
+        let response;
+        try {
+            response = await axios.get(`${this.baseUrl}/dedicated_account/available_providers`, {
+                headers: this._apiHeaders(),
+                timeout: 20000
+            });
+        } catch (error) {
+            throw normalizePaystackDvaError(error, { operation: 'list_dedicated_account_providers' });
+        }
         if (!response.data?.status || !Array.isArray(response.data?.data)) {
-            throw new Error(response.data?.message || 'Paystack DVA providers lookup failed');
+            throw normalizePaystackDvaError(providerDeclaredPaystackError(response), {
+                operation: 'list_dedicated_account_providers'
+            });
         }
         return response.data.data.map(provider => ({
             providerSlug: provider.provider_slug,

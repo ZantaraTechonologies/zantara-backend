@@ -14,6 +14,7 @@ const ActivityLog = require('../models/ActivityLog');
 const legalService = require('../services/legalDocument.service');
 const notificationService = require('../services/notification.service');
 const virtualAccountService = require('../services/virtualAccount.service');
+const onboardingService = require('../services/onboarding.service');
 const authController = require('../controllers/authController');
 
 const makeRes = () => ({
@@ -56,6 +57,7 @@ const registrationPatches = ({ provisionEligible, commitTransaction }) => [
     { target: ActivityLog, key: 'create', value: async () => ({}) },
     { target: legalService, key: 'validateSignupAcceptances', value: async () => [] },
     { target: virtualAccountService, key: 'provisionEligible', value: provisionEligible },
+    { target: onboardingService, key: 'getStateForResponse', value: async () => ({ currentStep: 'contact_verification', dashboardAllowed: true }) },
     { target: bcrypt, key: 'hash', value: async () => 'hashed-password' },
     {
         target: mongoose,
@@ -69,23 +71,13 @@ const registrationPatches = ({ provisionEligible, commitTransaction }) => [
     }
 ];
 
-test('registration schedules the shared lifecycle after commit without waiting for providers', async () => {
+test('registration never invokes provider provisioning', async () => {
     let committed = false;
-    let observed;
-    let releaseProviders;
-    const providersPending = new Promise(resolve => { releaseProviders = resolve; });
+    let provisioningCalls = 0;
     const res = makeRes();
     await withPatched(registrationPatches({
         commitTransaction: async () => { committed = true; },
-        provisionEligible: async request => {
-            assert.equal(committed, true);
-            observed = request;
-            await providersPending;
-            return {
-                paystack: { status: 'active', accounts: [] },
-                monnify: { status: 'active', accounts: [] }
-            };
-        }
+        provisionEligible: async () => { provisioningCalls++; }
     }), async () => {
         await authController.register({
             body: {
@@ -103,24 +95,21 @@ test('registration schedules the shared lifecycle after commit without waiting f
     });
 
     assert.equal(res.statusCode, 200);
-    releaseProviders();
-    assert.deepEqual(observed, {
-        userId: 'phase5d-register-user',
-        paystackConsent: true,
-        paystackPreferredBank: 'wema-bank'
-    });
+    assert.equal(committed, true);
+    assert.equal(provisioningCalls, 0);
 });
 
-test('registration remains successful when the automatic lifecycle throws', async () => {
+test('registration remains provider-independent even if provisioning would throw', async () => {
     const originalError = console.error;
     const originalLog = console.log;
     console.error = () => {};
     console.log = () => {};
     const res = makeRes();
+    let provisioningCalls = 0;
     try {
         await withPatched(registrationPatches({
             commitTransaction: async () => {},
-            provisionEligible: async () => { throw new Error('all providers unavailable'); }
+            provisionEligible: async () => { provisioningCalls++; throw new Error('all providers unavailable'); }
         }), async () => {
             await authController.register({
                 body: {
@@ -140,9 +129,10 @@ test('registration remains successful when the automatic lifecycle throws', asyn
     }
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.ok, true);
+    assert.equal(provisioningCalls, 0);
 });
 
-test('successful login schedules account reevaluation without depending on provider completion', async () => {
+test('successful login never invokes provider provisioning', async () => {
     const user = {
         _id: 'phase5d-login-user',
         name: 'Ada Lovelace',
@@ -154,26 +144,18 @@ test('successful login schedules account reevaluation without depending on provi
         status: true,
         async save() { return this; }
     };
-    const observed = [];
-    let releaseProviders;
-    const providersPending = new Promise(resolve => { releaseProviders = resolve; });
+    let provisioningCalls = 0;
     const res = makeRes();
     await withPatched([
         { target: User, key: 'findOne', value: () => ({ select: async () => user }) },
         { target: bcrypt, key: 'compare', value: async () => true },
         { target: ActivityLog, key: 'create', value: async () => ({}) },
         { target: notificationService, key: 'sendInApp', value: async () => ({}) },
+        { target: onboardingService, key: 'getStateForResponse', value: async () => ({ currentStep: 'contact_verification', dashboardAllowed: true }) },
         {
             target: virtualAccountService,
             key: 'provisionEligible',
-            value: async request => {
-                observed.push(request);
-                await providersPending;
-                return {
-                    paystack: { status: 'skipped' },
-                    monnify: { status: 'active', accounts: [] }
-                };
-            }
+            value: async () => { provisioningCalls++; }
         }
     ], async () => {
         await authController.login({
@@ -185,8 +167,7 @@ test('successful login schedules account reevaluation without depending on provi
 
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.ok, true);
-    assert.deepEqual(observed, [{ userId: 'phase5d-login-user' }]);
-    releaseProviders();
+    assert.equal(provisioningCalls, 0);
 });
 
 test('profile retrieval is read-only and never invokes provider provisioning', async () => {
@@ -201,6 +182,7 @@ test('profile retrieval is read-only and never invokes provider provisioning', a
                 throw new Error('profile must not invoke provisioning');
             }
         },
+        { target: onboardingService, key: 'getStateForResponse', value: async () => ({ currentStep: 'contact_verification', dashboardAllowed: true }) },
         {
             target: User,
             key: 'findById',

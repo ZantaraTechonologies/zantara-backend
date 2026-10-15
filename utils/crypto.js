@@ -113,10 +113,22 @@ function decryptSecretStrict(value) {
     return decrypted;
 }
 
+function secretsEqual(storedValue, submittedValue) {
+    if (typeof storedValue !== 'string' || typeof submittedValue !== 'string') return false;
+    const stored = isEncrypted(storedValue) ? decryptSecretStrict(storedValue) : storedValue;
+    const submitted = isEncrypted(submittedValue) ? decryptSecretStrict(submittedValue) : submittedValue;
+    if (typeof stored !== 'string' || typeof submitted !== 'string') return false;
+    const storedBuffer = Buffer.from(stored, 'utf8');
+    const submittedBuffer = Buffer.from(submitted, 'utf8');
+    return storedBuffer.length === submittedBuffer.length
+        && crypto.timingSafeEqual(storedBuffer, submittedBuffer);
+}
+
 module.exports = {
     encryptSecret,
     decryptSecret,
     decryptSecretStrict,
+    secretsEqual,
     isEncrypted,
     validateEncryptionConfiguration,
 };

@@ -3,8 +3,21 @@ const User = require('../models/User')
 const Transaction = require('../models/Transaction')
 const mongoose = require('mongoose')
 const { generateTransactionId } = require('../utils/generateID')
+const { phoneIdentityCandidates } = require('../utils/customerProfile')
 
 const walletService = require('../services/wallet.service')
+
+const recipientLookup = identifier => {
+    const value = String(identifier || '').trim()
+    let phoneCandidates = [value]
+    try { phoneCandidates = phoneIdentityCandidates(value) } catch (_) {}
+    return {
+        $or: [
+            { phone: { $in: phoneCandidates } },
+            { email: value.toLowerCase() }
+        ]
+    }
+}
 
 const getWallet = async (req, res) => {
     const wallet = await Wallet.findOne({ userId: req.user.id })
@@ -104,12 +117,7 @@ const verifyTransferRecipient = async (req, res) => {
         const { identifier } = req.query; // phone or email
         if (!identifier) return res.status(400).json({ message: 'Recipient identifier is required' });
 
-        const recipient = await User.findOne({
-            $or: [
-                { phone: identifier },
-                { email: identifier.toLowerCase() }
-            ]
-        }).select('name phone email');
+        const recipient = await User.findOne(recipientLookup(identifier)).select('name phone email');
 
         if (!recipient) return res.status(404).json({ message: 'User not found' });
         if (recipient._id.toString() === req.user.id) return res.status(400).json({ message: 'You cannot transfer to yourself' });
@@ -137,12 +145,7 @@ const transferMoney = async (req, res) => {
         if (!pinMatch) throw new Error('Invalid transaction PIN');
 
         // 2. Resolve Recipient
-        const receiver = await User.findOne({
-            $or: [
-                { phone: identifier },
-                { email: identifier.toLowerCase() }
-            ]
-        }).session(session);
+        const receiver = await User.findOne(recipientLookup(identifier)).session(session);
         if (!receiver) throw new Error('Recipient not found');
         if (receiver._id.toString() === senderId) throw new Error('Cannot transfer to yourself');
 

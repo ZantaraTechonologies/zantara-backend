@@ -582,6 +582,29 @@ test('webhook integrity HTTP and middleware remediation', async (t) => {
         assert.equal(tx.status, 'reconciliation_required');
     });
 
+    await t.test('R14b canonical provider webhook settles a snapshot-proven gateway alias', async () => {
+        reset();
+        const tx = seedTransaction('R14-ALIAS', {
+            provider: 'primary-paystack',
+            service: 'Primary Paystack',
+            gatewayConfigSnapshot: {
+                code: 'primary-paystack',
+                adapterType: 'paystack',
+                name: 'Primary Paystack',
+                secretKey: PAYSTACK_SECRET,
+                webhookSecret: PAYSTACK_SECRET,
+                baseUrl: 'https://api.paystack.co'
+            }
+        });
+        const { response } = await postPaystack(
+            '/api/webhooks/payment/paystack',
+            paystackPayload({ refId: 'R14-ALIAS', eventId: 'R14-ALIAS-EVENT' })
+        );
+        assert.equal(response.status, 200);
+        assert.equal(walletCredits.length, 1);
+        assert.equal(tx.status, 'success');
+    });
+
     await t.test('R15 unsupported gatewayCode remains rejected', async () => {
         reset();
         const response = await fetch(`${baseUrl}/api/webhooks/payment/unsupported`, {

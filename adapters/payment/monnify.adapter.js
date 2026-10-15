@@ -56,9 +56,19 @@ class MonnifyAdapter extends BasePaymentAdapter {
             throw this._definitiveInitializationError('MonnifyAdapter: invalid amount');
         }
 
-        const token = await this.getAccessToken();
+        let token;
+        try {
+            token = await this.getAccessToken();
+        } catch (error) {
+            if (error?.gatewayInitializationOutcome === 'definitive_failure') throw error;
+            const preflightError = this._definitiveInitializationError(
+                error?.message || 'Monnify authentication unavailable'
+            );
+            preflightError.cause = error;
+            throw preflightError;
+        }
 
-        let paymentMethods = ['CARD', 'ACCOUNT_TRANSFER'];
+        let paymentMethods;
         if (channel === 'card') paymentMethods = ['CARD'];
         if (channel === 'bank_transfer') paymentMethods = ['ACCOUNT_TRANSFER'];
         if (channel === 'virtual_account') paymentMethods = ['ACCOUNT_TRANSFER'];
@@ -76,7 +86,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
             currencyCode: 'NGN',
             contractCode: this.contractCode,
             redirectUrl: callbackUrl || `${process.env.CLIENT_BASE_URL || 'http://localhost:5173'}/monnify/return`,
-            paymentMethods,
+            ...(paymentMethods?.length ? { paymentMethods } : {}),
             metadata: {
                 userId: user._id || user.id,
                 ...metadata,
@@ -258,9 +268,20 @@ class MonnifyAdapter extends BasePaymentAdapter {
         const userId = virtualAccountReference
             ? virtualAccountReference.replace('VIRTUAL_', '')
             : data.metaData?.userId;
+        const destination = data.destinationAccountInformation || data.destinationAccount || {};
+        const destinationAccountNumber = String(
+            destination.accountNumber
+            || data.destinationAccountNumber
+            || data.accountNumber
+            || ''
+        ).trim();
+        const fallbackEventId = crypto.createHash('sha256')
+            .update(JSON.stringify(payload || {}))
+            .digest('hex')
+            .slice(0, 32);
 
         return {
-            eventId: String(data.transactionReference || `MNFY_${Date.now()}`),
+            eventId: String(data.transactionReference || `MNFY_${fallbackEventId}`),
             eventType: payload.eventType || 'unknown',
             status: isSuccess ? 'success' : 'pending',
             reference: data.paymentReference || accountRef,
@@ -269,6 +290,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
             currency: (data.currencyCode || 'NGN').toUpperCase(),
             userId,
             virtualAccountReference,
+            destinationAccountNumber,
             metadata: data.metaData || {},
             raw: data
         };

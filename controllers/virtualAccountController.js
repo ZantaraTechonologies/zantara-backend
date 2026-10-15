@@ -9,11 +9,20 @@ const provisionVirtualAccount = async (req, res) => {
             userId: req.user.id,
             providerCode: req.params.provider,
             preferredBank: req.body?.preferredBank,
-            consent: req.body?.consent === true
+            consent: req.body?.consent === true,
+            consentVersion: req.body?.consentVersion,
+            consentChannel: 'provider_specific_api',
+            retryRejected: req.body?.retryRejected === true
         });
-        return res.status(result.status === 'pending' ? 202 : 200).json({
-            success: true,
+        const failed = result.status === 'failed';
+        return res.status(failed ? 422 : result.status === 'pending' ? 202 : 200).json({
+            success: !failed,
             status: result.status,
+            ...(result.state ? { state: result.state } : {}),
+            ...(failed ? {
+                code: result.code || 'VIRTUAL_ACCOUNT_PROVISIONING_FAILED',
+                message: result.message || 'Virtual-account provisioning failed'
+            } : {}),
             existing: result.existing,
             accounts: serializeVirtualAccounts(result.accounts)
         });
@@ -22,9 +31,63 @@ const provisionVirtualAccount = async (req, res) => {
         return res.status(status).json({
             success: false,
             code: error.code || 'VIRTUAL_ACCOUNT_PROVISIONING_FAILED',
-            message: error.message
+            message: error.message,
+            ...(['PAYSTACK_DVA_CONSENT_REQUIRED', 'MONNIFY_VIRTUAL_ACCOUNT_CONSENT_REQUIRED', 'VIRTUAL_ACCOUNT_CONSENT_VERSION_INVALID'].includes(error.code)
+                ? { data: { consent: virtualAccountService._consentRequirement(String(req.params.provider || '').toLowerCase()) } }
+                : {})
         });
     }
 };
 
-module.exports = { provisionVirtualAccount };
+const getVirtualAccounts = async (req, res) => {
+    try {
+        const result = await virtualAccountService.getAccountStatus({ userId: req.user.id });
+        return res.json({
+            success: true,
+            accounts: serializeVirtualAccounts(result.accounts),
+            providers: result.providers,
+            legacyReviewRequired: result.legacyReviewRequired
+        });
+    } catch (error) {
+        return res.status(error.httpStatus || 500).json({
+            success: false,
+            code: error.code || 'VIRTUAL_ACCOUNT_STATUS_UNAVAILABLE',
+            message: error.httpStatus ? error.message : 'Virtual-account status is temporarily unavailable'
+        });
+    }
+};
+
+const requestBankAccounts = async (req, res) => {
+    try {
+        const consents = req.body?.consents;
+        if (consents !== undefined && (!consents || typeof consents !== 'object' || Array.isArray(consents))) {
+            return res.status(400).json({
+                success: false,
+                code: 'VIRTUAL_ACCOUNT_CONSENT_INVALID',
+                message: 'Provider-specific consent details must be supplied as an object'
+            });
+        }
+        const retryRejectedProviders = Array.isArray(req.body?.retryRejectedProviders)
+            ? req.body.retryRejectedProviders.filter(provider => ['paystack', 'monnify'].includes(provider))
+            : [];
+        const result = await virtualAccountService.requestBankAccounts({
+            userId: req.user.id,
+            consents: consents || {},
+            retryRejectedProviders
+        });
+        return res.status(result.status === 'pending' ? 202 : 200).json({
+            success: !['failed'].includes(result.status),
+            status: result.status,
+            accounts: serializeVirtualAccounts(result.accounts),
+            providers: result.providers
+        });
+    } catch (error) {
+        return res.status(error.httpStatus || 500).json({
+            success: false,
+            code: error.code || 'VIRTUAL_ACCOUNT_REQUEST_FAILED',
+            message: error.httpStatus ? error.message : 'Bank-account request is temporarily unavailable'
+        });
+    }
+};
+
+module.exports = { provisionVirtualAccount, getVirtualAccounts, requestBankAccounts };

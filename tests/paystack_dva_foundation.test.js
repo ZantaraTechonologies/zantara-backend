@@ -4,8 +4,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const axios = require('axios');
 const PaystackAdapter = require('../adapters/payment/paystack.adapter');
-const { VirtualAccountService, MongoVirtualAccountRepository } = require('../services/virtualAccount.service');
+const {
+    VirtualAccountService,
+    MongoVirtualAccountRepository,
+    VIRTUAL_ACCOUNT_CONSENT_VERSION
+} = require('../services/virtualAccount.service');
 const User = require('../models/User');
+const { normalizePaystackDvaError } = require('../utils/paystackDvaError');
 
 const clone = value => JSON.parse(JSON.stringify(value));
 
@@ -24,24 +29,37 @@ class FakeVirtualAccountRepository {
     async listScope(userId, provider, gatewayId) {
         if (String(this.user._id) !== String(userId)) return [];
         return this.user.virtualAccounts
-            .filter(account => (
-                account.provider === provider && String(account.gatewayId) === String(gatewayId)
-            ) || (
-                provider === 'monnify' && !account.provider && !!account.accountNumber
-            ))
+            .filter(account => account.provider === provider && String(account.gatewayId) === String(gatewayId))
             .map(clone);
     }
 
-    async savePaystackPreference({ userId, preferredBank, consentGrantedAt, provisioningKey }) {
+    async listLegacyUnverified(userId) {
+        if (String(this.user._id) !== String(userId)) return [];
+        return this.user.virtualAccounts.filter(account => !account.provider && !!account.accountNumber).map(clone);
+    }
+
+    async saveProviderPreference({
+        userId,
+        provider,
+        preferredBank,
+        consentGrantedAt,
+        consentVersion,
+        consentChannel,
+        provisioningKey
+    }) {
         if (String(this.user._id) !== String(userId)) return false;
         if (provisioningKey && this.user.virtualAccounts.some(account => account.provisioningKey === provisioningKey)) {
             return false;
         }
         this.user.virtualAccountPreferences = {
             ...(this.user.virtualAccountPreferences || {}),
-            paystack: { preferredBank, consentGrantedAt }
+            [provider]: { preferredBank, consentGrantedAt, consentVersion, consentChannel }
         };
         return true;
+    }
+
+    async savePaystackPreference(details) {
+        return this.saveProviderPreference({ ...details, provider: 'paystack' });
     }
 
     async claimProvisioning({
@@ -51,13 +69,21 @@ class FakeVirtualAccountRepository {
         provisioningKey,
         preferredBank,
         consentGrantedAt,
+        consentVersion,
+        consentChannel,
         gatewayContext,
+        retryRejected,
         recoverIncompleteExpectedCount
     }) {
         if (String(this.user._id) !== String(userId)) return { claimed: false, token: null };
         let account = this.user.virtualAccounts.find(item => item.provisioningKey === provisioningKey);
         if (account && account.provisioningStatus === 'pending'
             && (!account.provisioningExpiresAt || new Date(account.provisioningExpiresAt) > new Date())) {
+            return { claimed: false, token: null };
+        }
+        if (account?.provisioningStatus === 'failed'
+            && account.provisioningFailureDisposition === 'definitive_rejection'
+            && !retryRejected) {
             return { claimed: false, token: null };
         }
         if (account && account.provisioningStatus === 'active' && !recoverIncompleteExpectedCount) {
@@ -70,7 +96,7 @@ class FakeVirtualAccountRepository {
                 gatewayId: String(gatewayId),
                 provisioningKey,
                 preferredBank: preferredBank || '',
-                ...(consentGrantedAt ? { consentGrantedAt } : {}),
+                ...(consentGrantedAt ? { consentGrantedAt, consentVersion, consentChannel } : {}),
                 ...(provider === 'paystack' ? {
                     provisioningGatewayContext: gatewayContext,
                     provisioningDispatchState: 'not_started',
@@ -85,6 +111,8 @@ class FakeVirtualAccountRepository {
             provisioningStatus: 'pending',
             provisioningToken: token,
             provisioningFailure: null,
+            provisioningFailureCode: null,
+            provisioningFailureDisposition: null,
             preferredBank: preferredBank || '',
             active: false,
             assigned: false,
@@ -92,10 +120,10 @@ class FakeVirtualAccountRepository {
             provisioningExpiresAt: new Date(Date.now() + 15 * 60_000),
             ...(provider === 'paystack' ? { provisioningGatewayContext: gatewayContext } : {})
         });
-        if (provider === 'paystack') {
+        if (consentGrantedAt) {
             this.user.virtualAccountPreferences = {
                 ...(this.user.virtualAccountPreferences || {}),
-                paystack: { preferredBank, consentGrantedAt }
+                [provider]: { preferredBank, consentGrantedAt, consentVersion, consentChannel }
             };
         }
         return { claimed: true, token };
@@ -114,7 +142,7 @@ class FakeVirtualAccountRepository {
         return true;
     }
 
-    async setPaystackDispatchState({ provisioningKey, token, state, message, incrementAttempt }) {
+    async setPaystackDispatchState({ provisioningKey, token, state, message, code, disposition, incrementAttempt }) {
         const account = this.user.virtualAccounts.find(item =>
             item.provisioningKey === provisioningKey
             && item.provisioningToken === token
@@ -123,6 +151,8 @@ class FakeVirtualAccountRepository {
         if (!account) return false;
         account.provisioningDispatchState = state;
         account.provisioningFailure = message || null;
+        if (code !== undefined) account.provisioningFailureCode = code || null;
+        if (disposition !== undefined) account.provisioningFailureDisposition = disposition || null;
         if (incrementAttempt) account.provisioningAttemptCount = Number(account.provisioningAttemptCount || 0) + 1;
         if (state === 'dispatching') account.provisioningLastDispatchAt = new Date();
         return true;
@@ -168,13 +198,15 @@ class FakeVirtualAccountRepository {
         return this.listScope(this.user._id, provider, gatewayId);
     }
 
-    async failProvisioning({ provisioningKey, token, message }) {
+    async failProvisioning({ provisioningKey, token, message, code, disposition }) {
         const account = this.user.virtualAccounts.find(item =>
             item.provisioningKey === provisioningKey && item.provisioningToken === token
         );
         if (!account) return false;
         account.provisioningStatus = 'failed';
         account.provisioningFailure = message;
+        account.provisioningFailureCode = code || null;
+        account.provisioningFailureDisposition = disposition || null;
         account.active = false;
         account.assigned = false;
         delete account.provisioningToken;
@@ -402,6 +434,8 @@ test('User virtual-account schema exposes the minimum Paystack identity and prov
         'provisioningLastDispatchAt',
         'provisioningExpiresAt',
         'provisioningExpectedAccountCount',
+        'provisioningFailureCode',
+        'provisioningFailureDisposition',
         'consentGrantedAt'
     ]) {
         assert.ok(virtualAccountSchema.path(field), `virtualAccounts.${field} must exist`);
@@ -412,7 +446,7 @@ test('User virtual-account schema exposes the minimum Paystack identity and prov
     );
     assert.deepEqual(
         virtualAccountSchema.path('provisioningDispatchState').enumValues,
-        ['not_started', 'customer_creating', 'customer_ready', 'dispatching', 'awaiting_assignment', 'reconciling', 'retryable', 'complete']
+        ['not_started', 'customer_creating', 'customer_ready', 'dispatching', 'awaiting_assignment', 'reconciling', 'retryable', 'rejected', 'complete']
     );
 });
 
@@ -574,7 +608,7 @@ test('adding Monnify preserves an existing Paystack DVA', async () => {
     };
     const service = new VirtualAccountService({ repository, gatewayService: makeGatewayService({ monnifyAdapter }) });
 
-    await service.provision({ userId: 'user-1', providerCode: 'monnify' });
+    await service.provision({ userId: 'user-1', providerCode: 'monnify', consent: true });
 
     assert.deepEqual(repository.user.virtualAccounts.find(account => account.provider === 'paystack'), paystackAccount);
     assert.equal(repository.user.virtualAccounts.filter(account => account.provider === 'monnify').length, 1);
@@ -597,28 +631,32 @@ test('Monnify multi-bank completion remains all-or-nothing and recovers after pe
     const monnifyAdapter = {
         async createReservedAccount() {
             createCalls++;
-            if (createCalls === 1) return providerResult;
-            throw new Error('Account reference already exists for same reference');
+            return providerResult;
         },
         async getReservedAccount(reference) {
             recoveryReads++;
             assert.equal(reference, 'VIRTUAL_user-1');
+            if (recoveryReads === 1) {
+                const error = new Error('Reserved account not found');
+                error.response = { status: 404 };
+                throw error;
+            }
             return providerResult;
         }
     };
     const service = new VirtualAccountService({ repository, gatewayService: makeGatewayService({ monnifyAdapter }) });
 
     await assert.rejects(
-        service.provision({ userId: 'user-1', providerCode: 'monnify' }),
+        service.provision({ userId: 'user-1', providerCode: 'monnify', consent: true }),
         /simulated atomic completion failure/
     );
     assert.equal(repository.user.virtualAccounts.filter(account => account.provider === 'monnify' && account.provisioningStatus === 'active').length, 0);
     assert.deepEqual(repository.user.virtualAccounts.find(account => account.provider === 'paystack'), paystackAccount);
 
-    const recovered = await service.provision({ userId: 'user-1', providerCode: 'monnify' });
+    const recovered = await service.provision({ userId: 'user-1', providerCode: 'monnify', consent: true });
     assert.equal(recovered.status, 'active');
-    assert.equal(createCalls, 2);
-    assert.equal(recoveryReads, 1);
+    assert.equal(createCalls, 1);
+    assert.equal(recoveryReads, 2);
     assert.deepEqual(
         repository.user.virtualAccounts
             .filter(account => account.provider === 'monnify')
@@ -687,11 +725,48 @@ test('Monnify detects and atomically repairs an incomplete persisted multi-bank 
     };
     const service = new VirtualAccountService({ repository, gatewayService: makeGatewayService({ monnifyAdapter }) });
 
-    const recovered = await service.provision({ userId: 'user-1', providerCode: 'monnify' });
+    const recovered = await service.provision({ userId: 'user-1', providerCode: 'monnify', consent: true });
 
     assert.equal(recovered.status, 'active');
     assert.equal(repository.user.virtualAccounts.filter(account => account.provider === 'monnify').length, 2);
     assert.deepEqual(repository.user.virtualAccounts.find(account => account.provider === 'paystack'), paystackAccount);
+});
+
+test('malformed Monnify creation evidence is reconciled without repeating the mutation', async () => {
+    const repository = new FakeVirtualAccountRepository(userFixture());
+    let createCalls = 0;
+    const monnifyAdapter = {
+        async getReservedAccount() {
+            const error = new Error('Reserved account not found');
+            error.response = { status: 404 };
+            throw error;
+        },
+        async createReservedAccount() {
+            createCalls++;
+            return {
+                status: true,
+                accountReference: 'VIRTUAL_user-1',
+                accounts: [{ bankName: 'Moniepoint', bankCode: '50515', accountNumber: '' }]
+            };
+        }
+    };
+    const service = new VirtualAccountService({
+        repository,
+        gatewayService: makeGatewayService({ monnifyAdapter })
+    });
+
+    const result = await service.provision({
+        userId: 'user-1',
+        providerCode: 'monnify',
+        consent: true
+    });
+
+    assert.equal(result.status, 'pending');
+    assert.equal(result.state, 'reconciliation_required');
+    assert.equal(createCalls, 1);
+    assert.equal(repository.user.virtualAccounts[0].provisioningStatus, 'pending');
+    assert.equal(repository.user.virtualAccounts[0].provisioningDispatchState, 'reconciling');
+    assert.equal(repository.user.virtualAccounts[0].provisioningFailureDisposition, 'ambiguous_mutation');
 });
 
 test('repeated Paystack provisioning returns the provider-scoped account without another provider call', async () => {
@@ -769,6 +844,63 @@ test('definitive Paystack assignment rejection is safely retryable without dupli
     assert.equal(repository.user.virtualAccounts.filter(account => account.provider === 'paystack').length, 1);
 });
 
+test('classified definitive Paystack rejection is persisted and not automatically retried', async () => {
+    const repository = new FakeVirtualAccountRepository(userFixture());
+    let dvaCalls = 0;
+    const adapter = {
+        async fetchCustomer() { return paystackCustomer(); },
+        async createCustomer() { throw new Error('must reuse customer'); },
+        async createDedicatedVirtualAccount() {
+            dvaCalls++;
+            if (dvaCalls === 1) {
+                throw normalizePaystackDvaError({
+                    response: {
+                        status: 403,
+                        data: { message: 'Dedicated accounts are not enabled for this business' }
+                    }
+                }, { operation: 'create_dedicated_account', mutation: true });
+            }
+            return paystackDvaResult();
+        }
+    };
+    const service = new VirtualAccountService({
+        repository,
+        gatewayService: makeGatewayService({ paystackAdapter: adapter })
+    });
+
+    await assert.rejects(
+        service.provision({ userId: 'user-1', providerCode: 'paystack', preferredBank: 'wema-bank', consent: true }),
+        error => error.code === 'PAYSTACK_DVA_MERCHANT_RESTRICTED'
+            && error.paystackDvaDisposition === 'definitive_rejection'
+    );
+    const failed = repository.user.virtualAccounts[0];
+    assert.equal(failed.provisioningStatus, 'failed');
+    assert.equal(failed.provisioningDispatchState, 'rejected');
+    assert.equal(failed.provisioningFailureCode, 'PAYSTACK_DVA_MERCHANT_RESTRICTED');
+    assert.equal(failed.provisioningFailureDisposition, 'definitive_rejection');
+
+    const repeated = await service.provision({
+        userId: 'user-1',
+        providerCode: 'paystack',
+        preferredBank: 'wema-bank',
+        consent: true
+    });
+    assert.equal(repeated.status, 'failed');
+    assert.equal(repeated.code, 'PAYSTACK_DVA_MERCHANT_RESTRICTED');
+    assert.equal(repeated.existing, true);
+    assert.equal(dvaCalls, 1);
+
+    const explicitlyRetried = await service.provision({
+        userId: 'user-1',
+        providerCode: 'paystack',
+        preferredBank: 'wema-bank',
+        consent: true,
+        retryRejected: true
+    });
+    assert.equal(explicitlyRetried.status, 'active');
+    assert.equal(dvaCalls, 2);
+});
+
 test('explicit pre-dispatch customer rejection can be safely retried', async () => {
     const repository = new FakeVirtualAccountRepository(userFixture());
     let customerCreates = 0;
@@ -793,7 +925,7 @@ test('explicit pre-dispatch customer rejection can be safely retried', async () 
         /customer request rejected/
     );
     assert.equal(repository.user.virtualAccounts[0].provisioningStatus, 'failed');
-    assert.equal(repository.user.virtualAccounts[0].provisioningDispatchState, 'not_started');
+    assert.equal(repository.user.virtualAccounts[0].provisioningDispatchState, 'retryable');
 
     const recovered = await service.provision({ userId: 'user-1', providerCode: 'paystack', preferredBank: 'wema-bank', consent: true });
     assert.equal(recovered.status, 'active');
@@ -1262,7 +1394,8 @@ test('automatic lifecycle provisions Paystack and Monnify independently when bot
     const result = await service.provisionEligible({
         userId: 'user-1',
         paystackConsent: true,
-        paystackPreferredBank: 'wema-bank'
+        paystackPreferredBank: 'wema-bank',
+        monnifyConsent: true
     });
 
     assert.equal(result.paystack.status, 'active');
@@ -1285,7 +1418,8 @@ test('automatic lifecycle skips only the provider whose requirements are incompl
         const result = await service.provisionEligible({
             userId: 'user-1',
             paystackConsent: true,
-            paystackPreferredBank: 'wema-bank'
+            paystackPreferredBank: 'wema-bank',
+            monnifyConsent: true
         });
         assert.equal(result.paystack.status, 'skipped');
         assert.equal(result.paystack.code, 'PAYSTACK_CUSTOMER_NAME_INCOMPLETE');
@@ -1308,7 +1442,8 @@ test('automatic lifecycle skips only the provider whose requirements are incompl
         const result = await service.provisionEligible({
             userId: 'user-1',
             paystackConsent: true,
-            paystackPreferredBank: 'wema-bank'
+            paystackPreferredBank: 'wema-bank',
+            monnifyConsent: true
         });
         assert.equal(result.paystack.status, 'active');
         assert.equal(result.monnify.status, 'skipped');
@@ -1331,7 +1466,7 @@ test('automatic lifecycle skips only the provider whose requirements are incompl
     });
 });
 
-test('automatic lifecycle contains independent Paystack and Monnify provider failures', async () => {
+test('automatic lifecycle contains Paystack failure and Monnify ambiguous mutation independently', async () => {
     const paystackAdapter = lifecyclePaystackAdapter({
         async createDedicatedVirtualAccount() {
             const error = new Error('Paystack unavailable');
@@ -1351,12 +1486,14 @@ test('automatic lifecycle contains independent Paystack and Monnify provider fai
     const result = await service.provisionEligible({
         userId: 'user-1',
         paystackConsent: true,
-        paystackPreferredBank: 'wema-bank'
+        paystackPreferredBank: 'wema-bank',
+        monnifyConsent: true
     });
 
     assert.equal(result.paystack.status, 'failed');
-    assert.equal(result.monnify.status, 'failed');
-    assert.equal(repository.user.virtualAccounts.filter(account => account.provisioningStatus === 'failed').length, 2);
+    assert.equal(result.monnify.status, 'pending');
+    assert.equal(result.monnify.state, 'reconciliation_required');
+    assert.equal(repository.user.virtualAccounts.filter(account => account.provisioningStatus === 'failed').length, 1);
 });
 
 test('persisted Paystack consent allows a later lifecycle refresh after profile eligibility changes', async () => {
@@ -1383,6 +1520,27 @@ test('persisted Paystack consent allows a later lifecycle refresh after profile 
     assert.equal(repository.user.virtualAccounts.filter(account => account.provider === 'paystack').length, 1);
 });
 
+test('persisted Monnify consent allows a later lifecycle refresh after profile eligibility changes', async () => {
+    const repository = new FakeVirtualAccountRepository(userFixture({ email: '', phone: '' }));
+    const service = new VirtualAccountService({
+        repository,
+        gatewayService: makeGatewayService({ monnifyAdapter: lifecycleMonnifyAdapter() })
+    });
+
+    const first = await service.provisionEligible({
+        userId: 'user-1',
+        monnifyConsent: true
+    });
+    assert.equal(first.monnify.status, 'skipped');
+    assert.equal(first.monnify.code, 'MONNIFY_CUSTOMER_DATA_INVALID');
+    assert.equal(repository.user.virtualAccountPreferences.monnify.consentVersion, VIRTUAL_ACCOUNT_CONSENT_VERSION);
+
+    repository.user.email = 'ada@example.com';
+    const second = await service.provisionEligible({ userId: 'user-1' });
+    assert.equal(second.monnify.status, 'active');
+    assert.equal(repository.user.virtualAccounts.filter(account => account.provider === 'monnify').length, 1);
+});
+
 test('automatic and explicit Paystack requests share one atomic provisioning claim', async () => {
     let dvaCalls = 0;
     let release;
@@ -1396,7 +1554,12 @@ test('automatic and explicit Paystack requests share one atomic provisioning cla
     });
     const repository = new FakeVirtualAccountRepository(userFixture({
         virtualAccountPreferences: {
-            paystack: { preferredBank: 'wema-bank', consentGrantedAt: new Date() }
+            paystack: {
+                preferredBank: 'wema-bank',
+                consentGrantedAt: new Date(),
+                consentVersion: VIRTUAL_ACCOUNT_CONSENT_VERSION,
+                consentChannel: 'provider_specific_api'
+            }
         }
     }));
     const service = new VirtualAccountService({
@@ -1437,7 +1600,17 @@ test('automatic lifecycle preserves existing provider accounts and fills only mi
             const repository = new FakeVirtualAccountRepository(userFixture({
                 virtualAccounts: accounts,
                 virtualAccountPreferences: {
-                    paystack: { preferredBank: 'wema-bank', consentGrantedAt: new Date() }
+                    paystack: {
+                        preferredBank: 'wema-bank',
+                        consentGrantedAt: new Date(),
+                        consentVersion: VIRTUAL_ACCOUNT_CONSENT_VERSION,
+                        consentChannel: 'provider_specific_api'
+                    },
+                    monnify: {
+                        consentGrantedAt: new Date(),
+                        consentVersion: VIRTUAL_ACCOUNT_CONSENT_VERSION,
+                        consentChannel: 'provider_specific_api'
+                    }
                 }
             }));
             const service = new VirtualAccountService({
@@ -1470,7 +1643,7 @@ test('automatic lifecycle preserves existing provider accounts and fills only mi
     }
 });
 
-test('legacy provider-less Monnify account is returned unchanged without duplication', async () => {
+test('legacy provider-less account is quarantined unchanged without duplication', async () => {
     const legacy = {
         bankName: 'Legacy Bank',
         accountName: 'Ada Lovelace',
@@ -1491,8 +1664,8 @@ test('legacy provider-less Monnify account is returned unchanged without duplica
     });
 
     const result = await service.provisionEligible({ userId: 'user-1' });
-    assert.equal(result.monnify.status, 'active');
-    assert.equal(result.monnify.existing, true);
+    assert.equal(result.monnify.status, 'skipped');
+    assert.equal(result.monnify.code, 'LEGACY_VIRTUAL_ACCOUNT_REVIEW_REQUIRED');
     assert.equal(monnifyCalls, 0);
     assert.deepEqual(repository.user.virtualAccounts, [legacy]);
 });

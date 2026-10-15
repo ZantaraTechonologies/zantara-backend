@@ -30,15 +30,27 @@ const generateVirtualAccounts = async (req, res) => {
     try {
         const result = await virtualAccountService.provision({
             userId: req.user.id,
-            providerCode: 'monnify'
+            providerCode: 'monnify',
+            consent: req.body?.consent === true,
+            consentVersion: req.body?.consentVersion,
+            consentChannel: 'provider_specific_api',
+            retryRejected: req.body?.retryRejected === true
         });
-        return res.status(result.status === 'pending' ? 202 : 200).json({
-            message: result.existing ? 'Virtual accounts already exist' : 'Virtual accounts generated successfully',
+        const failed = result.status === 'failed';
+        return res.status(failed ? 422 : result.status === 'pending' ? 202 : 200).json({
+            success: !failed,
+            message: failed
+                ? result.message || 'Virtual-account provisioning failed'
+                : result.existing ? 'Virtual accounts already exist' : 'Virtual accounts generated successfully',
             status: result.status,
+            ...(result.state ? { state: result.state } : {}),
+            ...(result.code ? { code: result.code } : {}),
             accounts: serializeVirtualAccounts(result.accounts)
         });
     } catch (err) {
-        console.error('Generate Virtual Accounts Error:', err);
+        console.error('[VirtualAccount] Monnify provisioning request failed', {
+            code: err.code || 'MONNIFY_VIRTUAL_ACCOUNT_PROVISIONING_FAILED'
+        });
         res.status(err.httpStatus || 500).json({ error: err.message, code: err.code });
     }
 };

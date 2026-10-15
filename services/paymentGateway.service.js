@@ -414,52 +414,6 @@ class PaymentGatewayService {
         throw err
       }
 
-      if (
-        channel &&
-        gateway.supportedChannels &&
-        gateway.supportedChannels.length > 0
-      ) {
-        if (!gateway.supportedChannels.includes(channel)) {
-          const err = new Error(
-            `Channel '${channel}' is not supported by ${gateway.name}`
-          )
-          err.code = 'PAYMENT_CHANNEL_UNSUPPORTED'
-          throw err
-        }
-      }
-      if (
-        Array.isArray(requestedChannels) &&
-        gateway.supportedChannels?.length > 0
-      ) {
-        const unsupported = requestedChannels.filter(
-          item => !gateway.supportedChannels.includes(item)
-        )
-        if (unsupported.length > 0) {
-          const err = new Error(
-            `Channel '${unsupported[0]}' is not supported by ${gateway.name}`
-          )
-          err.code = 'PAYMENT_CHANNEL_UNSUPPORTED'
-          throw err
-        }
-      }
-      const adapterChannels =
-        getAdapterSpec(gateway.adapterType || gateway.code)
-          ?.supportedChannels || []
-      const requested = channel
-        ? [channel]
-        : Array.isArray(requestedChannels)
-        ? requestedChannels
-        : []
-      const unsupportedByAdapter = requested.filter(
-        item => !adapterChannels.includes(item)
-      )
-      if (unsupportedByAdapter.length > 0) {
-        const err = new Error(
-          `Channel '${unsupportedByAdapter[0]}' is not supported by ${gateway.name}`
-        )
-        err.code = 'PAYMENT_CHANNEL_UNSUPPORTED'
-        throw err
-      }
     } else if (channel) {
       // 2. Channel-based Gateway Selection — the highest-priority active gateway
       //    supporting the requested channel (priority asc, createdAt asc).
@@ -486,6 +440,30 @@ class PaymentGatewayService {
       }
     }
 
+    const requested = channel
+      ? [channel]
+      : Array.isArray(requestedChannels)
+      ? [...new Set(requestedChannels)]
+      : []
+    if (requested.length > 0) {
+      const configuredChannels = gateway.supportedChannels || []
+      const adapterChannels =
+        getAdapterSpec(gateway.adapterType || gateway.code)
+          ?.supportedChannels || []
+      const unsupported = requested.find(
+        item =>
+          (configuredChannels.length > 0 && !configuredChannels.includes(item)) ||
+          !adapterChannels.includes(item)
+      )
+      if (unsupported) {
+        const err = new Error(
+          `Channel '${unsupported}' is not supported by ${gateway.name}`
+        )
+        err.code = 'PAYMENT_CHANNEL_UNSUPPORTED'
+        throw err
+      }
+    }
+
     console.log(
       `[PaymentGateway] Initializing funding via ${gateway.code} for user ${
         user._id || user.id
@@ -493,13 +471,15 @@ class PaymentGatewayService {
     )
 
     const amountKobo = parsedAmount.kobo
-    const channels = channel
+    const restrictedChannels = channel
       ? [channel]
       : Array.isArray(requestedChannels) && requestedChannels.length > 0
       ? [...new Set(requestedChannels)]
-      : gateway.supportedChannels && gateway.supportedChannels.length
+      : null
+    const channels = restrictedChannels
+      || (gateway.supportedChannels && gateway.supportedChannels.length
       ? gateway.supportedChannels
-      : ['card', 'bank_transfer', 'ussd']
+      : ['card', 'bank_transfer', 'ussd'])
 
     // Authoritative share price snapshot for investment-buy payments: read the
     // CURRENT server-side price at INIT time. Fulfillment must bind to this
@@ -610,7 +590,7 @@ class PaymentGatewayService {
     const effectiveCallbackUrl =
       callbackUrl ||
       `${process.env.CLIENT_BASE_URL || 'http://localhost:5173'}/${
-        gateway.code
+        gateway.adapterType || gateway.code
       }/return`
     let initResult
     try {
@@ -619,7 +599,10 @@ class PaymentGatewayService {
         user,
         amount: rawAmount,
         channel,
-        channels,
+        // Omit channel restrictions for normal wallet funding so the hosted
+        // checkout can expose methods enabled for this merchant. Explicitly
+        // restricted legacy flows continue to pass their requested channels.
+        channels: restrictedChannels || undefined,
         reference,
         callbackUrl,
         metadata: {
@@ -659,6 +642,7 @@ class PaymentGatewayService {
         ambiguous.status = 'pending'
         ambiguous.reference = reference
         ambiguous.provider = gateway.code
+        ambiguous.checkoutProvider = gateway.adapterType || gateway.code
         ambiguous.cause = error
         throw ambiguous
       }
@@ -670,6 +654,7 @@ class PaymentGatewayService {
       authorizationUrl: initResult.authorizationUrl,
       reference,
       provider: gateway.code,
+      checkoutProvider: gateway.adapterType || gateway.code,
       gateway: gateway.code,
       callbackUrl: effectiveCallbackUrl,
       raw: initResult.raw,
@@ -1432,7 +1417,9 @@ class PaymentGatewayService {
         userId: transactionStatus.userId,
         amount: amountNaira,
         method:
-          (transactionStatus.channels && transactionStatus.channels[0]) ||
+          (transactionStatus.channels?.length === 1
+            ? transactionStatus.channels[0]
+            : transactionStatus.service || transactionStatus.provider) ||
           'funding',
         reference: refId,
         type: transactionStatus.type
@@ -1822,6 +1809,32 @@ class PaymentGatewayService {
     }
   }
 
+  _assertMonnifyVirtualAccountTransactionIdentity (
+    transaction,
+    { owner, gateway, reference, amountKobo, currency, providerTransactionId }
+  ) {
+    const channels = Array.isArray(transaction?.channels)
+      ? transaction.channels
+      : []
+    if (
+      !transaction ||
+      String(transaction.userId || '') !== String(owner.userId) ||
+      transaction.type !== 'funding' ||
+      String(transaction.provider || '').toLowerCase() !== 'monnify' ||
+      String(transaction.gatewayId || '') !== String(gateway._id) ||
+      String(transaction.refId || '') !== reference ||
+      transaction.amountKobo !== amountKobo ||
+      String(transaction.expectedCurrency || '').toUpperCase() !== currency ||
+      !channels.includes('virtual_account') ||
+      (transaction.providerRef && String(transaction.providerRef) !== providerTransactionId)
+    ) {
+      const error = new Error('Existing transaction does not match the verified Monnify reserved-account deposit')
+      error.code = 'MONNIFY_VIRTUAL_ACCOUNT_TRANSACTION_MISMATCH'
+      error.webhookTerminal = true
+      throw error
+    }
+  }
+
   async _processPaystackDvaDeposit ({
     gateway,
     adapter,
@@ -2075,10 +2088,7 @@ class PaymentGatewayService {
       }
       const reference = this._extractWebhookReference(providerCode, payload)
       if (reference) {
-        const transactionQuery = TransactionStatus.findOne({
-          refId: reference,
-          provider: providerCode
-        })
+        const transactionQuery = TransactionStatus.findOne({ refId: reference })
         const transaction =
           typeof transactionQuery?.select === 'function'
             ? await transactionQuery.select('+gatewayConfigSnapshot')
@@ -2087,12 +2097,17 @@ class PaymentGatewayService {
           const snapshotGateway = this._hydrateGatewayCredentials(
             transaction.gatewayConfigSnapshot
           )
-          const snapshotAdapter = this.getAdapterInstance(snapshotGateway)
-          if (snapshotAdapter.verifyWebhookSignature(req.headers, req.body)) {
-            snapshotGateway._id = snapshotGateway._id || transaction.gatewayId
-            gateway = snapshotGateway
-            adapter = snapshotAdapter
-            isValid = true
+          const snapshotAdapterType = String(
+            snapshotGateway.adapterType || snapshotGateway.code || ''
+          ).toLowerCase()
+          if (snapshotAdapterType === String(providerCode).toLowerCase()) {
+            const snapshotAdapter = this.getAdapterInstance(snapshotGateway)
+            if (snapshotAdapter.verifyWebhookSignature(req.headers, req.body)) {
+              snapshotGateway._id = snapshotGateway._id || transaction.gatewayId
+              gateway = snapshotGateway
+              adapter = snapshotAdapter
+              isValid = true
+            }
           }
         }
       }
@@ -2102,19 +2117,28 @@ class PaymentGatewayService {
           payload
         )
         if (virtualAccountReference) {
-          const userQuery = User.findOne({
-            'virtualAccounts.accountReference': virtualAccountReference
+          let userQuery = User.find({
+            virtualAccounts: {
+              $elemMatch: {
+                provider: 'monnify',
+                accountReference: virtualAccountReference,
+                provisioningStatus: 'active',
+                active: true,
+                assigned: true
+              }
+            }
           })
-          const user =
-            typeof userQuery?.select === 'function'
-              ? await userQuery.select('+virtualAccountGatewaySnapshots')
-              : await userQuery
+          if (typeof userQuery?.select === 'function') userQuery = userQuery.select('+virtualAccountGatewaySnapshots')
+          if (typeof userQuery?.limit === 'function') userQuery = userQuery.limit(2)
+          const users = await userQuery
+          const user = Array.isArray(users) && users.length === 1 ? users[0] : null
           const snapshot =
             user?.virtualAccountGatewaySnapshots instanceof Map
               ? user.virtualAccountGatewaySnapshots.get(virtualAccountReference)
               : user?.virtualAccountGatewaySnapshots?.[virtualAccountReference]
           if (snapshot) {
             const snapshotGateway = this._hydrateGatewayCredentials(snapshot)
+            snapshotGateway._id = snapshotGateway._id || snapshotGateway.gatewayId
             const snapshotAdapter = this.getAdapterInstance(snapshotGateway)
             if (snapshotAdapter.verifyWebhookSignature(req.headers, req.body)) {
               gateway = snapshotGateway
@@ -2215,32 +2239,106 @@ class PaymentGatewayService {
     // 5. Process Successful Payment Event
     if (normalized.status === 'success') {
       const refId = normalized.reference
+      let virtualAccountOwner = null
+      if (providerCode === 'monnify' && normalized.virtualAccountReference) {
+        const providerTransactionId = String(normalized.providerTransactionId || '')
+        const amountKobo = Math.round(Number(normalized.amount) * 100)
+        const currency = String(normalized.currency || '').toUpperCase()
+        if (
+          !refId ||
+          refId === normalized.virtualAccountReference ||
+          !providerTransactionId ||
+          !Number.isSafeInteger(amountKobo) ||
+          amountKobo <= 0 ||
+          currency !== 'NGN' ||
+          !/^\d{10}$/.test(String(normalized.destinationAccountNumber || ''))
+        ) {
+          await this._setWebhookEventState(
+            webhookEvent,
+            'failed',
+            'Monnify reserved-account deposit evidence is incomplete'
+          )
+          return { status: 200, message: 'Monnify reserved-account deposit webhook rejected' }
+        }
+        try {
+          const virtualAccountService = require('./virtualAccount.service')
+          virtualAccountOwner = await virtualAccountService.resolveMonnifyDepositOwner({
+            gateway,
+            accountReference: normalized.virtualAccountReference,
+            accountNumber: normalized.destinationAccountNumber
+          })
+          if (virtualAccountOwner.gatewaySnapshot) {
+            const snapshotAdapter = String(
+              virtualAccountOwner.gatewaySnapshot.adapterType || virtualAccountOwner.gatewaySnapshot.code || ''
+            ).toLowerCase()
+            const snapshotGatewayId = String(virtualAccountOwner.gatewaySnapshot.gatewayId || '')
+            if (
+              snapshotAdapter !== 'monnify' ||
+              (snapshotGatewayId && snapshotGatewayId !== String(gateway._id))
+            ) {
+              const error = new Error('Stored reserved-account gateway snapshot does not belong to Monnify')
+              error.code = 'MONNIFY_VIRTUAL_ACCOUNT_GATEWAY_MISMATCH'
+              error.webhookTerminal = true
+              throw error
+            }
+          }
+        } catch (error) {
+          await this._setWebhookEventState(
+            webhookEvent,
+            error.webhookTerminal === true ? 'failed' : 'retryable',
+            error.message
+          )
+          return {
+            status: error.webhookTerminal === true ? 200 : 503,
+            message: error.webhookTerminal === true
+              ? 'Monnify reserved-account deposit webhook rejected'
+              : 'Monnify reserved-account ownership is temporarily unavailable'
+          }
+        }
+      }
       const transactionQuery = TransactionStatus.findOne({ refId })
       let transaction =
         typeof transactionQuery?.select === 'function'
           ? await transactionQuery.select('+gatewayConfigSnapshot')
           : await transactionQuery
 
-      // Only a provider-assigned Monnify virtual-account reference may establish
-      // ownership when a transfer has no pre-existing local transaction record.
-      const virtualOwnerId =
-        providerCode === 'monnify' &&
-        normalized.virtualAccountReference === `VIRTUAL_${normalized.userId}`
-          ? normalized.userId
-          : null
-      if (!transaction && virtualOwnerId) {
-        transaction = await TransactionStatus.create({
-          refId,
-          userId: virtualOwnerId,
-          type: 'funding',
-          status: 'pending',
+      if (!transaction && virtualAccountOwner) {
+        try {
+          transaction = await TransactionStatus.create({
+            refId,
+            userId: virtualAccountOwner.userId,
+            type: 'funding',
+            status: 'pending',
+            amountKobo: Math.round(normalized.amount * 100),
+            amount: normalized.amount,
+            expectedCurrency: normalized.currency,
+            channels: ['virtual_account'],
+            provider: providerCode,
+            gatewayId: String(gateway._id),
+            service: gateway.name,
+            providerRef: String(normalized.providerTransactionId),
+            gatewayConfigSnapshot:
+              virtualAccountOwner.gatewaySnapshot || this._snapshotGatewayConfig(gateway)
+          })
+        } catch (error) {
+          if (error?.code !== 11000) throw error
+          const concurrentQuery = TransactionStatus.findOne({ refId })
+          transaction =
+            typeof concurrentQuery?.select === 'function'
+              ? await concurrentQuery.select('+gatewayConfigSnapshot')
+              : await concurrentQuery
+          if (!transaction) throw error
+        }
+      }
+
+      if (transaction && virtualAccountOwner) {
+        this._assertMonnifyVirtualAccountTransactionIdentity(transaction, {
+          owner: virtualAccountOwner,
+          gateway,
+          reference: refId,
           amountKobo: Math.round(normalized.amount * 100),
-          amount: normalized.amount,
-          expectedCurrency: normalized.currency,
-          channels: ['bank_transfer'],
-          provider: providerCode,
-          service: gateway.name,
-          gatewayConfigSnapshot: this._snapshotGatewayConfig(gateway)
+          currency: String(normalized.currency || '').toUpperCase(),
+          providerTransactionId: String(normalized.providerTransactionId || '')
         })
       }
 
@@ -2281,11 +2379,23 @@ class PaymentGatewayService {
             }
           }
           try {
+            const transactionProvider = String(transaction.provider || '').toLowerCase()
+            const snapshotCode = String(
+              transaction.gatewayConfigSnapshot?.code || ''
+            ).toLowerCase()
+            const snapshotAdapter = String(
+              transaction.gatewayConfigSnapshot?.adapterType || snapshotCode
+            ).toLowerCase()
+            const verifiedGatewayCode =
+              snapshotCode === transactionProvider &&
+              snapshotAdapter === String(providerCode).toLowerCase()
+                ? transactionProvider
+                : providerCode
             await this.finalizeFundingCredit({
               transactionStatus: transaction,
               gatewayPaymentResult: {
                 ...serverVerify,
-                gateway: providerCode
+                gateway: verifiedGatewayCode
               },
               source: 'webhook'
             })
