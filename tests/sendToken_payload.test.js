@@ -50,6 +50,12 @@ const SENSITIVE_FIELDS = [
     'otpExpires',
     'emailOtp',
     'emailOtpExpires',
+    'emailVerificationChallengeId',
+    'emailVerificationOtpDigest',
+    'emailVerificationEmail',
+    'emailVerificationExpiresAt',
+    'emailVerificationAttempts',
+    'emailVerificationRequestedAt',
     'authVersion',
     'passwordResetChallengeId',
     'passwordResetOtpDigest',
@@ -82,7 +88,9 @@ console.log('====================================================\n');
         role: 'user',
         roles: ['user'],
         isPhoneVerified: true,
+        isEmailVerified: true,
         isPinSet: false,
+        kycLevel: 1,
         myReferralCode: 'a1b2c3d4'
     }, res);
 
@@ -98,14 +106,16 @@ console.log('====================================================\n');
             phone: '08012345678',
             roles: ['user'],
             isPhoneVerified: true,
+            isEmailVerified: true,
             isPinSet: false,
+            kycLevel: 1,
             myReferralCode: 'a1b2c3d4'
         });
     });
     test('C. payload shape is exactly the public allowlist', () => {
         assert.deepStrictEqual(
             Object.keys(body.user).sort(),
-            ['email', 'id', 'isPhoneVerified', 'isPinSet', 'myReferralCode', 'name', 'phone', 'roles'].sort()
+            ['email', 'id', 'isEmailVerified', 'isPhoneVerified', 'isPinSet', 'kycLevel', 'myReferralCode', 'name', 'phone', 'roles'].sort()
         );
     });
     test('D. no sensitive fields exposed when referral code present', () => {
@@ -124,6 +134,7 @@ console.log('====================================================\n');
         role: 'user',
         roles: ['user'],
         isPhoneVerified: true,
+        isEmailVerified: true,
         isPinSet: true
     }, res);
 
@@ -146,7 +157,9 @@ console.log('====================================================\n');
         role: 'user',
         roles: ['user'],
         isPhoneVerified: true,
+        isEmailVerified: true,
         isPinSet: false,
+        kycLevel: 1,
         myReferralCode: 'z9y8x7w6',
         password: 'hashed-secret',
         passwordHistory: ['old-hash-1', 'old-hash-2'],
@@ -156,6 +169,12 @@ console.log('====================================================\n');
         otpExpires: new Date(),
         emailOtp: '654321',
         emailOtpExpires: new Date(),
+        emailVerificationChallengeId: 'email-challenge',
+        emailVerificationOtpDigest: 'email-digest',
+        emailVerificationEmail: 'eve@example.com',
+        emailVerificationExpiresAt: new Date(),
+        emailVerificationAttempts: 1,
+        emailVerificationRequestedAt: new Date(),
         authVersion: 7,
         passwordResetChallengeId: 'challenge-id',
         passwordResetOtpDigest: 'otp-digest',
@@ -171,7 +190,7 @@ console.log('====================================================\n');
         assertPayloadSafe(res.body.user);
         assert.deepStrictEqual(
             Object.keys(res.body.user).sort(),
-            ['email', 'id', 'isPhoneVerified', 'isPinSet', 'myReferralCode', 'name', 'phone', 'roles'].sort()
+            ['email', 'id', 'isEmailVerified', 'isPhoneVerified', 'isPinSet', 'kycLevel', 'myReferralCode', 'name', 'phone', 'roles'].sort()
         );
     });
 }

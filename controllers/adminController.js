@@ -105,20 +105,36 @@ const updateUserRole = async (req, res) => {
         const { id } = req.params;
         const { role, status } = req.body; // status for block/unblock
 
-        const update = {};
+        if (status !== undefined && typeof status !== 'boolean') {
+            return res.status(400).json({ message: 'Status must be a boolean' });
+        }
+
+        const update = { $set: {} };
         if (role) {
             const ALLOWED_ROLES = User.ALLOWED_ROLES;
             if (!ALLOWED_ROLES.includes(role)) {
                 return res.status(400).json({ message: 'Invalid role' });
             }
-            update.role = role;
+            update.$set.role = role;
+            update.$set.roles = [role];
         }
-        if (status !== undefined) update.status = status;
+        if (status !== undefined) update.$set.status = status;
 
         const oldUser = await User.findById(id);
         if (!oldUser) return res.status(404).json({ message: 'User not found' });
 
-        const user = await User.findByIdAndUpdate(id, update, { new: true });
+        const roleChanged = role !== undefined && (
+            oldUser.role !== role ||
+            !Array.isArray(oldUser.roles) ||
+            oldUser.roles.length !== 1 ||
+            oldUser.roles[0] !== role
+        );
+        const statusChanged = status !== undefined && oldUser.status !== status;
+        if (roleChanged || statusChanged) update.$inc = { authVersion: 1 };
+
+        const user = Object.keys(update.$set).length > 0
+            ? await User.findByIdAndUpdate(id, update, { new: true, runValidators: true })
+            : oldUser;
 
         // Logging & Notification
         const { logAction } = require('./auditController');

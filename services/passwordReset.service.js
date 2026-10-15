@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
+const { phoneIdentityCandidates } = require('../utils/customerProfile');
 const {
     TOKEN_PURPOSES,
     authVersionFilter,
@@ -51,7 +52,7 @@ const issueResetChallenge = async phone => {
 
     const user = await User.findOneAndUpdate(
         {
-            phone: String(phone).trim(),
+            phone: { $in: phoneIdentityCandidates(phone) },
             status: true,
             $or: [
                 { passwordResetRequestedAt: { $exists: false } },
@@ -80,7 +81,7 @@ const issueResetChallenge = async phone => {
 
 const verifyResetChallenge = async (phone, otp) => {
     const now = new Date();
-    const user = await User.findOne({ phone: String(phone).trim(), status: true })
+    const user = await User.findOne({ phone: { $in: phoneIdentityCandidates(phone) }, status: true })
         .select('+passwordResetChallengeId +passwordResetOtpDigest +passwordResetExpiresAt +passwordResetAttempts authVersion email role roles');
 
     if (!user || !user.passwordResetChallengeId || !user.passwordResetOtpDigest ||

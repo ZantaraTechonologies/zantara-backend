@@ -12,11 +12,12 @@ const { sendEmail } = require('../utils/mailer')
 const { sendSMS } = require('../utils/sms')
 const notificationService = require('../services/notification.service')
 const ActivityLog = require('../models/ActivityLog')
-const virtualAccountService = require('../services/virtualAccount.service')
 const LegalAcceptance = require('../models/LegalAcceptance')
 const legalService = require('../services/legalDocument.service')
 const { maskSecret } = require('../utils/logSanitizer')
 const { serializeUserProfile } = require('../utils/virtualAccountSerializer')
+const onboardingService = require('../services/onboarding.service')
+const { phoneIdentityCandidates, validateCustomerProfile } = require('../utils/customerProfile')
 
 const PASSWORD_RESET_RESPONSE = Object.freeze({
     success: true,
@@ -31,39 +32,46 @@ const logSecurityEvent = async event => {
     }
 };
 
-const refreshVirtualAccounts = async (userId, options = {}) => {
-    try {
-        const outcomes = await virtualAccountService.provisionEligible({ userId, ...options });
-        for (const [provider, outcome] of Object.entries(outcomes)) {
-            if (outcome.status === 'failed') {
-                console.error(`[VirtualAccount] ${provider} automatic provisioning failed:`, outcome.message);
-            }
-        }
-        return outcomes;
-    } catch (error) {
-        console.error('[VirtualAccount] Automatic provisioning lifecycle failed:', error.message);
-        return null;
-    }
-};
-
-const scheduleVirtualAccountRefresh = (userId, options = {}) => {
-    void refreshVirtualAccounts(userId, options);
-};
-
 const register = async (req, res) => {
     let { name, email, phone, password, referrerCode, referralCode } = req.body
+    const passwordConfirmation = req.body.confirmPassword ?? req.body.passwordConfirmation
 
     // Normalize referral code naming (Web vs Mobile mismatch)
     const activeReferrerCode = (referrerCode || referralCode || "").trim().toLowerCase();
-
-    // Normalize email
-    if (email) email = email.trim().toLowerCase();
-    if (phone) phone = phone.trim();
 
     // Email, Phone, Name, and Password are REQUIRED
     if (!name || !phone || !email || !password) {
         return res.status(400).json({ message: "Name, email, phone and password are required" });
     }
+
+    if (passwordConfirmation !== undefined && passwordConfirmation !== password) {
+        return res.status(400).json({
+            success: false,
+            code: 'PASSWORD_CONFIRMATION_MISMATCH',
+            message: 'Password confirmation does not match'
+        });
+    }
+    if (onboardingService.requiresConfirmationForNewUser() && passwordConfirmation === undefined) {
+        return res.status(400).json({
+            success: false,
+            code: 'PASSWORD_CONFIRMATION_REQUIRED',
+            message: 'Password confirmation is required'
+        });
+    }
+
+    const profile = validateCustomerProfile({ name, email, phone });
+    if (!profile.complete) {
+        return res.status(400).json({
+            success: false,
+            code: 'CUSTOMER_PROFILE_INVALID',
+            message: 'Name, email, or phone format is invalid',
+            data: {
+                missingFields: profile.missingFields,
+                invalidFields: profile.invalidFields
+            }
+        });
+    }
+    ({ name, email, phone } = profile.normalized);
 
     // Phase 2: legal acceptance payload (array of {documentType, version, contentHash, channel})
     const legalPayload = req.body.legalAcceptances || req.body.legalAcceptance || [];
@@ -85,8 +93,10 @@ const register = async (req, res) => {
             const referrer = await User.findOne({ myReferralCode: activeReferrerCode });
             if (referrer) {
                 // Prevent self-referral (Check if referrer belongs to this registration phone/email)
-                if (referrer.phone === phone.trim() || (email && referrer.email === email.trim().toLowerCase())) {
-                    console.log(`Self-referral attempt blocked for ${phone}`);
+                let referrerPhones = [];
+                try { referrerPhones = referrer.phone ? phoneIdentityCandidates(referrer.phone) : []; } catch (_) {}
+                if (referrerPhones.includes(phone) || (email && referrer.email === email.trim().toLowerCase())) {
+                    console.log('[Registration] Self-referral attempt blocked');
                 } else {
                     referredBy = referrer._id;
                 }
@@ -95,7 +105,7 @@ const register = async (req, res) => {
 
         const userData = {
             name,
-            phone: phone.trim(),
+            phone,
             password: hashed,
             referrerCode: activeReferrerCode || undefined,
             referredBy,
@@ -103,7 +113,9 @@ const register = async (req, res) => {
             role: 'user', // Never accept a role from a self-service registration
             roles: ['user'],
             isPhoneVerified: false,
-            status: true // Auto-verify account
+            isEmailVerified: false,
+            status: true,
+            ...onboardingService.registrationPolicyFields()
         };
 
         if (email && email.trim()) {
@@ -145,13 +157,6 @@ const register = async (req, res) => {
 
         // ── Post-commit side effects (deliberately outside transaction) ─────────
 
-        // Start provider lifecycle work only after commit, without making the
-        // registration response depend on provider or database latency.
-        scheduleVirtualAccountRefresh(user._id, {
-            paystackConsent: req.body?.consent === true || req.body?.consent === 'true',
-            paystackPreferredBank: req.body?.preferredBank
-        });
-
         // Notify Referrer
         if (referredBy) {
             await notificationService.sendInApp(referredBy, {
@@ -168,12 +173,13 @@ const register = async (req, res) => {
             device: req.headers['user-agent']
         }).catch(error => console.error('[Registration] Activity log failed:', error.message))
 
-        console.log(`Registration successful for user: ${phone}`);
+        console.log('[Registration] Registration completed');
         user.lastLogin = new Date();
         await user.save().catch(error => console.error('[Registration] lastLogin update failed:', error.message));
-        sendToken(user, res)
+        const onboarding = await onboardingService.getStateForResponse({ userId: user._id })
+        sendToken(user, res, 200, '7d', { onboarding })
     } catch (error) {
-        console.error("Registration fatal error:", error);
+        console.error('[Registration] Registration failed:', error.code || error.name || 'UNKNOWN');
 
         // Phase 2: legal-service validation errors (httpError shape)
         if (error.status && error.code) {
@@ -202,8 +208,7 @@ const register = async (req, res) => {
 
         res.status(500).json({
             success: false,
-            message: "Registration failed. Please try again later.",
-            error: error.message
+            message: "Registration failed. Please try again later."
         })
     }
 }
@@ -224,7 +229,8 @@ const verifyEmail = async (req, res) => {
             ipAddress: req.ip,
             device: req.headers['user-agent']
         });
-        res.json({ message: 'Email verified successfully' })
+        const onboarding = await onboardingService.getStateForResponse({ userId: user._id });
+        res.json({ message: 'Email verified successfully', onboarding })
     } catch (err) {
         res.status(400).json({ message: 'Invalid or expired verification link' })
     }
@@ -241,8 +247,10 @@ const login = async (req, res) => {
 
     try {
         // Search by email OR phone
+        let phoneCandidates = [loginId];
+        try { phoneCandidates = phoneIdentityCandidates(loginId); } catch (_) {}
         const user = await User.findOne({
-            $or: [{ email: loginId }, { phone: loginId }]
+            $or: [{ email: loginId }, { phone: { $in: phoneCandidates } }]
         }).select('+password')
 
         if (!user) return res.status(400).json({ message: 'Invalid credentials' })
@@ -260,7 +268,7 @@ const login = async (req, res) => {
         user.lastLogin = new Date();
         await user.save();
 
-        scheduleVirtualAccountRefresh(user._id);
+        const onboarding = await onboardingService.getStateForResponse({ userId: user._id })
 
         // Security notification for new login
         await notificationService.sendInApp(user._id, {
@@ -269,7 +277,7 @@ const login = async (req, res) => {
             type: 'security'
         });
 
-        sendToken(user, res, 200, rememberMe === true ? '30d' : '7d')
+        sendToken(user, res, 200, rememberMe === true ? '30d' : '7d', { onboarding })
     } catch (error) {
         res.status(500).json({ message: 'Internal server error' })
     }
@@ -277,13 +285,14 @@ const login = async (req, res) => {
 
 const profile = async (req, res) => {
     const user = await User.findById(req.user.id).select('-password')
-    res.json(serializeUserProfile(user))
+    const onboarding = await onboardingService.getStateForResponse({ userId: req.user.id })
+    res.json({ ...serializeUserProfile(user), onboarding })
 }
 
 const checkPhone = async (phone) => {
     if (!phone) return false
 
-    const existingUserPhone = await User.findOne({ phone })
+    const existingUserPhone = await User.findOne({ phone: { $in: phoneIdentityCandidates(phone) } })
     return !!existingUserPhone
 }
 
@@ -332,36 +341,92 @@ const updateUser = async (req, res) => {
         }
 
         if (updateFields.phone) updateFields.phone = updateFields.phone.trim()
+        if (updateFields.email) updateFields.email = updateFields.email.trim().toLowerCase()
 
         // Track any privileged/unknown fields the client attempted to set.
         const blockedFields = Object.keys(body).filter(key => !SELF_EDITABLE_FIELDS.includes(key))
 
-        const currentUser = await User.findById(id).select('phone')
+        const currentUser = await User.findById(id).select('name phone email onboardingPolicyVersion')
         if (!currentUser) {
             return res.status(404).json({ message: "User not found." })
         }
 
-        const phoneIncluded = updateFields.phone !== undefined
-        const phoneChanged = phoneIncluded &&
-            updateFields.phone !== String(currentUser.phone).trim()
+        const profile = validateCustomerProfile({
+            name: updateFields.name ?? currentUser.name,
+            email: updateFields.email ?? currentUser.email,
+            phone: updateFields.phone ?? currentUser.phone
+        })
+        if (onboardingService.requiresProfileValidation(currentUser) && !profile.complete) {
+            return res.status(400).json({
+                success: false,
+                code: 'CUSTOMER_PROFILE_INVALID',
+                message: 'Name, email, or phone format is invalid',
+                data: {
+                    missingFields: profile.missingFields,
+                    invalidFields: profile.invalidFields
+                }
+            })
+        }
+        for (const field of Object.keys(updateFields)) updateFields[field] = profile.normalized[field]
 
-        const profileUpdate = phoneChanged
+        if (updateFields.phone !== undefined) {
+            const duplicatePhone = await User.findOne({
+                _id: { $ne: id },
+                phone: { $in: phoneIdentityCandidates(updateFields.phone) }
+            }).select('_id')
+            if (duplicatePhone) {
+                return res.status(409).json({ message: "This phone number is already in use." })
+            }
+        }
+
+        const phoneIncluded = updateFields.phone !== undefined
+        let currentPhone = String(currentUser.phone || '').trim()
+        try { currentPhone = phoneIdentityCandidates(currentPhone)[0] } catch (_) {}
+        const phoneChanged = phoneIncluded && updateFields.phone !== currentPhone
+        const emailIncluded = updateFields.email !== undefined
+        const emailChanged = emailIncluded &&
+            updateFields.email !== String(currentUser.email || '').trim().toLowerCase()
+
+        const profileUpdate = phoneChanged || emailChanged
             ? {
-                $set: { ...updateFields, isPhoneVerified: false },
+                $set: {
+                    ...updateFields,
+                    ...(phoneChanged ? { isPhoneVerified: false } : {}),
+                    ...(emailChanged ? { isEmailVerified: false } : {})
+                },
                 $unset: {
-                    phoneVerificationChallengeId: 1,
-                    phoneVerificationOtpDigest: 1,
-                    phoneVerificationPhone: 1,
-                    phoneVerificationExpiresAt: 1,
-                    phoneVerificationAttempts: 1,
-                    phoneVerificationRequestedAt: 1,
-                    otp: 1,
-                    otpExpires: 1
+                    ...(phoneChanged ? {
+                        phoneVerificationChallengeId: 1,
+                        phoneVerificationOtpDigest: 1,
+                        phoneVerificationPhone: 1,
+                        phoneVerificationExpiresAt: 1,
+                        phoneVerificationAttempts: 1,
+                        phoneVerificationRequestedAt: 1,
+                        otp: 1,
+                        otpExpires: 1
+                    } : {}),
+                    ...(emailChanged ? {
+                        emailVerificationChallengeId: 1,
+                        emailVerificationOtpDigest: 1,
+                        emailVerificationEmail: 1,
+                        emailVerificationExpiresAt: 1,
+                        emailVerificationAttempts: 1,
+                        emailVerificationRequestedAt: 1,
+                        emailOtp: 1,
+                        emailOtpEmail: 1,
+                        emailOtpExpires: 1,
+                        emailOtpAttempts: 1,
+                        emailOtpRequestedAt: 1
+                    } : {})
                 }
             }
             : updateFields
 
-        const updateFilter = phoneIncluded ? { _id: id, phone: currentUser.phone } : { _id: id }
+        const updateFilter = {
+            _id: id,
+            ...(phoneIncluded ? { phone: currentUser.phone } : {}),
+            ...(emailIncluded ? { email: currentUser.email } : {})
+        }
         const updatedUser = await User.findOneAndUpdate(
             updateFilter,
             profileUpdate,
@@ -369,8 +434,8 @@ const updateUser = async (req, res) => {
         );
 
         if (!updatedUser) {
-            return res.status(phoneIncluded ? 409 : 404).json({
-                message: phoneIncluded ? "Profile changed concurrently. Please try again." : "User not found."
+            return res.status(phoneIncluded || emailIncluded ? 409 : 404).json({
+                message: phoneIncluded || emailIncluded ? "Profile changed concurrently. Please try again." : "User not found."
             })
         }
 
@@ -386,8 +451,8 @@ const updateUser = async (req, res) => {
             }
         })
 
-        sendToken(updatedUser, res)
-        scheduleVirtualAccountRefresh(updatedUser._id)
+        const onboarding = await onboardingService.getStateForResponse({ userId: updatedUser._id })
+        sendToken(updatedUser, res, 200, '7d', { onboarding })
     } catch (error) {
         if (error.code === 11000) {
             return res.status(409).json({ message: "This phone number or email address is already in use." })
@@ -621,6 +686,7 @@ const verifyOTP = async (req, res) => {
         if (!otp) return res.status(400).json({ message: 'OTP is required' });
 
         const verifiedUser = await phoneVerificationService.verifyPhoneVerificationChallenge(req.user.id, String(otp));
+        const onboarding = await onboardingService.getStateForResponse({ userId: verifiedUser._id });
 
         res.json({
             success: true,
@@ -629,7 +695,8 @@ const verifyOTP = async (req, res) => {
                 id: String(verifiedUser._id),
                 phone: verifiedUser.phone,
                 isPhoneVerified: verifiedUser.isPhoneVerified === true
-            }
+            },
+            onboarding
         });
     } catch (error) {
         res.status(error.statusCode || 500).json({
@@ -639,8 +706,10 @@ const verifyOTP = async (req, res) => {
 };
 
 const sendEmailOTP = async (req, res) => {
+    let challenge;
     try {
-        const { user, otp: emailOtp } = await emailVerificationService.issueEmailVerificationChallenge(req.user.id);
+        challenge = await emailVerificationService.issueEmailVerificationChallenge(req.user.id);
+        const { user, otp: emailOtp } = challenge;
 
         const html = `
             <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
@@ -653,21 +722,27 @@ const sendEmailOTP = async (req, res) => {
                 <p>Regards,<br>The Zantara Team</p>
             </div>
         `;
-        await sendEmail(user.email, 'Your Zantara Verification Code', html, 'email_verification');
-
-        if (user.phone) {
-            await sendSMS(user.phone, `Your Zantara verification code is: ${emailOtp}. Valid for 10 minutes.`, 'email_verification');
+        const delivery = await sendEmail(user.email, 'Your Zantara Verification Code', html, 'email_verification');
+        if (!delivery) {
+            await emailVerificationService.invalidateEmailVerificationChallenge(
+                req.user.id,
+                challenge.challengeId,
+                user.email
+            );
+            challenge = null;
+            return res.status(502).json({ message: 'Unable to deliver verification code' });
         }
 
         res.json({ success: true, message: 'OTP sent to email successfully' });
-
-        // Security fallback in-app & Push
-        await notificationService.sendInApp(user._id, {
-            title: 'Verification Code',
-            message: `Your code is: ${emailOtp}. Valid for 10 minutes.`,
-            type: 'security'
-        });
     } catch (error) {
+        if (challenge) {
+            await emailVerificationService.invalidateEmailVerificationChallenge(
+                req.user.id,
+                challenge.challengeId,
+                challenge.user.email
+            ).catch(() => {});
+            return res.status(502).json({ message: 'Unable to deliver verification code' });
+        }
         res.status(error.statusCode || 500).json({
             message: error.statusCode ? error.message : 'Error sending email OTP'
         });
@@ -679,9 +754,10 @@ const verifyEmailOTP = async (req, res) => {
         const { otp } = req.body;
         if (!otp) return res.status(400).json({ message: 'OTP is required' });
 
-        await emailVerificationService.verifyEmailVerificationChallenge(req.user.id, String(otp));
+        const verifiedUser = await emailVerificationService.verifyEmailVerificationChallenge(req.user.id, String(otp));
+        const onboarding = await onboardingService.getStateForResponse({ userId: verifiedUser._id });
 
-        res.json({ success: true, message: 'Email verified successfully' });
+        res.json({ success: true, message: 'Email verified successfully', onboarding });
     } catch (error) {
         res.status(error.statusCode || 500).json({
             message: error.statusCode ? 'Invalid or expired OTP' : 'Error verifying email OTP'

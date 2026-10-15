@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const { sendResponse } = require('../utils/response');
 const notificationService = require('../services/notification.service');
 const cloudinaryUtils = require('../utils/cloudinary');
+const onboardingService = require('../services/onboarding.service');
 
 const PENDING_KYC_INDEX_NAME = 'uniq_pending_kyc_per_user';
 
@@ -19,6 +20,11 @@ const serializeKyc = (kyc) => {
     if (!kyc) return kyc;
     const data = typeof kyc.toObject === 'function' ? kyc.toObject() : { ...kyc };
     sensitiveDocumentFields.forEach(field => delete data[field]);
+    if (data.documentNumber) {
+        const value = String(data.documentNumber);
+        data.documentNumberLast4 = value.slice(-4);
+        delete data.documentNumber;
+    }
     return data;
 };
 
@@ -168,16 +174,21 @@ const submitKyc = async (req, res) => {
         console.error('KYC submission notification failed');
     }
 
+    const onboarding = await onboardingService.getStateForResponse({ userId });
     return sendResponse(res, {
         message: 'KYC submitted successfully and is pending review',
-        data: serializeKyc(kyc)
+        data: serializeKyc(kyc),
+        onboarding
     });
 };
 
 const getMyKyc = async (req, res) => {
     try {
-        const kyc = await Kyc.findOne({ userId: req.user.id }).sort({ createdAt: -1 });
-        return sendResponse(res, { data: serializeKyc(kyc) });
+        const [kyc, onboarding] = await Promise.all([
+            Kyc.findOne({ userId: req.user.id }).sort({ createdAt: -1 }),
+            onboardingService.getStateForResponse({ userId: req.user.id })
+        ]);
+        return sendResponse(res, { data: serializeKyc(kyc), onboarding });
     } catch (err) {
         return sendResponse(res, { status: 500, success: false, message: err.message });
     }

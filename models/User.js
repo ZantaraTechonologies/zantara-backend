@@ -58,6 +58,15 @@ const userSchema = new mongoose.Schema({
     passwordResetTokenExpiresAt: { type: Date, select: false },
     isPhoneVerified: { type: Boolean, default: false },
     isEmailVerified: { type: Boolean, default: false },
+    onboardingPolicyVersion: { type: Number, min: 1 },
+    onboardingEnrolledAt: Date,
+    emailVerificationChallengeId: { type: String, select: false },
+    emailVerificationOtpDigest: { type: String, select: false },
+    emailVerificationEmail: { type: String, select: false },
+    emailVerificationExpiresAt: { type: Date, select: false },
+    emailVerificationAttempts: { type: Number, select: false, min: 0 },
+    emailVerificationRequestedAt: { type: Date, select: false },
+    // Legacy email OTP fields remain optional so existing documents need no migration.
     emailOtp: { type: String, select: false },
     emailOtpEmail: { type: String, select: false },
     emailOtpExpires: Date,
@@ -85,6 +94,8 @@ const userSchema = new mongoose.Schema({
         providerCustomerCode: String,
         preferredBank: String,
         consentGrantedAt: Date,
+        consentVersion: String,
+        consentChannel: String,
         active: Boolean,
         assigned: Boolean,
         provisioningKey: String,
@@ -96,20 +107,35 @@ const userSchema = new mongoose.Schema({
         provisioningGatewayContext: { type: String, select: false },
         provisioningDispatchState: {
             type: String,
-            enum: ['not_started', 'customer_creating', 'customer_ready', 'dispatching', 'awaiting_assignment', 'reconciling', 'retryable', 'complete']
+            enum: ['not_started', 'customer_creating', 'customer_ready', 'dispatching', 'awaiting_assignment', 'reconciling', 'retryable', 'rejected', 'complete']
         },
         provisioningAttemptCount: { type: Number, default: 0 },
+        provisioningRecoveryAttemptCount: { type: Number, default: 0 },
         provisioningLastDispatchAt: Date,
+        provisioningLastRecoveryAt: Date,
+        provisioningNextRecoveryAt: Date,
         provisioningStartedAt: Date,
         provisioningExpiresAt: Date,
         provisioningExpectedAccountCount: Number,
         provisionedAt: Date,
         provisioningFailure: String,
+        provisioningFailureCode: String,
+        provisioningFailureDisposition: {
+            type: String,
+            enum: ['definitive_rejection', 'retryable', 'ambiguous_mutation']
+        },
     }],
     virtualAccountPreferences: {
         paystack: {
             preferredBank: String,
             consentGrantedAt: Date,
+            consentVersion: String,
+            consentChannel: String,
+        },
+        monnify: {
+            consentGrantedAt: Date,
+            consentVersion: String,
+            consentChannel: String,
         }
     },
     virtualAccountGatewaySnapshots: {

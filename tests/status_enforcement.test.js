@@ -461,6 +461,32 @@ async function runStatusEnforcementTests() {
         assert.ok(res.statusCode === 401 || res.statusCode === 403);
     });
 
+    await test('C8. live singular and array roles are combined and deduplicated', async () => {
+        resetMocks();
+        const userId = 'user-role-dedupe';
+        mockUsers.push({ _id: userId, status: true, role: 'admin', roles: ['user', 'admin', 'user'] });
+        const req = { cookies: cookies(signToken(userId, 'user')) };
+        const res = makeRes();
+        await verifyJWT(req, res, () => {});
+        assert.deepStrictEqual(req.user.roles, ['admin', 'user']);
+        assert.strictEqual(req.user.role, 'admin');
+    });
+
+    await test('C9. bearer token takes precedence over a cookie token', async () => {
+        resetMocks();
+        const userId = 'user-bearer-priority';
+        mockUsers.push({ _id: userId, status: true, role: 'user', roles: ['user'] });
+        const req = {
+            cookies: cookies('invalid-cookie-token'),
+            headers: { authorization: `Bearer ${signToken(userId, 'user')}` }
+        };
+        const res = makeRes();
+        let nextCalled = false;
+        await verifyJWT(req, res, () => { nextCalled = true; });
+        assert.strictEqual(nextCalled, true);
+        assert.strictEqual(req.user.id, userId);
+    });
+
     // ─── RESTORE ───────────────────────────────────────────────────────────────
     User.findById = origUserFindById;
 

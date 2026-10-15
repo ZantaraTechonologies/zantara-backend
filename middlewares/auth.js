@@ -4,10 +4,11 @@ const { verifyAccessToken } = require('../utils/authTokens')
 const tokenVersion = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
 
 const requestToken = req => {
-    if (req.cookies?.token) return req.cookies.token;
     const authorization = req.headers?.authorization;
-    if (!authorization) return null;
-    return authorization.startsWith('Bearer ') ? authorization.slice(7) : authorization;
+    if (authorization) {
+        return authorization.startsWith('Bearer ') ? authorization.slice(7) : authorization;
+    }
+    return req.cookies?.token || null;
 };
 
 const loadAccessIdentity = async decoded => {
@@ -18,9 +19,9 @@ const loadAccessIdentity = async decoded => {
         return { reason: 'revoked' };
     }
 
-    const roles = Array.isArray(user.roles)
-        ? user.roles
-        : (Array.isArray(user.role) ? user.role : []);
+    const currentRoles = [user.role, ...(Array.isArray(user.roles) ? user.roles : [])]
+        .filter(role => typeof role === 'string' && role.length > 0);
+    const roles = [...new Set(currentRoles)];
     const perms = Array.isArray(user.perms) && user.perms.length > 0 ? user.perms : [];
     return {
         identity: {

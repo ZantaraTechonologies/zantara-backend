@@ -43,6 +43,7 @@ async function callUpdateUser(body, selfId = 'USER_1', paramId = 'USER_1') {
         role: 'user', roles: ['user'], isPhoneVerified: true, isPinSet: false,
     };
     User.findById = () => ({ select: async () => existingUser });
+    User.findOne = () => ({ select: async () => null });
     User.findOneAndUpdate = async (_filter, update) => {
         capturedUpdate = update;
         return { ...existingUser, ...(update || {}) };
@@ -279,13 +280,48 @@ function test(name, fn) {
 
             test('G. superAdmin changes role -> success, role written', () => {
                 assert.strictEqual(res.statusCode, 200);
-                assert.deepStrictEqual(capturedUpdate, { role: 'agent' });
+                assert.deepStrictEqual(capturedUpdate, {
+                    $set: { role: 'agent', roles: ['agent'] },
+                    $inc: { authVersion: 1 }
+                });
             });
             test('G2. ROLE_CHANGE audit log recorded with old/new role', () => {
                 const rc = auditLogs.find(l => l[2] === 'ROLE_CHANGE');
                 assert.ok(rc, 'ROLE_CHANGE log must exist');
                 assert.strictEqual(rc[4].oldRole, 'user');
                 assert.strictEqual(rc[4].newRole, 'agent');
+            });
+        })();
+
+        // H2. status must be an actual boolean and security changes revoke sessions
+        await (async () => {
+            User.findById = async () => ({
+                _id: 'U1', role: 'user', roles: ['user'], name: 'Jane', phone: '0801', status: true
+            });
+            let capturedUpdate;
+            User.findByIdAndUpdate = async (_id, update) => {
+                capturedUpdate = update;
+                return { _id: 'U1', role: 'user', roles: ['user'], name: 'Jane', phone: '0801', status: false };
+            };
+            auditController.logAction = async () => {};
+            notificationService.notifySuperAdmins = async () => {};
+
+            const invalidRes = makeRes();
+            await adminController.updateUserRole({
+                user: { id: 'ADMIN1', name: 'Boss' }, params: { id: 'U1' }, body: { status: 'false' }
+            }, invalidRes);
+            test('H2. string status is rejected', () => assert.strictEqual(invalidRes.statusCode, 400));
+
+            const changedRes = makeRes();
+            await adminController.updateUserRole({
+                user: { id: 'ADMIN1', name: 'Boss' }, params: { id: 'U1' }, body: { status: false }
+            }, changedRes);
+            test('H3. status change atomically increments authVersion', () => {
+                assert.strictEqual(changedRes.statusCode, 200);
+                assert.deepStrictEqual(capturedUpdate, {
+                    $set: { status: false },
+                    $inc: { authVersion: 1 }
+                });
             });
         })();
 
@@ -347,6 +383,29 @@ function test(name, fn) {
                 }
                 assert.deepStrictEqual(Object.keys(writtenFields).sort(), ['isPhoneVerified', 'phone']);
                 assert.strictEqual(writtenFields.isPhoneVerified, false);
+            });
+        })();
+
+        await (async () => {
+            const out = await callUpdateUser({ email: ' New.Email@Example.COM ' });
+            test('K. email change normalizes and clears verification challenges', () => {
+                assert.strictEqual(out.capturedUpdate.$set.email, 'new.email@example.com');
+                assert.strictEqual(out.capturedUpdate.$set.isEmailVerified, false);
+                for (const field of [
+                    'emailVerificationChallengeId',
+                    'emailVerificationOtpDigest',
+                    'emailVerificationEmail',
+                    'emailVerificationExpiresAt',
+                    'emailVerificationAttempts',
+                    'emailVerificationRequestedAt',
+                    'emailOtp',
+                    'emailOtpEmail',
+                    'emailOtpExpires',
+                    'emailOtpAttempts',
+                    'emailOtpRequestedAt'
+                ]) {
+                    assert.strictEqual(out.capturedUpdate.$unset[field], 1, `${field} was not cleared`);
+                }
             });
         })();
     } finally {

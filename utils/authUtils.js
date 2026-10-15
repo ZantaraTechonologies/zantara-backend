@@ -16,7 +16,7 @@ const cookieOpts = () => {
     };
 };
 
-const sendToken = (user, res, status = 200, expiresIn = '7d') => {
+const sendToken = (user, res, status = 200, expiresIn = '7d', extra = {}) => {
     const token = generateToken(user, expiresIn);
     res.cookie('token', token, cookieOpts());
 
@@ -35,10 +35,13 @@ const sendToken = (user, res, status = 200, expiresIn = '7d') => {
             email: user.email, 
             phone: user.phone,
             roles,
-            isPhoneVerified: user.isPhoneVerified,
-            isPinSet: user.isPinSet,
+            isPhoneVerified: user.isPhoneVerified === true,
+            isEmailVerified: user.isEmailVerified === true,
+            isPinSet: user.isPinSet === true,
+            kycLevel: Number(user.kycLevel || 1),
             myReferralCode: user.myReferralCode || null
-        } 
+        },
+        ...(extra.onboarding ? { onboarding: extra.onboarding } : {})
     });
 };
 

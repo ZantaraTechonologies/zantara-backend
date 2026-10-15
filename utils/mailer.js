@@ -27,7 +27,7 @@ const sendEmail = async (to, subject, html, activityType = null) => {
             },
             tls: {
                 servername: 'smtp.gmail.com', // Required when using IP address as host
-                rejectUnauthorized: false
+                rejectUnauthorized: true
             },
             connectionTimeout: 10000,
         })

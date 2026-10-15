@@ -16,6 +16,7 @@ const serviceController = require('../controllers/serviceController');
 const broadbandReadiness = require('../services/broadbandReadiness.service');
 const servicesRouter = require('../routes/services');
 const { verifyJWT } = require('../middlewares/auth');
+const requireOnboardingComplete = require('../middlewares/requireOnboardingComplete');
 
 const makeResponse = () => ({
     statusCode: 200,
@@ -284,12 +285,13 @@ async function run() {
             .some(error => error.includes('verifyBroadbandEvidence')));
     });
 
-    await test('canonical plans route is JWT protected', () => {
+    await test('canonical plans route is JWT and onboarding protected', () => {
         const layer = servicesRouter.stack.find(item => item.route?.path === '/identities/:serviceIdentityId/plans');
         assert.ok(layer, 'canonical plans route must exist');
         const handlers = layer.route.stack.map(item => item.handle);
         assert.strictEqual(handlers[0], verifyJWT);
-        assert.strictEqual(handlers[1], servicesController.getPlansByIdentityId);
+        assert.strictEqual(handlers[1], requireOnboardingComplete);
+        assert.strictEqual(handlers[2], servicesController.getPlansByIdentityId);
     });
 
     await test('canonical plans endpoint rejects malformed identity IDs', async () => {

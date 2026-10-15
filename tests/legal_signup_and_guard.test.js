@@ -24,6 +24,7 @@ const legalController = require('../controllers/legalDocumentController');
 const authController = require('../controllers/authController');
 const auditController = require('../controllers/auditController');
 const requireLegalCompliance = require('../middlewares/requireLegalCompliance');
+const requireOnboardingComplete = require('../middlewares/requireOnboardingComplete');
 const { verifyJWT, verifyJWTOptional, checkRoles } = require('../middlewares/auth');
 const flutterwaveRouter = require('../routes/flutterwave');
 
@@ -854,33 +855,34 @@ function test(name, fn) {
         for (const path of ['/airtime', '/data', '/electricity', '/cable', '/purchase-pin']) {
             const h = layersFor(servicesRouter, path);
             assert.ok(h[0] === verifyJWT, `${path} first layer must be verifyJWT`);
-            assert.ok(h[1] === requireLegalCompliance, `${path} second layer must be the legal guard`);
+            assert.ok(h[1] === requireOnboardingComplete, `${path} second layer must be the onboarding guard`);
+            assert.ok(h[2] === requireLegalCompliance, `${path} third layer must be the legal guard`);
         }
     });
     test('G5. guarded: wallet financial and virtual-account provisioning routes', () => {
         for (const path of ['/transfer', '/redeem-earnings', '/fund', '/virtual-accounts/:provider']) {
             const h = layersFor(walletRouter, path);
-            assert.ok(h[0] === verifyJWT && h[1] === requireLegalCompliance, `${path} mis-wired`);
+            assert.ok(h[0] === verifyJWT && h[1] === requireOnboardingComplete && h[2] === requireLegalCompliance, `${path} mis-wired`);
         }
     });
     test('G6. guarded: POST /investment/buy,exit,reinvest,redeem,withdraw', () => {
         for (const path of ['/buy', '/exit', '/reinvest', '/redeem', '/withdraw']) {
             const h = layersFor(investmentRouter, path);
             assert.ok(
-                h[0] === verifyJWT && h[1] === requirePublicShareholdingAccess && h[2] === requireLegalCompliance,
+                h[0] === verifyJWT && h[1] === requireOnboardingComplete && h[2] === requirePublicShareholdingAccess && h[3] === requireLegalCompliance,
                 `${path} mis-wired`
             );
         }
     });
     test('G7. guarded: POST /withdrawal (root)', () => {
         const h = layersFor(withdrawalRouter, '/');
-        assert.ok(h[0] === verifyJWT && h[1] === requireLegalCompliance, 'withdrawal mis-wired');
+        assert.ok(h[0] === verifyJWT && h[1] === requireOnboardingComplete && h[2] === requireLegalCompliance, 'withdrawal mis-wired');
     });
     test('G8. guarded: POST /flutterwave/initialize (wallet funding initiation)', () => {
         const h = layersFor(flutterwaveRouter, '/initialize');
-        assert.ok(h && h[0] === verifyJWT && h[1] === requireLegalCompliance,
-            '/flutterwave/initialize must be verifyJWT + requireLegalCompliance + handler');
-        assert.strictEqual(h.length, 3, 'expected verifyJWT + requireLegalCompliance + handler');
+        assert.ok(h && h[0] === verifyJWT && h[1] === requireOnboardingComplete && h[2] === requireLegalCompliance,
+            '/flutterwave/initialize must be verifyJWT + onboarding + requireLegalCompliance + handler');
+        assert.strictEqual(h.length, 4, 'expected verifyJWT + onboarding + requireLegalCompliance + handler');
     });
 
     // ------------------------------------------------------------
@@ -1046,9 +1048,10 @@ function test(name, fn) {
         test('R6. POST /api/paystack/initialize contains verifyJWT -> requireLegalCompliance -> payment', () => {
             const h = layersFor(paystackRouter, '/initialize');
             assert.ok(h, 'POST /api/paystack/initialize layer not found');
-            assert.strictEqual(h.length, 3, 'expected exactly 3 handlers: verifyJWT, requireLegalCompliance, payment');
+            assert.strictEqual(h.length, 4, 'expected exactly 4 handlers: verifyJWT, onboarding, requireLegalCompliance, payment');
             assert.strictEqual(h[0], verifyJWT, 'first handler must be verifyJWT');
-            assert.strictEqual(h[1], requireLegalCompliance, 'second handler must be requireLegalCompliance');
+            assert.strictEqual(h[1], requireOnboardingComplete, 'second handler must be requireOnboardingComplete');
+            assert.strictEqual(h[2], requireLegalCompliance, 'third handler must be requireLegalCompliance');
         });
     }
 
@@ -1057,9 +1060,10 @@ function test(name, fn) {
         test('R7. POST /api/monnify/initialize contains verifyJWT -> requireLegalCompliance -> payment', () => {
             const h = layersFor(monnifyRouter, '/initialize');
             assert.ok(h, 'POST /api/monnify/initialize layer not found');
-            assert.strictEqual(h.length, 3, 'expected exactly 3 handlers: verifyJWT, requireLegalCompliance, payment');
+            assert.strictEqual(h.length, 4, 'expected exactly 4 handlers: verifyJWT, onboarding, requireLegalCompliance, payment');
             assert.strictEqual(h[0], verifyJWT, 'first handler must be verifyJWT');
-            assert.strictEqual(h[1], requireLegalCompliance, 'second handler must be requireLegalCompliance');
+            assert.strictEqual(h[1], requireOnboardingComplete, 'second handler must be requireOnboardingComplete');
+            assert.strictEqual(h[2], requireLegalCompliance, 'third handler must be requireLegalCompliance');
         });
     }
 
@@ -1068,9 +1072,10 @@ function test(name, fn) {
         test('R8. POST /api/monnify/generate-virtual-accounts contains verifyJWT -> requireLegalCompliance -> controller', () => {
             const h = layersFor(monnifyRouter, '/generate-virtual-accounts');
             assert.ok(h, 'POST /api/monnify/generate-virtual-accounts layer not found');
-            assert.strictEqual(h.length, 3, 'expected exactly 3 handlers: verifyJWT, requireLegalCompliance, controller');
+            assert.strictEqual(h.length, 4, 'expected exactly 4 handlers: verifyJWT, onboarding, requireLegalCompliance, controller');
             assert.strictEqual(h[0], verifyJWT, 'first handler must be verifyJWT');
-            assert.strictEqual(h[1], requireLegalCompliance, 'second handler must be requireLegalCompliance');
+            assert.strictEqual(h[1], requireOnboardingComplete, 'second handler must be requireOnboardingComplete');
+            assert.strictEqual(h[2], requireLegalCompliance, 'third handler must be requireLegalCompliance');
         });
     }
 
@@ -1078,7 +1083,7 @@ function test(name, fn) {
     {
         test('R9. POST /api/flutterwave/initialize remains guarded with verifyJWT + requireLegalCompliance', () => {
             const h = layersFor(flutterwaveRouter, '/initialize');
-            assert.ok(h && h[0] === verifyJWT && h[1] === requireLegalCompliance);
+            assert.ok(h && h[0] === verifyJWT && h[1] === requireOnboardingComplete && h[2] === requireLegalCompliance);
         });
     }
 
@@ -1086,7 +1091,7 @@ function test(name, fn) {
     {
         test('R10. POST /api/wallet/fund remains guarded with verifyJWT + requireLegalCompliance', () => {
             const h = layersFor(walletRouter, '/fund');
-            assert.ok(h && h[0] === verifyJWT && h[1] === requireLegalCompliance);
+            assert.ok(h && h[0] === verifyJWT && h[1] === requireOnboardingComplete && h[2] === requireLegalCompliance);
         });
     }
 
@@ -1095,7 +1100,7 @@ function test(name, fn) {
         test('R11. all service purchase routes remain guarded (/airtime, /data, /electricity, /cable, /purchase-pin)', () => {
             for (const path of ['/airtime', '/data', '/electricity', '/cable', '/purchase-pin']) {
                 const h = layersFor(servicesRouter, path);
-                assert.ok(h && h[0] === verifyJWT && h[1] === requireLegalCompliance, `${path} not guarded`);
+                assert.ok(h && h[0] === verifyJWT && h[1] === requireOnboardingComplete && h[2] === requireLegalCompliance, `${path} not guarded`);
             }
         });
     }
@@ -1105,7 +1110,7 @@ function test(name, fn) {
         test('R12. wallet transfer and redeem-earnings remain guarded', () => {
             for (const path of ['/transfer', '/redeem-earnings']) {
                 const h = layersFor(walletRouter, path);
-                assert.ok(h && h[0] === verifyJWT && h[1] === requireLegalCompliance, `${path} not guarded`);
+                assert.ok(h && h[0] === verifyJWT && h[1] === requireOnboardingComplete && h[2] === requireLegalCompliance, `${path} not guarded`);
             }
         });
     }
@@ -1114,7 +1119,7 @@ function test(name, fn) {
     {
         test('R13. POST /withdrawal remains guarded', () => {
             const h = layersFor(withdrawalRouter, '/');
-            assert.ok(h && h[0] === verifyJWT && h[1] === requireLegalCompliance);
+            assert.ok(h && h[0] === verifyJWT && h[1] === requireOnboardingComplete && h[2] === requireLegalCompliance);
         });
     }
 
@@ -1124,7 +1129,7 @@ function test(name, fn) {
             for (const path of ['/buy', '/exit', '/reinvest', '/redeem', '/withdraw']) {
                 const h = layersFor(investmentRouter, path);
                 assert.ok(
-                    h && h[0] === verifyJWT && h[1] === requirePublicShareholdingAccess && h[2] === requireLegalCompliance,
+                    h && h[0] === verifyJWT && h[1] === requireOnboardingComplete && h[2] === requirePublicShareholdingAccess && h[3] === requireLegalCompliance,
                     `${path} not guarded`
                 );
             }
@@ -1209,9 +1214,10 @@ function test(name, fn) {
     {
         test('R20. POST /api/paystack/initialize has requireLegalCompliance before payment handler (guards investment_buy)', () => {
             const h = layersFor(paystackRouter, '/initialize');
-            assert.ok(h && h.length === 3);
+            assert.ok(h && h.length === 4);
             assert.strictEqual(h[0], verifyJWT);
-            assert.strictEqual(h[1], requireLegalCompliance);
+            assert.strictEqual(h[1], requireOnboardingComplete);
+            assert.strictEqual(h[2], requireLegalCompliance);
         });
     }
 

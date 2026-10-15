@@ -1,13 +1,14 @@
 /**
  * Standardized API Response Helper
  */
-const sendResponse = (res, { status = 200, success = true, message = '', data = null, error = null }) => {
+const sendResponse = (res, { status = 200, success = true, message = '', data = null, error = null, onboarding }) => {
     return res.status(status).json({
         success,
         message,
         data,
         error: error ? (typeof error === 'string' ? error : error.message || error) : null,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        ...(onboarding ? { onboarding } : {})
     });
 };
 

@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { verifyJWT } = require('../middlewares/auth');
+const requireOnboardingComplete = require('../middlewares/requireOnboardingComplete');
 const { 
     getUserEarningsSummary, 
     getUserEarningsHistory 
@@ -8,6 +9,7 @@ const {
 
 // All routes here are protected and specific to the logged-in user
 router.use(verifyJWT);
+router.use(requireOnboardingComplete);
 
 router.get('/summary', getUserEarningsSummary);
 router.get('/history', getUserEarningsHistory);

@@ -138,6 +138,7 @@ async function main() {
                 let observed;
                 return withUserMethods({
                     findById: () => selected(current),
+                    findOne: () => selected(null),
                     findOneAndUpdate: async (filter, update) => {
                         observed = { filter, update };
                         return { ...current, ...(update.$set || update) };

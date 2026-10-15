@@ -1,9 +1,12 @@
 const LegalAcceptance = require('../models/LegalAcceptance');
 const legalService = require('../services/legalDocument.service');
 const auditController = require('./auditController');
+const onboardingService = require('../services/onboarding.service');
 
 const handleError = (res, e) => {
-    const status = (e && typeof e.status === 'number') ? e.status : 500;
+    const status = e && typeof (e.status || e.statusCode) === 'number'
+        ? (e.status || e.statusCode)
+        : 500;
     res.status(status).json({
         success: false,
         message: (e && e.message) || 'Server error',
@@ -72,7 +75,8 @@ exports.acceptDocument = async (req, res) => {
             userAgent: req.headers['user-agent']
         });
         const requirements = await legalService.getRequirements({ userId });
-        res.json({ success: true, data: { record, requirements } });
+        const onboarding = await onboardingService.getStateForResponse({ userId });
+        res.json({ success: true, data: { record, requirements }, onboarding });
     } catch (e) {
         handleError(res, e);
     }

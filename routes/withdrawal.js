@@ -9,10 +9,11 @@ const {
 } = require('../controllers/withdrawalController')
 const { verifyJWT, checkRoles } = require('../middlewares/auth')
 const requireLegalCompliance = require('../middlewares/requireLegalCompliance')
+const requireOnboardingComplete = require('../middlewares/requireOnboardingComplete')
 
 // User routes
-router.post('/', verifyJWT, requireLegalCompliance, requestWithdrawal)
-router.get('/me', verifyJWT, getMyWithdrawals)
+router.post('/', verifyJWT, requireOnboardingComplete, requireLegalCompliance, requestWithdrawal)
+router.get('/me', verifyJWT, requireOnboardingComplete, getMyWithdrawals)
 
 // Admin routes
 router.get('/', verifyJWT, checkRoles('admin', 'superAdmin'), getAllWithdrawals)

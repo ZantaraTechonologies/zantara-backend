@@ -20,6 +20,7 @@ const {
 } = require('../controllers/authController')
 const { setPin, changePin, verifyPin } = require('../controllers/pinController')
 const { verifyJWT } = require('../middlewares/auth')
+const requireOnboardingComplete = require('../middlewares/requireOnboardingComplete')
 const {
     loginLimiter,
     pinLimiter,
@@ -80,7 +81,7 @@ router.post('/send-otp', verifyJWT, phoneOtpRequestLimiter, sendOTP)
 router.post('/verify-otp', verifyJWT, phoneOtpVerifyLimiter, verifyOTP)
 router.post('/email/send-otp', verifyJWT, emailOtpRequestLimiter, sendEmailOTP)
 router.post('/email/verify-otp', verifyJWT, emailOtpVerifyLimiter, verifyEmailOTP)
-router.get('/referrals', verifyJWT, getReferralStats)
-router.post('/push-token', verifyJWT, savePushToken)
+router.get('/referrals', verifyJWT, requireOnboardingComplete, getReferralStats)
+router.post('/push-token', verifyJWT, requireOnboardingComplete, savePushToken)
 
 module.exports = router;

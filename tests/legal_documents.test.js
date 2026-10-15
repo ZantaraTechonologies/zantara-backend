@@ -17,6 +17,7 @@ const LegalAcceptance = require('../models/LegalAcceptance');
 const { markdownToHtml, sanitizeHtml, computeHash, verifyHash } = require('../utils/legalHtml');
 const legalService = require('../services/legalDocument.service');
 const legalController = require('../controllers/legalDocumentController');
+const onboardingService = require('../services/onboarding.service');
 const requireLegalCompliance = require('../middlewares/requireLegalCompliance');
 const { getMissingApprovedContent } = require('../scripts/seed_legal_documents');
 
@@ -529,11 +530,18 @@ function test(name, fn) {
             ip: '10.0.0.1',
             headers: { 'user-agent': 't' }
         };
-        await legalController.acceptDocument(reqAccept, res);
+        const originalGetOnboardingState = onboardingService.getStateForResponse;
+        onboardingService.getStateForResponse = async () => ({ currentStep: 'contact_verification', dashboardAllowed: true });
+        try {
+            await legalController.acceptDocument(reqAccept, res);
+        } finally {
+            onboardingService.getStateForResponse = originalGetOnboardingState;
+        }
         test('H3. POST /acceptance ignores client acceptanceType, returns requirements', () => {
             assert.strictEqual(res.statusCode, 200);
             assert.strictEqual(res.body.data.record.acceptanceType, 'agreement');
             assert.strictEqual(res.body.data.requirements.documents[0].acceptanceRequired, false);
+            assert.strictEqual(res.body.onboarding.currentStep, 'contact_verification');
         });
     }
     {

@@ -43,6 +43,7 @@ const {
 const servicesRouter = require('../routes/services');
 const { verifyJWT } = require('../middlewares/auth');
 const requireLegalCompliance = require('../middlewares/requireLegalCompliance');
+const requireOnboardingComplete = require('../middlewares/requireOnboardingComplete');
 const { pinLimiter, broadbandVerificationLimiter } = require('../middlewares/limiter');
 
 const chainResult = value => ({
@@ -1790,10 +1791,12 @@ async function run() {
         const verifyHandlers = handlersFor('/broadband/verify');
         const purchaseHandlers = handlersFor('/broadband');
         assert.strictEqual(verifyHandlers[0], verifyJWT);
-        assert.strictEqual(verifyHandlers[1], broadbandVerificationLimiter);
+        assert.strictEqual(verifyHandlers[1], requireOnboardingComplete);
+        assert.strictEqual(verifyHandlers[2], broadbandVerificationLimiter);
         assert.strictEqual(purchaseHandlers[0], verifyJWT);
-        assert.strictEqual(purchaseHandlers[2], requireLegalCompliance);
-        assert.strictEqual(purchaseHandlers[3], pinLimiter);
+        assert.strictEqual(purchaseHandlers[2], requireOnboardingComplete);
+        assert.strictEqual(purchaseHandlers[3], requireLegalCompliance);
+        assert.strictEqual(purchaseHandlers[4], pinLimiter);
     });
 
     await test('Decrypted context contains no credentials or provider configuration', () => {

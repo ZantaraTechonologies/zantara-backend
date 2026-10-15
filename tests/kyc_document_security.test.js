@@ -9,6 +9,7 @@ const notificationService = require('../services/notification.service');
 const cloudinaryUtils = require('../utils/cloudinary');
 const kycController = require('../controllers/kycController');
 const authMiddleware = require('../middlewares/auth');
+const onboardingService = require('../services/onboarding.service');
 
 const originals = {
     findOne: Kyc.findOne,
@@ -22,6 +23,7 @@ const originals = {
     verifyJWT: authMiddleware.verifyJWT,
     checkRoles: authMiddleware.checkRoles,
     getKycDocumentAccess: kycController.getKycDocumentAccess,
+    getOnboardingState: onboardingService.getStateForResponse,
 };
 
 const validFile = (overrides = {}) => ({
@@ -101,6 +103,7 @@ async function run() {
             return { ...doc, _id: '507f1f77bcf86cd799439012' };
         };
         notificationService.sendInApp = async () => {};
+        onboardingService.getStateForResponse = async () => ({ currentStep: 'contact_verification', dashboardAllowed: true });
         cloudinaryUtils.destroyKycAsset = async asset => {
             cleanupCalls.push(asset);
             return { result: 'ok' };
@@ -470,6 +473,7 @@ async function run() {
         cloudinaryUtils.cloudinary.uploader.destroy = originals.cloudinaryDestroy;
         authMiddleware.verifyJWT = originals.verifyJWT;
         authMiddleware.checkRoles = originals.checkRoles;
+        onboardingService.getStateForResponse = originals.getOnboardingState;
 
         if (originals.destroyKycAsset === undefined) delete cloudinaryUtils.destroyKycAsset;
         else cloudinaryUtils.destroyKycAsset = originals.destroyKycAsset;

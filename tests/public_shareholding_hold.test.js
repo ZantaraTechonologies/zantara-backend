@@ -11,6 +11,7 @@ const investmentRouter = require('../routes/investment');
 const investmentService = require('../services/investment.service');
 const paymentGatewayService = require('../services/paymentGateway.service');
 const requirePublicShareholdingAccess = require('../middlewares/requirePublicShareholdingAccess');
+const requireOnboardingComplete = require('../middlewares/requireOnboardingComplete');
 const {
     PUBLIC_SHAREHOLDING_KYC_HOLD,
     PUBLIC_SHAREHOLDING_HOLD_CODE,
@@ -57,7 +58,8 @@ async function run() {
 
     for (const [routePath, method] of [['/summary', 'get'], ['/history', 'get'], ['/buy', 'post'], ['/exit', 'post'], ['/reinvest', 'post'], ['/redeem', 'post'], ['/withdraw', 'post']]) {
         const handlers = routeHandlers(routePath, method);
-        assert.strictEqual(handlers[1], requirePublicShareholdingAccess, `${routePath} must fail closed immediately after authentication`);
+        assert.strictEqual(handlers[1], requireOnboardingComplete, `${routePath} must enforce onboarding immediately after authentication`);
+        assert.strictEqual(handlers[2], requirePublicShareholdingAccess, `${routePath} must preserve the public-shareholding hold after onboarding`);
     }
     for (const [routePath, method] of [['/admin/overview', 'get'], ['/admin/shareholders', 'get'], ['/admin/exits', 'get'], ['/admin/exits/:id', 'put'], ['/admin/withdrawals', 'get'], ['/admin/withdrawals/:id', 'put'], ['/admin/settings', 'get'], ['/admin/settings', 'put'], ['/admin/payout/trigger', 'post']]) {
         assert.ok(!routeHandlers(routePath, method).includes(requirePublicShareholdingAccess), `${method.toUpperCase()} ${routePath} must remain available to authorized admins`);
@@ -142,7 +144,7 @@ async function run() {
     assert.match(settlementSource, /message: finalResult\.message/);
 
     const withdrawalRoutes = readFileSync(path.join(__dirname, '..', 'routes', 'withdrawal.js'), 'utf8');
-    assert.match(withdrawalRoutes, /router\.post\('\/', verifyJWT, requireLegalCompliance, requestWithdrawal\)/);
+    assert.match(withdrawalRoutes, /router\.post\('\/', verifyJWT, requireOnboardingComplete, requireLegalCompliance, requestWithdrawal\)/);
     assert.doesNotMatch(withdrawalRoutes, /requirePublicShareholdingAccess/);
 
     console.log('Public shareholding hold tests passed');
