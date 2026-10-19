@@ -284,7 +284,7 @@ function appendWebhookVerificationSnapshot (gateway, snapshot) {
 
 function retainedMonnifySigningSecrets (gateway) {
   return [
-    paymentGatewayService._snapshotGatewayConfig(gateway),
+    monnifyHistoricalSnapshot(gateway),
     ...(Array.isArray(gateway.webhookVerificationSnapshots)
       ? gateway.webhookVerificationSnapshots
       : [])
@@ -407,12 +407,42 @@ function snapshotForReference (user, accountReference) {
     : snapshots?.[accountReference]
 }
 
+function hasUsableMonnifySigningSecret (snapshot) {
+  const hydrated = paymentGatewayService._hydrateGatewayCredentials(snapshot)
+  const signingSecret = hydrated?.webhookSecret || hydrated?.secretKey
+  return !!signingSecret && !isEncrypted(signingSecret)
+}
+
+function monnifyHistoricalSnapshot (gateway) {
+  const snapshot = paymentGatewayService._snapshotGatewayConfig(gateway)
+  if (hasUsableMonnifySigningSecret(snapshot)) return snapshot
+
+  const storedApiKey = String(snapshot.publicKey || '').trim()
+  const legacyApiKey = String(process.env.MONNIFY_API_KEY || '').trim()
+  const legacySecretKey = String(process.env.MONNIFY_SECRET_KEY || '').trim()
+  const legacyWebhookSecret =
+    String(process.env.MONNIFY_WEBHOOK_SECRET || '').trim() || legacySecretKey
+
+  // Only materialize the legacy runtime fallback when it is provably bound to
+  // this gateway. Never guess a historical merchant from a secret alone.
+  if (
+    !storedApiKey || !legacyApiKey || storedApiKey !== legacyApiKey ||
+    !legacyWebhookSecret || isEncrypted(legacyWebhookSecret)
+  ) return snapshot
+
+  return {
+    ...snapshot,
+    secretKey: legacySecretKey ? encryptSecret(legacySecretKey) : '',
+    webhookSecret: encryptSecret(legacyWebhookSecret)
+  }
+}
+
 function assertHistoricalMonnifySnapshot (snapshot, gateway) {
   const hydrated = paymentGatewayService._hydrateGatewayCredentials(snapshot)
   const signingSecret = hydrated?.webhookSecret || hydrated?.secretKey
   if (!hydrated || !signingSecret || isEncrypted(signingSecret)) {
     const error = new Error(
-      'The previous Monnify webhook verification credentials are unavailable.'
+      'An active Monnify reserved account has no archived verification context, and the previous API Secret Key or configured webhook signing secret is unavailable.'
     )
     error.code = 'PAYMENT_GATEWAY_WEBHOOK_HISTORY_UNAVAILABLE'
     error.statusCode = 409
@@ -481,6 +511,7 @@ async function archiveMonnifyReservedAccountContexts (gateway, snapshot, session
         assertHistoricalMonnifySnapshot(existing, gateway)
         continue
       }
+      assertHistoricalMonnifySnapshot(snapshot, gateway)
       const result = await User.updateOne(
         {
           _id: user._id,
@@ -1726,14 +1757,15 @@ const replaceMonnifyMerchant = async (req, res) => {
       })
     }
 
-    const previousSnapshot = paymentGatewayService._snapshotGatewayConfig(gateway)
-    assertHistoricalMonnifySnapshot(previousSnapshot, gateway)
+    const previousSnapshot = monnifyHistoricalSnapshot(gateway)
     const archived = await archiveMonnifyReservedAccountContexts(
       gateway,
       previousSnapshot,
       mutationSession
     )
-    appendWebhookVerificationSnapshot(gateway, previousSnapshot)
+    if (hasUsableMonnifySigningSecret(previousSnapshot)) {
+      appendWebhookVerificationSnapshot(gateway, previousSnapshot)
+    }
 
     gateway.publicKey = publicKey
     gateway.secretKey = encryptSecret(secretKey)

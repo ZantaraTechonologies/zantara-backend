@@ -370,7 +370,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
 
     verifyWebhookSignature(headers, rawBody) {
         const signature = headers['monnify-signature'];
-        if (!signature || !this.secretKey) return false;
+        if (!signature || (!this.webhookSecret && !this.secretKey)) return false;
 
         const buf = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody || '', 'utf8');
         const expected = crypto.createHmac('sha512', this.webhookSecret || this.secretKey).update(buf).digest('hex');

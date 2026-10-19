@@ -83,6 +83,116 @@ function replacementBody (overrides = {}) {
   }
 }
 
+function monnifyOwner (gateway, references) {
+  return {
+    _id: 'reserved-owner',
+    virtualAccounts: references.map((accountReference, index) => ({
+      provider: 'monnify',
+      gatewayId: gateway._id,
+      accountReference,
+      accountNumber: `123456789${index}`,
+      provisioningStatus: 'active',
+      active: true,
+      assigned: true,
+      currency: 'NGN'
+    })),
+    virtualAccountGatewaySnapshots: new Map()
+  }
+}
+
+function setMonnifyEnvironment (t, values = {}) {
+  const keys = [
+    'MONNIFY_API_KEY',
+    'MONNIFY_SECRET_KEY',
+    'MONNIFY_WEBHOOK_SECRET'
+  ]
+  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]))
+  for (const key of keys) {
+    if (values[key] === undefined) delete process.env[key]
+    else process.env[key] = values[key]
+  }
+  t.after(() => {
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key]
+      else process.env[key] = previous[key]
+    }
+  })
+}
+
+async function executeReplacement (t, {
+  gateway,
+  owners = [],
+  unresolvedPayments = 0,
+  body = replacementBody()
+}) {
+  const password = await bcrypt.hash('correct-password', 4)
+  const originals = {
+    gatewayFindById: PaymentGateway.findById,
+    gatewayUpdateOne: PaymentGateway.updateOne,
+    txCount: TransactionStatus.countDocuments,
+    userFindById: User.findById,
+    userFind: User.find,
+    userUpdateOne: User.updateOne,
+    auditCreate: AuditLog.create,
+    startSession: mongoose.startSession,
+    getAdapterInstance: paymentGatewayService.getAdapterInstance
+  }
+  const snapshotUpdates = []
+  let adapterCalls = 0
+  let sessionStarted = false
+  PaymentGateway.findById = () => queryResult(gateway)
+  PaymentGateway.updateOne = async () => ({ matchedCount: 1 })
+  TransactionStatus.countDocuments = async () => unresolvedPayments
+  User.findById = () => queryResult({
+    _id: 'admin-monnify-replacement',
+    name: 'Test SuperAdmin',
+    password,
+    status: true,
+    role: 'superAdmin',
+    roles: ['superAdmin']
+  })
+  User.find = () => queryResult(owners)
+  User.updateOne = async (filter, update) => {
+    snapshotUpdates.push({ filter, update })
+    return { matchedCount: 1 }
+  }
+  AuditLog.create = async value => value
+  mongoose.startSession = async () => {
+    sessionStarted = true
+    return {
+      startTransaction () {},
+      async commitTransaction () {},
+      async abortTransaction () {},
+      async endSession () {}
+    }
+  }
+  paymentGatewayService.getAdapterInstance = () => {
+    adapterCalls++
+    return { async testConnection () { return { success: true } } }
+  }
+  t.after(() => {
+    PaymentGateway.findById = originals.gatewayFindById
+    PaymentGateway.updateOne = originals.gatewayUpdateOne
+    TransactionStatus.countDocuments = originals.txCount
+    User.findById = originals.userFindById
+    User.find = originals.userFind
+    User.updateOne = originals.userUpdateOne
+    AuditLog.create = originals.auditCreate
+    mongoose.startSession = originals.startSession
+    paymentGatewayService.getAdapterInstance = originals.getAdapterInstance
+  })
+
+  const res = response()
+  await controller.replaceMonnifyMerchant(request(gateway, body), res)
+  return {
+    res,
+    snapshotUpdates,
+    adapterCalls,
+    sessionStarted,
+    realGetAdapterInstance: originals.getAdapterInstance
+  }
+}
+
 test('confirmed Monnify replacement archives old account context and preserves gateway identity/default', async t => {
   const gateway = gatewayFixture()
   const password = await bcrypt.hash('correct-password', 4)
@@ -186,6 +296,126 @@ test('confirmed Monnify replacement archives old account context and preserves g
     'old-secret'
   )
   assert.equal(res.body.diagnostics.defaultGatewayChanged, false)
+})
+
+test('replacement uses the old API secret when the optional webhook secret was never configured', async t => {
+  setMonnifyEnvironment(t)
+  const gateway = gatewayFixture()
+  gateway.webhookSecret = ''
+  const owner = monnifyOwner(gateway, ['VIRTUAL_507f1f77bcf86cd799439011'])
+
+  const result = await executeReplacement(t, { gateway, owners: [owner] })
+
+  assert.equal(result.res.statusCode, 200)
+  assert.equal(result.snapshotUpdates.length, 1)
+  assert.equal(gateway.webhookVerificationSnapshots.length, 1)
+  assert.equal(gateway.webhookVerificationSnapshots[0].webhookSecret, '')
+  assert.equal(
+    decryptSecret(gateway.webhookVerificationSnapshots[0].secretKey),
+    'old-secret'
+  )
+
+  paymentGatewayService.getAdapterInstance = result.realGetAdapterInstance
+  const rawBody = Buffer.from('{"eventType":"SUCCESSFUL_TRANSACTION"}')
+  const oldSignature = require('node:crypto')
+    .createHmac('sha512', 'old-secret')
+    .update(rawBody)
+    .digest('hex')
+  const newSignature = require('node:crypto')
+    .createHmac('sha512', 'new-webhook')
+    .update(rawBody)
+    .digest('hex')
+  const hydrated = paymentGatewayService._hydrateGatewayCredentials(gateway)
+  const oldContext = paymentGatewayService._selectWebhookGateway(
+    hydrated,
+    { 'monnify-signature': oldSignature },
+    rawBody
+  )
+  const newContext = paymentGatewayService._selectWebhookGateway(
+    hydrated,
+    { 'monnify-signature': newSignature },
+    rawBody
+  )
+  assert.equal(oldContext.matched, true)
+  assert.equal(oldContext.gateway.secretKey, 'old-secret')
+  assert.equal(newContext.matched, true)
+  assert.equal(newContext.gateway.secretKey, 'new-secret')
+})
+
+test('replacement archives an exact-match legacy environment signing context for reserved accounts', async t => {
+  setMonnifyEnvironment(t, {
+    MONNIFY_API_KEY: 'MK_OLD',
+    MONNIFY_SECRET_KEY: 'legacy-old-secret'
+  })
+  const gateway = gatewayFixture()
+  gateway.secretKey = ''
+  gateway.webhookSecret = ''
+  const owner = monnifyOwner(gateway, [
+    'VIRTUAL_507f1f77bcf86cd799439011',
+    'VIRTUAL_507f1f77bcf86cd799439012',
+    'VIRTUAL_507f1f77bcf86cd799439013'
+  ])
+
+  const result = await executeReplacement(t, { gateway, owners: [owner] })
+
+  assert.equal(result.res.statusCode, 200)
+  assert.equal(result.snapshotUpdates.length, 3)
+  assert.equal(
+    decryptSecret(gateway.webhookVerificationSnapshots[0].secretKey),
+    'legacy-old-secret'
+  )
+  assert.equal(
+    decryptSecret(gateway.webhookVerificationSnapshots[0].webhookSecret),
+    'legacy-old-secret'
+  )
+})
+
+test('replacement does not require an old signing credential when no historical dependency exists', async t => {
+  setMonnifyEnvironment(t)
+  const gateway = gatewayFixture()
+  gateway.secretKey = ''
+  gateway.webhookSecret = ''
+
+  const result = await executeReplacement(t, { gateway })
+
+  assert.equal(result.res.statusCode, 200)
+  assert.equal(result.snapshotUpdates.length, 0)
+  assert.equal(gateway.webhookVerificationSnapshots.length, 0)
+})
+
+test('unresolved Monnify payments still block replacement independently of reserved accounts', async t => {
+  setMonnifyEnvironment(t)
+  const gateway = gatewayFixture()
+  gateway.secretKey = ''
+  gateway.webhookSecret = ''
+
+  const result = await executeReplacement(t, {
+    gateway,
+    unresolvedPayments: 2
+  })
+
+  assert.equal(result.res.statusCode, 409)
+  assert.equal(result.res.body.code, 'PAYMENT_GATEWAY_UNRESOLVED_TRANSACTIONS')
+  assert.equal(result.res.body.details.unresolvedTransactions, 2)
+  assert.equal(result.adapterCalls, 0)
+  assert.equal(result.sessionStarted, false)
+})
+
+test('active reserved accounts still fail closed without a provable old signing context', async t => {
+  setMonnifyEnvironment(t, {
+    MONNIFY_API_KEY: 'DIFFERENT_MERCHANT',
+    MONNIFY_SECRET_KEY: 'unrelated-secret'
+  })
+  const gateway = gatewayFixture()
+  gateway.secretKey = ''
+  gateway.webhookSecret = ''
+  const owner = monnifyOwner(gateway, ['VIRTUAL_507f1f77bcf86cd799439011'])
+
+  const result = await executeReplacement(t, { gateway, owners: [owner] })
+
+  assert.equal(result.res.statusCode, 409)
+  assert.equal(result.res.body.code, 'PAYMENT_GATEWAY_WEBHOOK_HISTORY_UNAVAILABLE')
+  assert.equal(gateway.publicKey, 'MK_OLD')
 })
 
 test('Monnify replacement rejects failed reauthentication before provider validation or writes', async t => {
