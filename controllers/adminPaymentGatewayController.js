@@ -36,6 +36,24 @@ function normalizePriority (value) {
   return Math.floor(n)
 }
 
+function isAdministrativeSandboxOnly (metadata) {
+  const value = metadata instanceof Map
+    ? Object.fromEntries(metadata)
+    : metadata || {}
+  return value.administrativeSandboxOnly === true
+}
+
+function administrativeSandboxDefaultError () {
+  return {
+    status: 409,
+    body: {
+      success: false,
+      code: 'PAYMENT_GATEWAY_SANDBOX_ISOLATED',
+      message: 'An administrative sandbox gateway cannot be the platform default.'
+    }
+  }
+}
+
 const queryWithSession = (query, session) =>
   session && typeof query?.session === 'function'
     ? query.session(session)
@@ -80,6 +98,12 @@ function validateGatewayUpdatePlan (gateway, changePlan, body) {
         message: 'A default gateway must be active.'
       }
     }
+  }
+  if (
+    body.isDefault === true &&
+    isAdministrativeSandboxOnly(changePlan.next.metadata)
+  ) {
+    return administrativeSandboxDefaultError()
   }
   if (changePlan.changes.adapterType) {
     return {
@@ -749,6 +773,10 @@ const createGateway = async (req, res) => {
         message:
           'Default gateway must be active. Cannot make an inactive or maintenance gateway default.'
       })
+    }
+    if (isDefault && isAdministrativeSandboxOnly(metadata)) {
+      const error = administrativeSandboxDefaultError()
+      return res.status(error.status).json(error.body)
     }
 
     const encryptedSecretKey =
@@ -1445,6 +1473,10 @@ const setDefaultGateway = async (req, res) => {
         success: false,
         message: `Cannot set gateway '${gateway.name}' as default because it is '${gateway.status}'. Only active gateways can be default.`
       })
+    }
+    if (isAdministrativeSandboxOnly(gateway.metadata)) {
+      const error = administrativeSandboxDefaultError()
+      return res.status(error.status).json(error.body)
     }
 
     await PaymentGateway.setDefault(gateway._id)

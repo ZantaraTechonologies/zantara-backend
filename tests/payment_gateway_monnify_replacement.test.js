@@ -839,6 +839,30 @@ test('administrative sandbox isolation blocks normal funding before transaction 
   assert.equal(transactionCreated, false)
 })
 
+test('administrative sandbox gateway cannot be made the platform default', async t => {
+  const gateway = gatewayFixture()
+  gateway.status = 'active'
+  gateway.metadata.administrativeSandboxOnly = true
+  const originals = {
+    findById: PaymentGateway.findById,
+    setDefault: PaymentGateway.setDefault
+  }
+  let defaultChanged = false
+  PaymentGateway.findById = () => queryResult(gateway)
+  PaymentGateway.setDefault = async () => { defaultChanged = true }
+  t.after(() => {
+    PaymentGateway.findById = originals.findById
+    PaymentGateway.setDefault = originals.setDefault
+  })
+
+  const res = response()
+  await controller.setDefaultGateway(request(gateway), res)
+
+  assert.equal(res.statusCode, 409)
+  assert.equal(res.body.code, 'PAYMENT_GATEWAY_SANDBOX_ISOLATED')
+  assert.equal(defaultChanged, false)
+})
+
 test('wallet funding ignores caller-selected gateway compatibility fields', async t => {
   const original = paymentGatewayService.initializeFunding
   let initialization

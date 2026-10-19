@@ -57,7 +57,17 @@ async function runPaymentReturnCallbackTests() {
     const origEnv = process.env[envKey];
 
     const mockQuery = (data) => ({
-        sort: () => mockQuery(data),
+        sort: (spec = {}) => {
+            if (!Array.isArray(data)) return mockQuery(data);
+            const sorted = [...data].sort((a, b) => {
+                for (const [field, direction] of Object.entries(spec)) {
+                    const result = Number(direction) * ((a[field] > b[field]) - (a[field] < b[field]));
+                    if (result !== 0) return result;
+                }
+                return 0;
+            });
+            return mockQuery(sorted);
+        },
         limit: () => mockQuery(data),
         then: (resolve) => Promise.resolve(resolve(data)),
         catch: (reject) => Promise.reject(reject)
@@ -67,11 +77,17 @@ async function runPaymentReturnCallbackTests() {
         let res = [...mockGateways];
         if (filter.status) res = res.filter(g => g.status === filter.status);
         if (filter.supportedChannels) res = res.filter(g => (g.supportedChannels || []).includes(filter.supportedChannels));
+        if (filter['metadata.administrativeSandboxOnly']?.$ne === true) {
+            res = res.filter(g => g.metadata?.administrativeSandboxOnly !== true);
+        }
         return mockQuery(res);
     };
     PaymentGateway.findOne = (filter = {}) => {
         let found = null;
         if (filter.code) found = mockGateways.find(g => g.code === filter.code);
+        else if (filter.isDefault === true) {
+            found = mockGateways.find(g => g.isDefault === true && (!filter.status || g.status === filter.status));
+        }
         return mockQuery(found || null);
     };
     PaymentGateway.countDocuments = () => Promise.resolve(mockGateways.length);
@@ -87,6 +103,15 @@ async function runPaymentReturnCallbackTests() {
             return { success: true, authorizationUrl: `https://checkout.${code}.test/start`, reference: opts.reference };
         };
         return () => { proto.initializePayment = orig; };
+    };
+
+    const withStubbedAdapter = async (code, callback) => {
+        const restore = stubAdapter(code);
+        try {
+            return await callback();
+        } finally {
+            restore();
+        }
     };
 
     process.env[envKey] = 'https://dahavtu.netlify.app';
@@ -158,6 +183,96 @@ async function runPaymentReturnCallbackTests() {
         assert.strictEqual(json.provider, 'paystack');
         assert.strictEqual(json.callbackUrl, 'https://dahavtu.netlify.app/paystack/return');
         assert.strictEqual(json.returnHost, 'dahavtu.netlify.app');
+    });
+
+    await test('7. Amount-only funding uses an active customer-eligible Paystack default', async () => {
+        mockGateways.forEach(g => { g.isDefault = g.code === 'paystack'; });
+        const result = await withStubbedAdapter('paystack', () =>
+            paymentGatewayService.initializeFunding({
+                user: { _id: 'u1', email: 'a@z.ng' }, amount: 500
+            }));
+        assert.strictEqual(result.provider, 'paystack');
+    });
+
+    await test('8. Amount-only funding uses a normal active Monnify default', async () => {
+        const monnify = mockGateways.find(g => g.code === 'monnify');
+        mockGateways.forEach(g => { g.isDefault = g.code === 'monnify'; });
+        monnify.metadata = { contractCode: '123456' };
+        const result = await withStubbedAdapter('monnify', () =>
+            paymentGatewayService.initializeFunding({
+                user: { _id: 'u1', email: 'a@z.ng' }, amount: 500
+            }));
+        assert.strictEqual(result.provider, 'monnify');
+    });
+
+    await test('9. Administrative Monnify default falls back to eligible Paystack', async () => {
+        const monnify = mockGateways.find(g => g.code === 'monnify');
+        mockGateways.forEach(g => { g.isDefault = g.code === 'monnify'; });
+        monnify.metadata = { contractCode: '123456', administrativeSandboxOnly: true };
+        const result = await withStubbedAdapter('paystack', () =>
+            paymentGatewayService.initializeFunding({
+                user: { _id: 'u1', email: 'a@z.ng' }, amount: 500
+            }));
+        assert.strictEqual(result.provider, 'paystack');
+    });
+
+    await test('10. Switching the eligible default changes amount-only routing', async () => {
+        const monnify = mockGateways.find(g => g.code === 'monnify');
+        monnify.metadata = { contractCode: '123456' };
+        mockGateways.forEach(g => { g.isDefault = g.code === 'paystack'; });
+        const before = await withStubbedAdapter('paystack', () =>
+            paymentGatewayService.initializeFunding({
+                user: { _id: 'u1', email: 'a@z.ng' }, amount: 500
+            }));
+        mockGateways.forEach(g => { g.isDefault = g.code === 'monnify'; });
+        const after = await withStubbedAdapter('monnify', () =>
+            paymentGatewayService.initializeFunding({
+                user: { _id: 'u1', email: 'a@z.ng' }, amount: 500
+            }));
+        assert.strictEqual(before.provider, 'paystack');
+        assert.strictEqual(after.provider, 'monnify');
+    });
+
+    await test('11. Missing eligible default falls back by active gateway priority', async () => {
+        const paystack = mockGateways.find(g => g.code === 'paystack');
+        const monnify = mockGateways.find(g => g.code === 'monnify');
+        const flutterwave = mockGateways.find(g => g.code === 'flutterwave');
+        mockGateways.forEach(g => { g.isDefault = false; });
+        monnify.metadata = { contractCode: '123456', administrativeSandboxOnly: true };
+        paystack.priority = 3;
+        flutterwave.priority = 1;
+        try {
+            const result = await withStubbedAdapter('flutterwave', () =>
+                paymentGatewayService.initializeFunding({
+                    user: { _id: 'u1', email: 'a@z.ng' }, amount: 500
+                }));
+            assert.strictEqual(result.provider, 'flutterwave');
+        } finally {
+            paystack.priority = 1;
+            flutterwave.priority = 3;
+        }
+    });
+
+    await test('12. Channel routing skips higher-priority administrative sandboxes', async () => {
+        const paystack = mockGateways.find(g => g.code === 'paystack');
+        const monnify = mockGateways.find(g => g.code === 'monnify');
+        const originalPaystackPriority = paystack.priority;
+        const originalMonnifyPriority = monnify.priority;
+        const originalMonnifyMetadata = monnify.metadata;
+        paystack.priority = 2;
+        monnify.priority = 1;
+        monnify.metadata = { contractCode: '123456', administrativeSandboxOnly: true };
+        try {
+            const result = await withStubbedAdapter('paystack', () =>
+                paymentGatewayService.initializeFunding({
+                    channel: 'card', user: { _id: 'u1', email: 'a@z.ng' }, amount: 500
+                }));
+            assert.strictEqual(result.provider, 'paystack');
+        } finally {
+            paystack.priority = originalPaystackPriority;
+            monnify.priority = originalMonnifyPriority;
+            monnify.metadata = originalMonnifyMetadata;
+        }
     });
 
     // Restore everything

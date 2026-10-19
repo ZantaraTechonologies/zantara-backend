@@ -257,6 +257,23 @@ class PaymentGatewayService {
     return gateway ? this._hydrateGatewayCredentials(gateway) : null
   }
 
+  _isCustomerFundingEligible (gateway) {
+    if (!gateway || gateway.status !== 'active') return false
+    const metadata = gateway.metadata instanceof Map
+      ? Object.fromEntries(gateway.metadata)
+      : gateway.metadata || {}
+    return metadata.administrativeSandboxOnly !== true
+  }
+
+  async getEligibleFundingGateway () {
+    const gateways = await PaymentGateway.find({
+      status: 'active',
+      'metadata.administrativeSandboxOnly': { $ne: true }
+    }).sort({ priority: 1, createdAt: 1 })
+    const gateway = gateways[0]
+    return gateway ? this._hydrateGatewayCredentials(gateway) : null
+  }
+
   /**
    * Returns active gateways that support the given channel.
    */
@@ -266,7 +283,8 @@ class PaymentGatewayService {
 
     const gateways = await PaymentGateway.find({
       status: 'active',
-      supportedChannels: channel
+      supportedChannels: channel,
+      'metadata.administrativeSandboxOnly': { $ne: true }
     }).sort({ priority: 1, createdAt: 1 })
     return gateways.map(g => this._hydrateGatewayCredentials(g))
   }
@@ -439,6 +457,9 @@ class PaymentGatewayService {
     } else {
       // 3. Default Gateway Fallback
       gateway = await this.getDefaultGateway()
+      if (!this._isCustomerFundingEligible(gateway)) {
+        gateway = await this.getEligibleFundingGateway()
+      }
       if (!gateway) {
         const err = new Error(
           'No active payment gateway is configured on the platform'

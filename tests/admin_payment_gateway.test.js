@@ -378,7 +378,49 @@ async function runAdminPaymentGatewayTests() {
             assert.strictEqual(active.length, 3, 'Paystack, Monnify, and Flutterwave must all be active');
         });
 
-        await test('10. Setting new default gateway atomically unsets previous default', async () => {
+        await test('10. Administrative sandbox gateway cannot be created as default', async () => {
+            const before = gatewaysDB.length;
+            const { req, res } = mockReqRes({
+                body: {
+                    name: 'Administrative Sandbox',
+                    code: 'admin-sandbox',
+                    adapterType: 'monnify',
+                    status: 'active',
+                    environment: 'test',
+                    isDefault: true,
+                    publicKey: 'MK_SANDBOX',
+                    secretKey: 'sandbox-secret',
+                    baseUrl: 'https://sandbox.monnify.com',
+                    supportedChannels: ['card'],
+                    metadata: { administrativeSandboxOnly: true }
+                }
+            });
+
+            await adminGatewayController.createGateway(req, res);
+            assert.strictEqual(res.statusCode, 409);
+            assert.strictEqual(res.responseData?.code, 'PAYMENT_GATEWAY_SANDBOX_ISOLATED');
+            assert.strictEqual(gatewaysDB.length, before);
+        });
+
+        await test('11. Administrative sandbox gateway cannot be updated to default', async () => {
+            const monnify = gatewaysDB.find(g => g.code === 'monnify');
+            monnify.metadata = { ...monnify.metadata, administrativeSandboxOnly: true };
+            const { req, res } = mockReqRes({
+                params: { id: monnify._id },
+                body: { isDefault: true }
+            });
+
+            try {
+                await adminGatewayController.updateGateway(req, res);
+                assert.strictEqual(res.statusCode, 409);
+                assert.strictEqual(res.responseData?.code, 'PAYMENT_GATEWAY_SANDBOX_ISOLATED');
+                assert.strictEqual(monnify.isDefault, false);
+            } finally {
+                delete monnify.metadata.administrativeSandboxOnly;
+            }
+        });
+
+        await test('12. Setting new default gateway atomically unsets previous default', async () => {
             const monnify = gatewaysDB.find(g => g.code === 'monnify');
             const paystack = gatewaysDB.find(g => g.code === 'paystack');
 
@@ -399,7 +441,7 @@ async function runAdminPaymentGatewayTests() {
             assert.strictEqual(paystack.isDefault, false);
         });
 
-        await test('11. Inactive gateway cannot be set as default', async () => {
+        await test('13. Inactive gateway cannot be set as default', async () => {
             // Set flutterwave to inactive
             const flw = gatewaysDB.find(g => g.code === 'flutterwave');
             flw.status = 'inactive';
@@ -415,7 +457,7 @@ async function runAdminPaymentGatewayTests() {
             assert.strictEqual(flw.isDefault, false);
         });
 
-        await test('12. Maintenance gateway cannot be set as default', async () => {
+        await test('14. Maintenance gateway cannot be set as default', async () => {
             const flw = gatewaysDB.find(g => g.code === 'flutterwave');
             flw.status = 'maintenance';
 
@@ -432,7 +474,7 @@ async function runAdminPaymentGatewayTests() {
         // ─────────────────────────────────────────────────────────────────────────────
         // 5. TEST CONNECTION
         // ─────────────────────────────────────────────────────────────────────────────
-        await test('13. Test Connection invokes server-side adapter and never returns credentials', async () => {
+        await test('15. Test Connection invokes server-side adapter and never returns credentials', async () => {
             const paystack = gatewaysDB.find(g => g.code === 'paystack');
             const { req, res } = mockReqRes({
                 user: { role: 'superAdmin' },
@@ -464,7 +506,7 @@ async function runAdminPaymentGatewayTests() {
         // ─────────────────────────────────────────────────────────────────────────────
         // 6. AUDIT LOGGING
         // ─────────────────────────────────────────────────────────────────────────────
-        await test('14. Admin audit log records actions without recording sensitive secrets', async () => {
+        await test('16. Admin audit log records actions without recording sensitive secrets', async () => {
             assert.ok(auditLogsDB.length > 0, 'Audit entries must be recorded');
             const credLog = auditLogsDB.find(l => l.action === 'PAYMENT_GATEWAY_CREDENTIALS_ROTATED');
             assert.ok(credLog, 'Credential rotation must be audited');
@@ -476,7 +518,7 @@ async function runAdminPaymentGatewayTests() {
         // ─────────────────────────────────────────────────────────────────────────────
         // 7. RECONCILIATION VISIBILITY
         // ─────────────────────────────────────────────────────────────────────────────
-        await test('15. Processing & reconciliation_required funding transactions visible to Admin', async () => {
+        await test('17. Processing & reconciliation_required funding transactions visible to Admin', async () => {
             transactionsDB = [
                 {
                     _id: new mongoose.Types.ObjectId(),
@@ -533,7 +575,7 @@ async function runAdminPaymentGatewayTests() {
             assert.ok(reconItem.reconciliationReason.includes('Amount mismatch'));
         });
 
-        await test('16. Reconciliation response does not leak raw secret/provider payloads', async () => {
+        await test('18. Reconciliation response does not leak raw secret/provider payloads', async () => {
             const { req, res } = mockReqRes({ user: { role: 'admin' } });
             await adminGatewayController.getReconciliationTransactions(req, res);
             res.responseData.data.forEach(item => {
@@ -547,7 +589,7 @@ async function runAdminPaymentGatewayTests() {
         // ─────────────────────────────────────────────────────────────────────────────
         // 8. DELETION SAFEGUARD
         // ─────────────────────────────────────────────────────────────────────────────
-        await test('17. Gateway deletion is blocked if historical financial transactions exist', async () => {
+        await test('19. Gateway deletion is blocked if historical financial transactions exist', async () => {
             const paystack = gatewaysDB.find(g => g.code === 'paystack');
             // Mock that 1 transaction exists for paystack
             transactionsDB = [{ provider: 'paystack', refId: 'REF-OLD-1' }];
@@ -566,7 +608,7 @@ async function runAdminPaymentGatewayTests() {
         // ─────────────────────────────────────────────────────────────────────────────
         // 9. CLIENT FUNDING METHODS DISCOVERY
         // ─────────────────────────────────────────────────────────────────────────────
-        await test('18. GET /api/wallet/funding-methods returns only active gateways stripped of internal data', async () => {
+        await test('20. GET /api/wallet/funding-methods returns only active gateways stripped of internal data', async () => {
             const origGetActive = require('../services/paymentGateway.service').getActiveGateways;
             require('../services/paymentGateway.service').getActiveGateways = async () => {
                 return gatewaysDB.filter(g => g.status === 'active');
