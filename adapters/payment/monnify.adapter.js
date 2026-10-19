@@ -169,11 +169,14 @@ class MonnifyAdapter extends BasePaymentAdapter {
             try {
                 const parsedCheckout = new URL(checkoutUrl);
                 const host = parsedCheckout.hostname.toLowerCase();
+                const requiresSandboxHost = this.baseUrl === 'https://sandbox.monnify.com';
                 trustedCheckout = parsedCheckout.protocol === 'https:'
                     && !parsedCheckout.username
                     && !parsedCheckout.password
                     && (!parsedCheckout.port || parsedCheckout.port === '443')
-                    && (host === 'monnify.com' || host.endsWith('.monnify.com'));
+                    && (requiresSandboxHost
+                        ? host === 'sandbox.monnify.com'
+                        : host === 'monnify.com' || host.endsWith('.monnify.com'));
             } catch (_) {}
             if (!trustedCheckout) {
                 const error = new Error('Monnify returned an invalid hosted checkout URL');

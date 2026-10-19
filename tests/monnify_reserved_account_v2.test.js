@@ -243,3 +243,27 @@ test('Monnify hosted checkout rejects a successful response without a trusted ch
         error => error.code === 'MONNIFY_INITIALIZATION_RESPONSE_INVALID'
     );
 });
+
+test('Monnify sandbox checkout rejects a non-sandbox Monnify host', async t => {
+    const originalPost = axios.post;
+    t.after(() => { axios.post = originalPost; });
+    axios.post = async () => ({
+        data: {
+            requestSuccessful: true,
+            responseBody: {
+                checkoutUrl: 'https://checkout.monnify.com/pay',
+                paymentReference: 'MONNIFY-23456789ABCDEFGH'
+            }
+        }
+    });
+    const adapter = makeAdapter();
+
+    await assert.rejects(
+        adapter.initializePayment({
+            user,
+            amount: 100,
+            reference: 'MONNIFY-23456789ABCDEFGH'
+        }),
+        error => error.code === 'MONNIFY_INITIALIZATION_RESPONSE_INVALID'
+    );
+});
