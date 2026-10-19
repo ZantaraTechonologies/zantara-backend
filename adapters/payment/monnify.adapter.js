@@ -175,7 +175,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
                     && !parsedCheckout.password
                     && (!parsedCheckout.port || parsedCheckout.port === '443')
                     && (requiresSandboxHost
-                        ? host === 'sandbox.monnify.com'
+                        ? host === 'sandbox.sdk.monnify.com'
                         : host === 'monnify.com' || host.endsWith('.monnify.com'));
             } catch (_) {}
             if (!trustedCheckout) {
@@ -283,9 +283,10 @@ class MonnifyAdapter extends BasePaymentAdapter {
         let token;
         try {
             token = await this.getAccessToken();
-            // Official Monnify v2 transaction status query endpoint
+            // Our reference is the merchant paymentReference, not Monnify's
+            // transactionReference used by /api/v2/transactions/:reference.
             const response = await axios.get(
-                `${this.baseUrl}/api/v2/transactions/${encodeURIComponent(reference)}`,
+                `${this.baseUrl}/api/v2/merchant/transactions/query?paymentReference=${encodeURIComponent(reference)}`,
                 {
                     headers: { Authorization: `Bearer ${token}` },
                     timeout: 20000

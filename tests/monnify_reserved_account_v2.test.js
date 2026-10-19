@@ -244,6 +244,29 @@ test('Monnify hosted checkout rejects a successful response without a trusted ch
     );
 });
 
+test('Monnify sandbox checkout accepts the documented sandbox SDK host', async t => {
+    const originalPost = axios.post;
+    t.after(() => { axios.post = originalPost; });
+    axios.post = async () => ({
+        data: {
+            requestSuccessful: true,
+            responseBody: {
+                checkoutUrl: 'https://sandbox.sdk.monnify.com/checkout/test',
+                paymentReference: 'MONNIFY-23456789ABCDEFGH'
+            }
+        }
+    });
+    const adapter = makeAdapter();
+
+    const result = await adapter.initializePayment({
+        user,
+        amount: 100,
+        reference: 'MONNIFY-23456789ABCDEFGH'
+    });
+
+    assert.equal(result.authorizationUrl, 'https://sandbox.sdk.monnify.com/checkout/test');
+});
+
 test('Monnify sandbox checkout rejects a non-sandbox Monnify host', async t => {
     const originalPost = axios.post;
     t.after(() => { axios.post = originalPost; });
@@ -266,4 +289,34 @@ test('Monnify sandbox checkout rejects a non-sandbox Monnify host', async t => {
         }),
         error => error.code === 'MONNIFY_INITIALIZATION_RESPONSE_INVALID'
     );
+});
+
+test('Monnify status lookup queries v2 by merchant paymentReference', async t => {
+    const originalGet = axios.get;
+    t.after(() => { axios.get = originalGet; });
+    let requestedUrl;
+    axios.get = async url => {
+        requestedUrl = url;
+        return {
+            data: {
+                requestSuccessful: true,
+                responseBody: {
+                    paymentReference: 'MONNIFY-23456789ABCDEFGH',
+                    paymentStatus: 'PENDING',
+                    amountPaid: 0,
+                    currencyCode: 'NGN'
+                }
+            }
+        };
+    };
+    const adapter = makeAdapter();
+
+    const result = await adapter.verifyPayment('MONNIFY-23456789ABCDEFGH');
+
+    assert.equal(
+        requestedUrl,
+        'https://sandbox.monnify.com/api/v2/merchant/transactions/query?paymentReference=MONNIFY-23456789ABCDEFGH'
+    );
+    assert.equal(result.status, 'pending');
+    assert.equal(result.reference, 'MONNIFY-23456789ABCDEFGH');
 });

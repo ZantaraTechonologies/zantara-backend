@@ -606,7 +606,7 @@ async function runPaymentGatewayTests() {
                 return {
                     data: {
                         requestSuccessful: true,
-                        responseBody: { checkoutUrl: 'https://sandbox.monnify.com/pay', paymentReference: body.paymentReference }
+                        responseBody: { checkoutUrl: 'https://sandbox.sdk.monnify.com/pay', paymentReference: body.paymentReference }
                     }
                 };
             };
@@ -626,7 +626,7 @@ async function runPaymentGatewayTests() {
             require('axios').post = origPost;
 
             assert.strictEqual(res.success, true);
-            assert.strictEqual(res.authorizationUrl, 'https://sandbox.monnify.com/pay');
+            assert.strictEqual(res.authorizationUrl, 'https://sandbox.sdk.monnify.com/pay');
             assert.strictEqual('paymentMethods' in bodies[0], false, 'Unrestricted checkout must defer methods to Monnify merchant configuration');
             assert.deepStrictEqual(bodies[1].paymentMethods, ['CARD'], 'Explicitly restricted flows remain supported');
         });
