@@ -12,6 +12,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
         this.contractCode = this.metadata?.contractCode || process.env.MONNIFY_CONTRACT_CODE || '';
         this.cachedToken = null;
         this.tokenExpiry = null;
+        this.requiresVerifiedBankIdentity = true;
     }
 
     async getAccessToken() {
@@ -40,12 +41,75 @@ class MonnifyAdapter extends BasePaymentAdapter {
     }
 
     assertVirtualAccountCustomer(user) {
-        if (!user?.email && !user?.phone) {
-            const error = new Error('Email or phone is required for Monnify virtual-account provisioning');
+        const email = String(user?.email || '').trim();
+        const name = String(user?.name || '').trim();
+        if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
+            const error = new Error('A valid email address is required for Monnify virtual-account provisioning');
+            error.code = 'MONNIFY_CUSTOMER_DATA_INVALID';
+            throw error;
+        }
+        if (!name) {
+            const error = new Error('Customer name is required for Monnify virtual-account provisioning');
             error.code = 'MONNIFY_CUSTOMER_DATA_INVALID';
             throw error;
         }
         return true;
+    }
+
+    _verifiedIdentityFields(verifiedIdentity) {
+        const bvn = String(verifiedIdentity?.bvn || '').trim();
+        const nin = String(verifiedIdentity?.nin || '').trim();
+        if (
+            verifiedIdentity?.verified !== true
+            || (!/^\d{11}$/.test(bvn) && !/^\d{11}$/.test(nin))
+            || (bvn && !/^\d{11}$/.test(bvn))
+            || (nin && !/^\d{11}$/.test(nin))
+        ) {
+            const error = new Error('Verified BVN or NIN is required for Monnify virtual-account provisioning');
+            error.code = 'MONNIFY_IDENTITY_VERIFICATION_REQUIRED';
+            error.provisioningDisposition = 'definitive_rejection';
+            throw error;
+        }
+        return { ...(bvn ? { bvn } : {}), ...(nin ? { nin } : {}) };
+    }
+
+    _reservedAccountError(error, { stage, requestDispatched = false } = {}) {
+        const status = Number(error?.response?.status);
+        const providerBody = error?.response?.data || {};
+        const normalized = new Error(providerBody.responseMessage || error?.message || 'Monnify reserved-account request failed');
+        normalized.code = providerBody.responseCode
+            || error?.code
+            || (status === 404 ? 'MONNIFY_RESERVED_ACCOUNT_NOT_FOUND' : 'MONNIFY_RESERVED_ACCOUNT_REQUEST_FAILED');
+        normalized.providerHttpStatus = Number.isInteger(status) ? status : undefined;
+        normalized.providerResponseCode = providerBody.responseCode || undefined;
+        normalized.operationStage = stage;
+        normalized.requestDispatched = requestDispatched;
+        if (Number.isInteger(status)) normalized.response = { status };
+        return normalized;
+    }
+
+    _reservedAccountResult(body = {}) {
+        return {
+            status: true,
+            apiVersion: 'v2',
+            contractCode: String(body.contractCode || body.contract?.code || ''),
+            accountReference: String(body.accountReference || ''),
+            accountName: String(body.accountName || ''),
+            currencyCode: String(body.currencyCode || ''),
+            customerEmail: String(body.customerEmail || ''),
+            customerName: String(body.customerName || ''),
+            reservationReference: String(body.reservationReference || ''),
+            reservedAccountType: String(body.reservedAccountType || ''),
+            providerStatus: String(body.status || ''),
+            accounts: Array.isArray(body.accounts)
+                ? body.accounts.map(account => ({
+                    bankCode: String(account?.bankCode || ''),
+                    bankName: String(account?.bankName || ''),
+                    accountNumber: String(account?.accountNumber || ''),
+                    accountName: String(account?.accountName || body.accountName || '')
+                }))
+                : []
+        };
     }
 
     async initializePayment({ user, amount, channel, channels, reference, callbackUrl, metadata = {} }) {
@@ -100,9 +164,25 @@ class MonnifyAdapter extends BasePaymentAdapter {
         });
 
         if (response.data && response.data.requestSuccessful) {
+            const checkoutUrl = String(response.data.responseBody?.checkoutUrl || '').trim();
+            let trustedCheckout = false;
+            try {
+                const parsedCheckout = new URL(checkoutUrl);
+                const host = parsedCheckout.hostname.toLowerCase();
+                trustedCheckout = parsedCheckout.protocol === 'https:'
+                    && !parsedCheckout.username
+                    && !parsedCheckout.password
+                    && (!parsedCheckout.port || parsedCheckout.port === '443')
+                    && (host === 'monnify.com' || host.endsWith('.monnify.com'));
+            } catch (_) {}
+            if (!trustedCheckout) {
+                const error = new Error('Monnify returned an invalid hosted checkout URL');
+                error.code = 'MONNIFY_INITIALIZATION_RESPONSE_INVALID';
+                throw error;
+            }
             return {
                 success: true,
-                authorizationUrl: response.data.responseBody.checkoutUrl,
+                authorizationUrl: checkoutUrl,
                 reference: response.data.responseBody.paymentReference || reference,
                 raw: response.data.responseBody
             };
@@ -111,49 +191,87 @@ class MonnifyAdapter extends BasePaymentAdapter {
         throw this._definitiveInitializationError(response.data?.responseMessage || 'Monnify payment initialization failed');
     }
 
-    async createReservedAccount(user) {
+    async createReservedAccount({ user, accountReference, verifiedIdentity } = {}) {
         this.assertVirtualAccountCustomer(user);
-        const token = await this.getAccessToken();
-        const accountReference = `VIRTUAL_${user._id}`;
-        const response = await axios.post(
-            `${this.baseUrl}/api/v1/bank-transfer/reserved-accounts`,
-            {
-                accountReference,
-                accountName: user.name || 'Customer',
-                currencyCode: 'NGN',
-                contractCode: this.contractCode,
-                customerEmail: user.email || `${user.phone}@zantara.com`,
-                customerName: user.name || 'Customer',
-                getAllAvailableBanks: true,
-            },
-            { headers: { Authorization: `Bearer ${token}` }, timeout: 20000 }
-        );
-        if (!response.data?.requestSuccessful) {
-            throw new Error(response.data?.responseMessage || 'Monnify reserved account creation failed');
+        if (!/^VIRTUAL_[a-f\d]{24}$/i.test(String(accountReference || ''))) {
+            const error = new Error('A deterministic Monnify account reference is required');
+            error.code = 'MONNIFY_ACCOUNT_REFERENCE_INVALID';
+            error.provisioningDisposition = 'definitive_rejection';
+            throw error;
         }
-        return {
-            status: true,
-            accounts: response.data.responseBody?.accounts || [],
-            accountReference: response.data.responseBody?.accountReference,
-        };
+        if (!this.contractCode) {
+            const error = new Error('Monnify contract code is required for reserved-account provisioning');
+            error.code = 'MONNIFY_CONTRACT_CODE_REQUIRED';
+            error.provisioningDisposition = 'definitive_rejection';
+            throw error;
+        }
+        const identityFields = this._verifiedIdentityFields(verifiedIdentity);
+        let token;
+        try {
+            token = await this.getAccessToken();
+        } catch (error) {
+            error.operationStage = 'authentication';
+            error.requestDispatched = false;
+            throw error;
+        }
+        let response;
+        try {
+            response = await axios.post(
+                `${this.baseUrl}/api/v2/bank-transfer/reserved-accounts`,
+                {
+                    accountReference,
+                    accountName: user.name.trim(),
+                    currencyCode: 'NGN',
+                    contractCode: this.contractCode,
+                    customerEmail: user.email.trim(),
+                    customerName: user.name.trim(),
+                    ...identityFields,
+                    getAllAvailableBanks: true
+                },
+                { headers: { Authorization: `Bearer ${token}` }, timeout: 20000 }
+            );
+        } catch (error) {
+            throw this._reservedAccountError(error, { stage: 'create', requestDispatched: true });
+        }
+        if (!response.data?.requestSuccessful) {
+            throw this._reservedAccountError({
+                message: response.data?.responseMessage,
+                response: { status: 502, data: response.data }
+            }, { stage: 'create', requestDispatched: true });
+        }
+        return this._reservedAccountResult(response.data.responseBody);
     }
 
     async getReservedAccount(accountReference) {
         const token = await this.getAccessToken();
-        const response = await axios.get(
-            `${this.baseUrl}/api/v1/bank-transfer/reserved-accounts/${encodeURIComponent(accountReference)}`,
-            { headers: { Authorization: `Bearer ${token}` }, timeout: 20000 }
-        );
-        if (!response.data?.requestSuccessful) {
-            throw new Error(response.data?.responseMessage || 'Monnify reserved account lookup failed');
+        let response;
+        try {
+            response = await axios.get(
+                `${this.baseUrl}/api/v2/bank-transfer/reserved-accounts/${encodeURIComponent(accountReference)}`,
+                { headers: { Authorization: `Bearer ${token}` }, timeout: 20000 }
+            );
+        } catch (error) {
+            throw this._reservedAccountError(error, { stage: 'lookup' });
         }
-        const body = response.data.responseBody || {};
-        const accounts = Array.isArray(body.accounts)
-            ? body.accounts
-            : body.accountNumber
-                ? [{ bankCode: body.bankCode, bankName: body.bankName, accountNumber: body.accountNumber }]
-                : [];
-        return { status: true, accounts, accountReference: body.accountReference };
+        if (!response.data?.requestSuccessful) {
+            throw this._reservedAccountError({
+                message: response.data?.responseMessage,
+                response: { status: 502, data: response.data }
+            }, { stage: 'lookup' });
+        }
+        return this._reservedAccountResult(response.data.responseBody);
+    }
+
+    async verifyReservedAccountOwnership({ accountReference, accountNumber }) {
+        if (!accountReference || !accountNumber) return false;
+        const result = await this.getReservedAccount(accountReference);
+        return result?.accountReference === accountReference
+            && result?.contractCode === this.contractCode
+            && result?.currencyCode === 'NGN'
+            && result?.reservedAccountType === 'GENERAL'
+            && result?.providerStatus === 'ACTIVE'
+            && Array.isArray(result.accounts)
+            && result.accounts.some(account => String(account?.accountNumber || '') === String(accountNumber));
     }
 
     async verifyPayment(reference) {
@@ -263,7 +381,11 @@ class MonnifyAdapter extends BasePaymentAdapter {
         const data = payload?.eventData || {};
         const isSuccess = payload.eventType === 'SUCCESSFUL_TRANSACTION';
 
-        const accountRef = data.accountReference || data.destinationAccountReference;
+        const product = data.product || {};
+        const productReference = String(product.type || '').toUpperCase() === 'RESERVED_ACCOUNT'
+            ? product.reference
+            : null;
+        const accountRef = productReference || data.accountReference || data.destinationAccountReference;
         const virtualAccountReference = accountRef && accountRef.startsWith('VIRTUAL_') ? accountRef : null;
         const userId = virtualAccountReference
             ? virtualAccountReference.replace('VIRTUAL_', '')
@@ -275,6 +397,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
             || data.accountNumber
             || ''
         ).trim();
+        const destinationBankCode = String(destination.bankCode || data.destinationBankCode || '').trim();
         const fallbackEventId = crypto.createHash('sha256')
             .update(JSON.stringify(payload || {}))
             .digest('hex')
@@ -287,10 +410,11 @@ class MonnifyAdapter extends BasePaymentAdapter {
             reference: data.paymentReference || accountRef,
             providerTransactionId: String(data.transactionReference || ''),
             amount: Number(data.amountPaid || 0),
-            currency: (data.currencyCode || 'NGN').toUpperCase(),
+            currency: (data.currency || data.currencyCode || 'NGN').toUpperCase(),
             userId,
             virtualAccountReference,
             destinationAccountNumber,
+            destinationBankCode,
             metadata: data.metaData || {},
             raw: data
         };

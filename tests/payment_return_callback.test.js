@@ -147,16 +147,16 @@ async function runPaymentReturnCallbackTests() {
         assert.strictEqual(res.callbackUrl, 'http://localhost:5173/monnify/return');
     });
 
-    await test('6. /wallet/fund exposes callbackUrl + returnHost for the derived gateway', async () => {
-        const restore = stubAdapter('monnify');
+    await test('6. /wallet/fund ignores provider compatibility input and exposes the default callback', async () => {
+        const restore = stubAdapter('paystack');
         let json = null;
         const req = { body: { amount: 1000, channel: 'card', provider: 'monnify' }, user: { id: 'u1', email: 'a@z.ng' } };
         const res = { json: (d) => { json = d; return res; }, status: () => res };
         await fundWallet(req, res);
         restore();
 
-        assert.strictEqual(json.provider, 'monnify');
-        assert.strictEqual(json.callbackUrl, 'https://dahavtu.netlify.app/monnify/return');
+        assert.strictEqual(json.provider, 'paystack');
+        assert.strictEqual(json.callbackUrl, 'https://dahavtu.netlify.app/paystack/return');
         assert.strictEqual(json.returnHost, 'dahavtu.netlify.app');
     });
 

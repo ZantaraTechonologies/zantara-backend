@@ -88,6 +88,18 @@ const broadbandVerificationLimiter = rateLimit({
     legacyHeaders: false
 })
 
+const adminReauthenticationLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    message: {
+        success: false,
+        code: 'SUPERADMIN_REAUTHENTICATION_RATE_LIMITED',
+        message: 'Too many privileged confirmation attempts. Please try again later.'
+    },
+    standardHeaders: true,
+    legacyHeaders: false
+})
+
 module.exports = {
     loginLimiter,
     pinLimiter,
@@ -99,7 +111,8 @@ module.exports = {
     phoneOtpVerifyLimiter,
     emailOtpRequestLimiter,
     emailOtpVerifyLimiter,
-    broadbandVerificationLimiter
+    broadbandVerificationLimiter,
+    adminReauthenticationLimiter
 }
 // const rateLimit = require("express-rate-limit");
 

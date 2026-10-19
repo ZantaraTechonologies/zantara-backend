@@ -1,6 +1,7 @@
 'use strict'
 
 const mongoose = require('mongoose')
+const bcrypt = require('bcryptjs')
 const PaymentGateway = require('../models/PaymentGateway')
 const TransactionStatus = require('../models/TransactionStatus')
 const WebhookEvent = require('../models/WebhookEvent')
@@ -42,6 +43,11 @@ const queryWithSession = (query, session) =>
 
 const mutationMatched = result =>
   Number(result?.matchedCount ?? result?.n ?? 0) === 1
+
+const MONNIFY_SANDBOX_BASE_URL = 'https://sandbox.monnify.com'
+const MONNIFY_REPLACEMENT_CONFIRMATION = 'replace-monnify-merchant'
+const MONNIFY_CHECKOUT_VALIDATED_MESSAGE =
+  'Monnify sandbox hosted checkout initialized successfully'
 
 async function loadGatewayForMutation (id, session) {
   let query = PaymentGateway.findById(id)
@@ -94,6 +100,33 @@ function validateGatewayUpdatePlan (gateway, changePlan, body) {
         success: false,
         code: 'PAYMENT_GATEWAY_ENVIRONMENT_INVALID',
         message: "Environment must be 'test' or 'live'"
+      }
+    }
+  }
+  if (
+    changePlan.currentAdapter === 'monnify' &&
+    changePlan.metadataChanges.includes('administrativeSandboxOnly')
+  ) {
+    return {
+      status: 409,
+      body: {
+        success: false,
+        code: 'MONNIFY_SANDBOX_ISOLATION_IMMUTABLE',
+        message: 'Monnify administrative sandbox isolation cannot be changed through ordinary gateway updates.'
+      }
+    }
+  }
+  if (
+    changePlan.currentAdapter === 'monnify' &&
+    changePlan.verificationChanges.length > 0 &&
+    nextStatus === 'active'
+  ) {
+    return {
+      status: 409,
+      body: {
+        success: false,
+        code: 'MONNIFY_CONFIGURATION_REQUIRES_INACTIVE',
+        message: 'Deactivate Monnify before changing its verification configuration.'
       }
     }
   }
@@ -175,6 +208,27 @@ function validateGatewayUpdatePlan (gateway, changePlan, body) {
       }
     }
   }
+  if (
+    changePlan.currentAdapter === 'monnify' &&
+    gateway.status !== 'active' &&
+    nextStatus === 'active' &&
+    changePlan.next.environment === 'test' &&
+    (
+      changePlan.verificationChanges.length > 0 ||
+      gateway.lastHealthCheck?.status !== 'online' ||
+      gateway.lastHealthCheck?.message !== MONNIFY_CHECKOUT_VALIDATED_MESSAGE
+    )
+  ) {
+    return {
+      status: 409,
+      body: {
+        success: false,
+        code: 'MONNIFY_SANDBOX_CHECKOUT_VALIDATION_REQUIRED',
+        message:
+          'Initialize a successful SuperAdmin Monnify sandbox checkout before activating this gateway.'
+      }
+    }
+  }
   return null
 }
 
@@ -190,32 +244,280 @@ function virtualAccountReferenceFilter (gateway) {
       }
     }
   }
-  if (String(gateway.code || '').toLowerCase() === 'monnify') {
-    return {
-      $or: [
-        { virtualAccounts: { $elemMatch: { provider: 'monnify' } } },
-        {
-          virtualAccounts: {
-            $elemMatch: {
-              provider: { $exists: false },
-              accountNumber: { $exists: true }
-            }
+  if (adapterType === 'monnify') {
+    const ownedScopes = [
+      {
+        virtualAccounts: {
+          $elemMatch: {
+            provider: 'monnify',
+            gatewayId: String(gateway._id)
           }
         }
-      ]
-    }
-  }
-  if (adapterType === 'monnify') {
-    return {
-      virtualAccounts: {
-        $elemMatch: {
-          provider: 'monnify',
-          gatewayId: String(gateway._id)
-        }
       }
+    ]
+    if (String(gateway.code || '').toLowerCase() === 'monnify') {
+      ownedScopes.push({
+        virtualAccounts: {
+          $elemMatch: {
+            provider: 'monnify',
+            gatewayId: { $in: [null, ''] }
+          }
+        }
+      })
+    }
+    return {
+      $or: ownedScopes
     }
   }
   return null
+}
+
+function appendWebhookVerificationSnapshot (gateway, snapshot) {
+  gateway.webhookVerificationSnapshots = [
+    ...(Array.isArray(gateway.webhookVerificationSnapshots)
+      ? gateway.webhookVerificationSnapshots
+      : []),
+    snapshot
+  ]
+  gateway.markModified('webhookVerificationSnapshots')
+}
+
+function retainedMonnifySigningSecrets (gateway) {
+  return [
+    paymentGatewayService._snapshotGatewayConfig(gateway),
+    ...(Array.isArray(gateway.webhookVerificationSnapshots)
+      ? gateway.webhookVerificationSnapshots
+      : [])
+  ].map(snapshot => {
+    const hydrated = paymentGatewayService._hydrateGatewayCredentials(snapshot)
+    return String(hydrated.webhookSecret || hydrated.secretKey || '')
+  }).filter(Boolean)
+}
+
+function monnifyWebhookVerificationChanged (gateway, changePlan, body) {
+  if (changePlan.currentAdapter !== 'monnify') return false
+  const current = paymentGatewayService._hydrateGatewayCredentials(
+    paymentGatewayService._snapshotGatewayConfig(gateway)
+  )
+  const nextSecret = changePlan.changes.secretKey
+    ? String(body.secretKey || '').trim()
+    : current.secretKey
+  const nextWebhook = changePlan.changes.webhookSecret
+    ? String(body.webhookSecret || '').trim()
+    : current.webhookSecret
+  return String(current.webhookSecret || current.secretKey || '') !==
+    String(nextWebhook || nextSecret || '')
+}
+
+async function loadMonnifyAccountProbe (gateway, session) {
+  let query = User.findOne(virtualAccountReferenceFilter(gateway))
+  if (typeof query?.select === 'function') query = query.select('virtualAccounts')
+  const user = await queryWithSession(query, session)
+  const gatewayId = String(gateway._id)
+  return (user?.virtualAccounts || []).find(account => {
+    const accountGatewayId = String(account.gatewayId || '')
+    return String(account.provider || '').toLowerCase() === 'monnify' &&
+      (accountGatewayId === gatewayId ||
+        (!accountGatewayId && String(gateway.code || '').toLowerCase() === 'monnify')) &&
+      !!account.accountReference &&
+      !!account.accountNumber
+  }) || null
+}
+
+async function verifyMonnifyCredentialIdentity (gateway, changePlan, body, session) {
+  const probe = await loadMonnifyAccountProbe(gateway, session)
+  if (!probe) return false
+  const current = paymentGatewayService._hydrateGatewayCredentials(
+    paymentGatewayService._snapshotGatewayConfig(gateway)
+  )
+  const candidate = {
+    ...current,
+    _id: gateway._id,
+    publicKey: changePlan.next.publicKey,
+    secretKey: changePlan.changes.secretKey
+      ? String(body.secretKey || '').trim()
+      : current.secretKey,
+    webhookSecret: changePlan.changes.webhookSecret
+      ? String(body.webhookSecret || '').trim()
+      : current.webhookSecret,
+    baseUrl: changePlan.next.baseUrl,
+    environment: changePlan.next.environment,
+    metadata: changePlan.next.metadata
+  }
+  try {
+    const adapter = paymentGatewayService.getAdapterInstance(candidate)
+    return await adapter.verifyReservedAccountOwnership({
+      accountReference: probe.accountReference,
+      accountNumber: probe.accountNumber
+    })
+  } catch (_) {
+    return false
+  }
+}
+
+async function reauthenticateSuperAdmin (req) {
+  const currentPassword = String(req.body?.currentPassword || '')
+  if (!currentPassword) {
+    const error = new Error('Current password is required.')
+    error.code = 'SUPERADMIN_REAUTHENTICATION_REQUIRED'
+    error.statusCode = 400
+    throw error
+  }
+  if (currentPassword.length > 1024) {
+    const error = new Error('Current password is invalid.')
+    error.code = 'SUPERADMIN_REAUTHENTICATION_FAILED'
+    error.statusCode = 403
+    throw error
+  }
+
+  const adminId = req.user?._id || req.user?.id
+  const admin = await User.findById(adminId).select(
+    '+password status role roles name email phone'
+  )
+  const roles = [admin?.role, ...(Array.isArray(admin?.roles) ? admin.roles : [])]
+  if (!admin || !admin.status || !roles.includes('superAdmin')) {
+    const error = new Error('SuperAdmin account is unavailable.')
+    error.code = 'SUPERADMIN_REAUTHENTICATION_FAILED'
+    error.statusCode = 403
+    throw error
+  }
+  if (!admin.password || !(await bcrypt.compare(currentPassword, admin.password))) {
+    const error = new Error('Current password is incorrect.')
+    error.code = 'SUPERADMIN_REAUTHENTICATION_FAILED'
+    error.statusCode = 403
+    throw error
+  }
+  return admin
+}
+
+function monnifyAccountsOwnedByGateway (user, gateway) {
+  const gatewayId = String(gateway._id)
+  const canonicalGateway = String(gateway.code || '').toLowerCase() === 'monnify'
+  return (user?.virtualAccounts || []).filter(account => {
+    const accountGatewayId = String(account.gatewayId || '')
+    return String(account.provider || '').toLowerCase() === 'monnify' &&
+      (accountGatewayId === gatewayId || (!accountGatewayId && canonicalGateway))
+  })
+}
+
+function snapshotForReference (user, accountReference) {
+  const snapshots = user?.virtualAccountGatewaySnapshots
+  return snapshots instanceof Map
+    ? snapshots.get(accountReference)
+    : snapshots?.[accountReference]
+}
+
+function assertHistoricalMonnifySnapshot (snapshot, gateway) {
+  const hydrated = paymentGatewayService._hydrateGatewayCredentials(snapshot)
+  const signingSecret = hydrated?.webhookSecret || hydrated?.secretKey
+  if (!hydrated || !signingSecret || isEncrypted(signingSecret)) {
+    const error = new Error(
+      'The previous Monnify webhook verification credentials are unavailable.'
+    )
+    error.code = 'PAYMENT_GATEWAY_WEBHOOK_HISTORY_UNAVAILABLE'
+    error.statusCode = 409
+    throw error
+  }
+  if (
+    String(hydrated.gatewayId || hydrated._id || '') !== String(gateway._id) ||
+    String(hydrated.code || '').toLowerCase() !== 'monnify' ||
+    String(hydrated.adapterType || '').toLowerCase() !== 'monnify'
+  ) {
+    const error = new Error(
+      'A stored reserved-account snapshot does not belong to this Monnify gateway.'
+    )
+    error.code = 'MONNIFY_RESERVED_ACCOUNT_SNAPSHOT_MISMATCH'
+    error.statusCode = 409
+    throw error
+  }
+}
+
+async function archiveMonnifyReservedAccountContexts (gateway, snapshot, session) {
+  let query = User.find(virtualAccountReferenceFilter(gateway))
+  if (typeof query?.select === 'function') {
+    query = query.select('+virtualAccountGatewaySnapshots')
+  }
+  const users = await queryWithSession(query, session)
+  let archivedAccounts = 0
+
+  for (const user of users || []) {
+    const references = new Set()
+    for (const account of monnifyAccountsOwnedByGateway(user, gateway)) {
+      if (!account.accountNumber) {
+        if (
+          account.provisioningStatus !== 'failed' ||
+          account.provisioningFailureDisposition !== 'definitive_rejection'
+        ) {
+          const error = new Error(
+            'An incomplete Monnify reserved-account operation must be reconciled before merchant replacement.'
+          )
+          error.code = 'MONNIFY_RESERVED_ACCOUNT_RECONCILIATION_REQUIRED'
+          error.statusCode = 409
+          throw error
+        }
+        continue
+      }
+      const accountReference = String(account.accountReference || '')
+      if (
+        !/^VIRTUAL_[a-f\d]{24}$/i.test(accountReference) ||
+        account.provisioningStatus !== 'active' ||
+        account.active !== true ||
+        account.assigned !== true ||
+        String(account.currency || '').toUpperCase() !== 'NGN'
+      ) {
+        const error = new Error(
+          'A Monnify reserved account is not safely routable and must be reconciled before merchant replacement.'
+        )
+        error.code = 'MONNIFY_RESERVED_ACCOUNT_SNAPSHOT_UNAVAILABLE'
+        error.statusCode = 409
+        throw error
+      }
+      references.add(accountReference)
+    }
+
+    for (const accountReference of references) {
+      const existing = snapshotForReference(user, accountReference)
+      if (existing) {
+        assertHistoricalMonnifySnapshot(existing, gateway)
+        continue
+      }
+      const result = await User.updateOne(
+        {
+          _id: user._id,
+          virtualAccounts: {
+            $elemMatch: {
+              provider: 'monnify',
+              accountReference,
+              accountNumber: { $exists: true, $ne: '' },
+              $or: [
+                { gatewayId: String(gateway._id) },
+                { gatewayId: { $exists: false } },
+                { gatewayId: null },
+                { gatewayId: '' }
+              ]
+            }
+          }
+        },
+        {
+          $set: {
+            [`virtualAccountGatewaySnapshots.${accountReference}`]: snapshot
+          }
+        },
+        { session }
+      )
+      if (!mutationMatched(result)) {
+        const error = new Error(
+          'A reserved-account owner changed concurrently. Please retry.'
+        )
+        error.code = 'MONNIFY_RESERVED_ACCOUNT_SNAPSHOT_CONFLICT'
+        error.statusCode = 409
+        throw error
+      }
+      archivedAccounts++
+    }
+  }
+
+  return { users: (users || []).length, archivedAccounts }
 }
 
 /**
@@ -254,7 +556,7 @@ const getAllGateways = async (req, res) => {
 const getGatewayById = async (req, res) => {
   try {
     const { id } = req.params
-    const gateway = await PaymentGateway.findById(id)
+    const gateway = await loadGatewayForMutation(id, null)
     if (!gateway) {
       return res
         .status(404)
@@ -519,6 +821,17 @@ const updateGateway = async (req, res) => {
     } = req.body
 
     let changePlan = buildGatewayChangePlan(gateway, req.body)
+    if (
+      changePlan.currentAdapter === 'monnify' &&
+      gateway.status !== 'active' &&
+      req.body.status === 'active'
+    ) {
+      return res.status(409).json({
+        success: false,
+        code: 'MONNIFY_ACTIVATION_REQUIRES_STATUS_ENDPOINT',
+        message: 'Activate Monnify through the dedicated status action after sandbox checkout validation.'
+      })
+    }
     let validation = validateGatewayUpdatePlan(gateway, changePlan, req.body)
     if (validation) return res.status(validation.status).json(validation.body)
 
@@ -552,6 +865,7 @@ const updateGateway = async (req, res) => {
     }
 
     let isSecretRotated = false
+    let isPublicKeyRotated = false
     let isWebhookRotated = false
     let isEnvChanged = false
     let isStatusChanged = false
@@ -667,32 +981,85 @@ const updateGateway = async (req, res) => {
             'Paystack API settings cannot change for existing DVA users while retaining the same webhook signing secret.'
         })
       }
-      gateway.webhookVerificationSnapshots = [
-        ...(Array.isArray(gateway.webhookVerificationSnapshots)
-          ? gateway.webhookVerificationSnapshots
-          : []),
-        snapshot
-      ]
-      gateway.markModified('webhookVerificationSnapshots')
+      appendWebhookVerificationSnapshot(gateway, snapshot)
     }
 
-    const virtualAccountConfigChanged =
+    const monnifyAccountRoutingChanged =
       currentAdapter === 'monnify' &&
       (changePlan.changes.baseUrl ||
-        changePlan.changes.publicKey ||
         changePlan.changes.environment ||
-        changePlan.changes.metadata)
-    if (virtualAccountConfigChanged) {
-      const virtualAccountUsers = await queryWithSession(
-        User.countDocuments(virtualAccountReferenceFilter(gateway)),
+        changePlan.metadataChanges.includes('contractCode'))
+    const monnifyCredentialsChanged =
+      currentAdapter === 'monnify' &&
+      (changePlan.changes.publicKey || changePlan.changes.secretKey)
+    const monnifyMerchantBindingChanged =
+      currentAdapter === 'monnify' &&
+      (monnifyCredentialsChanged ||
+        monnifyAccountRoutingChanged)
+    let monnifyVirtualAccountUsers = 0
+    if (monnifyAccountRoutingChanged || monnifyCredentialsChanged) {
+      const referenceFilter = virtualAccountReferenceFilter(gateway)
+      monnifyVirtualAccountUsers = referenceFilter
+        ? await queryWithSession(
+            User.countDocuments(referenceFilter),
+            mutationSession
+          )
+        : 0
+    }
+    if (monnifyMerchantBindingChanged && monnifyVirtualAccountUsers === 0) {
+      return res.status(409).json({
+        success: false,
+        code: 'MONNIFY_MERCHANT_REPLACEMENT_REQUIRED',
+        message:
+          'Monnify merchant identity can only be changed through the reauthenticated merchant replacement workflow.'
+      })
+    }
+    if (monnifyAccountRoutingChanged && monnifyVirtualAccountUsers > 0) {
+      return res.status(409).json({
+        success: false,
+        code: 'MONNIFY_RESERVED_ACCOUNT_ROUTING_LOCKED',
+        message: `Cannot change Monnify account routing while ${monnifyVirtualAccountUsers} user(s) have reserved accounts.`,
+        details: {
+          effectiveChanges: changePlan.effectiveChanges,
+          routingChanges: [
+            ...(changePlan.changes.baseUrl ? ['baseUrl'] : []),
+            ...(changePlan.changes.environment ? ['environment'] : []),
+            ...(changePlan.metadataChanges.includes('contractCode')
+              ? ['metadata.contractCode']
+              : [])
+          ]
+        }
+      })
+    }
+    if (monnifyCredentialsChanged && monnifyVirtualAccountUsers > 0) {
+      const identityVerified = await verifyMonnifyCredentialIdentity(
+        gateway,
+        changePlan,
+        req.body,
         mutationSession
       )
-      if (virtualAccountUsers > 0) {
+      if (!identityVerified) {
         return res.status(409).json({
           success: false,
-          message: `Cannot change Monnify account routing while ${virtualAccountUsers} user(s) have reserved accounts.`
+          code: 'MONNIFY_CREDENTIAL_IDENTITY_UNVERIFIED',
+          message:
+            'The new Monnify credentials could not verify ownership of an existing reserved account. No credentials were changed.'
         })
       }
+    }
+
+    if (monnifyWebhookVerificationChanged(gateway, changePlan, req.body)) {
+      const snapshot = paymentGatewayService._snapshotGatewayConfig(gateway)
+      const hydratedSnapshot = paymentGatewayService._hydrateGatewayCredentials(snapshot)
+      if (!hydratedSnapshot.webhookSecret && !hydratedSnapshot.secretKey) {
+        return res.status(409).json({
+          success: false,
+          code: 'PAYMENT_GATEWAY_WEBHOOK_HISTORY_UNAVAILABLE',
+          message:
+            'Cannot rotate Monnify webhook verification because the previous signing secret is unavailable.'
+        })
+      }
+      appendWebhookVerificationSnapshot(gateway, snapshot)
     }
 
     if (name && name.trim() !== '') gateway.name = name.trim()
@@ -709,7 +1076,10 @@ const updateGateway = async (req, res) => {
     }
 
     if (baseUrl !== undefined) gateway.baseUrl = changePlan.next.baseUrl
-    if (publicKey !== undefined) gateway.publicKey = changePlan.next.publicKey
+    if (publicKey !== undefined) {
+      gateway.publicKey = changePlan.next.publicKey
+      isPublicKeyRotated = changePlan.changes.publicKey
+    }
     if (
       priority !== undefined &&
       priority !== null &&
@@ -782,6 +1152,14 @@ const updateGateway = async (req, res) => {
       isEnvChanged = true
     }
 
+    if (currentAdapter === 'monnify' && changePlan.verificationChanges.length > 0) {
+      gateway.lastHealthCheck = {
+        status: 'unknown',
+        checkedAt: new Date(),
+        message: 'Monnify hosted checkout validation is required after configuration changes'
+      }
+    }
+
     // Status Management
     if (status && status !== gateway.status) {
       if (!['active', 'inactive', 'maintenance'].includes(status)) {
@@ -826,7 +1204,7 @@ const updateGateway = async (req, res) => {
     const adminId = req.user?._id || req.user?.id
     const operatorName = req.user?.name || req.user?.email || 'SuperAdmin'
 
-    if (isSecretRotated || isWebhookRotated) {
+    if (isPublicKeyRotated || isSecretRotated || isWebhookRotated) {
       await logAction(
         adminId,
         operatorName,
@@ -835,6 +1213,7 @@ const updateGateway = async (req, res) => {
         {
           gatewayId: gateway._id,
           name: gateway.name,
+          publicKeyUpdated: isPublicKeyRotated,
           secretKeyUpdated: isSecretRotated,
           webhookSecretUpdated: isWebhookRotated
         },
@@ -938,7 +1317,7 @@ const updateGatewayStatus = async (req, res) => {
       })
     }
 
-    const gateway = await PaymentGateway.findById(id)
+    const gateway = await loadGatewayForMutation(id, null)
     if (!gateway) {
       return res
         .status(404)
@@ -950,13 +1329,46 @@ const updateGatewayStatus = async (req, res) => {
     if (validation) return res.status(validation.status).json(validation.body)
 
     const oldStatus = gateway.status
-    gateway.status = status
-
-    if (status !== 'active' && gateway.isDefault) {
-      gateway.isDefault = false
+    const isMonnifySandboxActivation =
+      String(gateway.adapterType || '').toLowerCase() === 'monnify' &&
+      gateway.environment === 'test' &&
+      oldStatus !== 'active' &&
+      status === 'active'
+    if (isMonnifySandboxActivation) {
+      const version = Number(gateway.virtualAccountMutationVersion || 0)
+      const activated = await PaymentGateway.updateOne(
+        {
+          _id: gateway._id,
+          status: oldStatus,
+          environment: 'test',
+          'lastHealthCheck.status': 'online',
+          'lastHealthCheck.message': MONNIFY_CHECKOUT_VALIDATED_MESSAGE,
+          ...(version === 0
+            ? {
+                $or: [
+                  { virtualAccountMutationVersion: 0 },
+                  { virtualAccountMutationVersion: { $exists: false } }
+                ]
+              }
+            : { virtualAccountMutationVersion: version })
+        },
+        { $set: { status: 'active' } }
+      )
+      if (!mutationMatched(activated)) {
+        return res.status(409).json({
+          success: false,
+          code: 'MONNIFY_SANDBOX_CHECKOUT_VALIDATION_REQUIRED',
+          message: 'The validated Monnify configuration changed before activation. Initialize another sandbox checkout.'
+        })
+      }
+      gateway.status = 'active'
+    } else {
+      gateway.status = status
+      if (status !== 'active' && gateway.isDefault) {
+        gateway.isDefault = false
+      }
+      await gateway.save()
     }
-
-    await gateway.save()
 
     const adminId = req.user?._id || req.user?.id
     const operatorName = req.user?.name || req.user?.email || 'SuperAdmin'
@@ -1036,7 +1448,7 @@ const setDefaultGateway = async (req, res) => {
 const testGatewayConnection = async (req, res) => {
   try {
     const { id } = req.params
-    const gateway = await PaymentGateway.findById(id)
+    const gateway = await loadGatewayForMutation(id, null)
     if (!gateway) {
       return res
         .status(404)
@@ -1057,14 +1469,51 @@ const testGatewayConnection = async (req, res) => {
       }
     }
 
-    gateway.lastHealthCheck = {
+    const preserveCheckoutValidation =
+      result.success &&
+      String(gateway.adapterType || '').toLowerCase() === 'monnify' &&
+      gateway.environment === 'test' &&
+      gateway.lastHealthCheck?.status === 'online' &&
+      gateway.lastHealthCheck?.message === MONNIFY_CHECKOUT_VALIDATED_MESSAGE
+    const nextHealthCheck = {
       status: result.success ? 'online' : 'offline',
       checkedAt: new Date(),
-      message:
-        result.message ||
-        (result.success ? 'Connection successful' : 'Connection failed')
+      message: preserveCheckoutValidation
+        ? MONNIFY_CHECKOUT_VALIDATED_MESSAGE
+        : result.message ||
+          (result.success ? 'Connection successful' : 'Connection failed')
     }
-    await gateway.save()
+    if (preserveCheckoutValidation) {
+      const version = Number(gateway.virtualAccountMutationVersion || 0)
+      const preserved = await PaymentGateway.updateOne(
+        {
+          _id: gateway._id,
+          environment: 'test',
+          'lastHealthCheck.status': 'online',
+          'lastHealthCheck.message': MONNIFY_CHECKOUT_VALIDATED_MESSAGE,
+          ...(version === 0
+            ? {
+                $or: [
+                  { virtualAccountMutationVersion: 0 },
+                  { virtualAccountMutationVersion: { $exists: false } }
+                ]
+              }
+            : { virtualAccountMutationVersion: version })
+        },
+        { $set: { lastHealthCheck: nextHealthCheck } }
+      )
+      if (!mutationMatched(preserved)) {
+        return res.status(409).json({
+          success: false,
+          code: 'PAYMENT_GATEWAY_CONFIGURATION_CHANGED',
+          message: 'The gateway configuration changed during connection testing. Retry against the current configuration.'
+        })
+      }
+      gateway.lastHealthCheck = nextHealthCheck
+    } else {
+      gateway.lastHealthCheck = nextHealthCheck
+      await gateway.save()
+    }
 
     const adminId = req.user?._id || req.user?.id
     const operatorName = req.user?.name || req.user?.email || 'SuperAdmin'
@@ -1089,6 +1538,423 @@ const testGatewayConnection = async (req, res) => {
     })
   } catch (error) {
     res.status(500).json({ success: false, message: error.message })
+  }
+}
+
+/**
+ * POST /api/admin/payment-gateways/:id/replace-monnify-merchant
+ * Rebinds the canonical Monnify gateway to a new sandbox merchant only after
+ * reauthentication, candidate authentication, and historical-account archival.
+ */
+const replaceMonnifyMerchant = async (req, res) => {
+  let mutationSession = null
+  let mutationFinished = false
+  try {
+    const { id } = req.params
+    const publicKey = String(req.body?.publicKey || '').trim()
+    const secretKey = String(req.body?.secretKey || '').trim()
+    const webhookSecret = String(req.body?.webhookSecret || '').trim() || secretKey
+    const contractCode = String(req.body?.contractCode || '').trim()
+
+    if (req.body?.confirmation !== MONNIFY_REPLACEMENT_CONFIRMATION) {
+      return res.status(409).json({
+        success: false,
+        code: 'MONNIFY_MERCHANT_REPLACEMENT_CONFIRMATION_REQUIRED',
+        message: 'Explicit Monnify merchant replacement confirmation is required.',
+        details: { requiredConfirmation: MONNIFY_REPLACEMENT_CONFIRMATION }
+      })
+    }
+    if (
+      !publicKey || !secretKey || !contractCode ||
+      [publicKey, secretKey, webhookSecret].some(value => isEncrypted(value)) ||
+      publicKey.length > 500 || secretKey.length > 500 ||
+      webhookSecret.length > 500 || contractCode.length > 100
+    ) {
+      return res.status(400).json({
+        success: false,
+        code: 'MONNIFY_MERCHANT_CONFIGURATION_INVALID',
+        message: 'New Monnify API key, secret key, and contract code are required.'
+      })
+    }
+
+    const admin = await reauthenticateSuperAdmin(req)
+    let gateway = await loadGatewayForMutation(id, null)
+    if (!gateway) {
+      return res.status(404).json({ success: false, message: 'Payment gateway not found' })
+    }
+    if (
+      String(gateway.code || '').toLowerCase() !== 'monnify' ||
+      String(gateway.adapterType || '').toLowerCase() !== 'monnify'
+    ) {
+      return res.status(409).json({
+        success: false,
+        code: 'MONNIFY_MERCHANT_REPLACEMENT_GATEWAY_INVALID',
+        message: 'Merchant replacement is only available for the canonical Monnify gateway.'
+      })
+    }
+    if (gateway.isDefault) {
+      return res.status(409).json({
+        success: false,
+        code: 'MONNIFY_MERCHANT_REPLACEMENT_DEFAULT_LOCKED',
+        message: 'Monnify cannot be replaced while it is the platform default gateway.'
+      })
+    }
+    if (gateway.status !== 'inactive') {
+      return res.status(409).json({
+        success: false,
+        code: 'MONNIFY_MERCHANT_REPLACEMENT_REQUIRES_INACTIVE',
+        message: 'Deactivate Monnify and allow in-flight payments to drain before replacing its merchant.'
+      })
+    }
+
+    if (retainedMonnifySigningSecrets(gateway).includes(webhookSecret)) {
+      return res.status(409).json({
+        success: false,
+        code: 'MONNIFY_WEBHOOK_SECRET_REUSE_FORBIDDEN',
+        message: 'The replacement merchant must use a webhook secret distinct from every retained Monnify verification context.'
+      })
+    }
+
+    const unresolvedFilter = {
+      provider: gateway.code,
+      status: {
+        $in: ['pending', 'processing', 'settlement_pending', 'reconciliation_required']
+      }
+    }
+    const unresolvedPayments = await TransactionStatus.countDocuments(unresolvedFilter)
+    if (unresolvedPayments > 0) {
+      return res.status(409).json({
+        success: false,
+        code: 'PAYMENT_GATEWAY_UNRESOLVED_TRANSACTIONS',
+        message: `Cannot replace the Monnify merchant while ${unresolvedPayments} payment(s) remain unresolved.`,
+        details: { unresolvedTransactions: unresolvedPayments }
+      })
+    }
+
+    const currentMetadata = gateway.metadata instanceof Map
+      ? Object.fromEntries(gateway.metadata)
+      : { ...(gateway.metadata || {}) }
+    const candidate = {
+      ...paymentGatewayService._hydrateGatewayCredentials(
+        paymentGatewayService._snapshotGatewayConfig(gateway)
+      ),
+      _id: gateway._id,
+      gatewayId: String(gateway._id),
+      code: 'monnify',
+      adapterType: 'monnify',
+      status: 'inactive',
+      environment: 'test',
+      publicKey,
+      secretKey,
+      webhookSecret,
+      baseUrl: MONNIFY_SANDBOX_BASE_URL,
+      metadata: { ...currentMetadata, contractCode }
+    }
+    const connection = await paymentGatewayService
+      .getAdapterInstance(candidate)
+      .testConnection()
+    if (!connection?.success) {
+      return res.status(422).json({
+        success: false,
+        code: 'MONNIFY_MERCHANT_VALIDATION_FAILED',
+        message: 'The new Monnify sandbox credentials could not be authenticated. No configuration was changed.'
+      })
+    }
+
+    mutationSession = await mongoose.startSession()
+    mutationSession.startTransaction()
+    gateway = await loadGatewayForMutation(id, mutationSession)
+    if (!gateway) {
+      return res.status(404).json({ success: false, message: 'Payment gateway not found' })
+    }
+    if (
+      String(gateway.code || '').toLowerCase() !== 'monnify' ||
+      String(gateway.adapterType || '').toLowerCase() !== 'monnify' ||
+      gateway.isDefault ||
+      gateway.status !== 'inactive'
+    ) {
+      return res.status(409).json({
+        success: false,
+        code: 'MONNIFY_MERCHANT_REPLACEMENT_CONFLICT',
+        message: 'The Monnify gateway changed while replacement was being validated. Please retry.'
+      })
+    }
+    if (retainedMonnifySigningSecrets(gateway).includes(webhookSecret)) {
+      return res.status(409).json({
+        success: false,
+        code: 'MONNIFY_WEBHOOK_SECRET_REUSE_FORBIDDEN',
+        message: 'The replacement merchant must use a webhook secret distinct from every retained Monnify verification context.'
+      })
+    }
+    const refreshedMetadata = gateway.metadata instanceof Map
+      ? Object.fromEntries(gateway.metadata)
+      : { ...(gateway.metadata || {}) }
+    const unresolvedAfterValidation = await queryWithSession(
+      TransactionStatus.countDocuments(unresolvedFilter),
+      mutationSession
+    )
+    if (unresolvedAfterValidation > 0) {
+      return res.status(409).json({
+        success: false,
+        code: 'PAYMENT_GATEWAY_UNRESOLVED_TRANSACTIONS',
+        message: `Cannot replace the Monnify merchant while ${unresolvedAfterValidation} payment(s) remain unresolved.`
+      })
+    }
+
+    const previousVersion = Number(gateway.virtualAccountMutationVersion || 0)
+    const versionFilter = {
+      _id: id,
+      ...(previousVersion === 0
+        ? {
+            $or: [
+              { virtualAccountMutationVersion: 0 },
+              { virtualAccountMutationVersion: { $exists: false } }
+            ]
+          }
+        : { virtualAccountMutationVersion: previousVersion })
+    }
+    const fence = await PaymentGateway.updateOne(
+      versionFilter,
+      { $inc: { virtualAccountMutationVersion: 1 } },
+      { session: mutationSession }
+    )
+    if (!mutationMatched(fence)) {
+      return res.status(409).json({
+        success: false,
+        code: 'MONNIFY_MERCHANT_REPLACEMENT_CONFLICT',
+        message: 'The Monnify gateway changed concurrently. Please retry.'
+      })
+    }
+
+    const previousSnapshot = paymentGatewayService._snapshotGatewayConfig(gateway)
+    assertHistoricalMonnifySnapshot(previousSnapshot, gateway)
+    const archived = await archiveMonnifyReservedAccountContexts(
+      gateway,
+      previousSnapshot,
+      mutationSession
+    )
+    appendWebhookVerificationSnapshot(gateway, previousSnapshot)
+
+    gateway.publicKey = publicKey
+    gateway.secretKey = encryptSecret(secretKey)
+    gateway.webhookSecret = encryptSecret(webhookSecret)
+    gateway.baseUrl = MONNIFY_SANDBOX_BASE_URL
+    gateway.environment = 'test'
+    gateway.metadata = {
+      ...refreshedMetadata,
+      contractCode,
+      administrativeSandboxOnly: true
+    }
+    gateway.markModified('metadata')
+    gateway.status = 'inactive'
+    gateway.virtualAccountMutationVersion = previousVersion + 1
+    gateway.lastHealthCheck = {
+      status: 'online',
+      checkedAt: new Date(),
+      message: 'Candidate Monnify sandbox credentials authenticated; hosted checkout validation required'
+    }
+    await gateway.save({ session: mutationSession })
+    await mutationSession.commitTransaction()
+    mutationFinished = true
+
+    const adminId = req.user?._id || req.user?.id
+    const operatorName = admin.name || req.user?.name || 'SuperAdmin'
+    await logAction(
+      adminId,
+      operatorName,
+      'MONNIFY_MERCHANT_REPLACED',
+      `Gateway: ${gateway.name}`,
+      {
+        gatewayId: gateway._id,
+        code: gateway.code,
+        environment: gateway.environment,
+        status: gateway.status,
+        previousReservedAccountUsers: archived.users,
+        newlyArchivedReservedAccounts: archived.archivedAccounts,
+        defaultGatewayChanged: false
+      },
+      'success',
+      req
+    )
+
+    return res.json({
+      success: true,
+      data: sanitizePaymentGateway(gateway),
+      diagnostics: {
+        candidateAuthenticated: true,
+        historicalReservedAccountUsers: archived.users,
+        newlyArchivedReservedAccounts: archived.archivedAccounts,
+        defaultGatewayChanged: false
+      }
+    })
+  } catch (error) {
+    if (mutationSession && !mutationFinished) {
+      try {
+        await mutationSession.abortTransaction()
+      } catch (_) {}
+      mutationFinished = true
+    }
+    return res.status(error.statusCode || 400).json({
+      success: false,
+      ...(error.code ? { code: error.code } : {}),
+      message: error.message
+    })
+  } finally {
+    if (mutationSession) {
+      if (!mutationFinished) {
+        try {
+          await mutationSession.abortTransaction()
+        } catch (_) {}
+      }
+      await mutationSession.endSession()
+    }
+  }
+}
+
+/**
+ * POST /api/admin/payment-gateways/:id/test-monnify-checkout
+ * Starts one sandbox checkout for the reauthenticated SuperAdmin without
+ * changing the gateway default or exposing gateway selection to wallet clients.
+ */
+const testMonnifyHostedCheckout = async (req, res) => {
+  try {
+    const admin = await reauthenticateSuperAdmin(req)
+    const gateway = await loadGatewayForMutation(req.params.id, null)
+    if (!gateway) {
+      return res.status(404).json({ success: false, message: 'Payment gateway not found' })
+    }
+    if (
+      String(gateway.code || '').toLowerCase() !== 'monnify' ||
+      String(gateway.adapterType || '').toLowerCase() !== 'monnify' ||
+      gateway.environment !== 'test' ||
+      String(gateway.baseUrl || '').replace(/\/+$/, '') !== MONNIFY_SANDBOX_BASE_URL
+    ) {
+      return res.status(409).json({
+        success: false,
+        code: 'MONNIFY_SANDBOX_CHECKOUT_GATEWAY_INVALID',
+        message: 'Hosted checkout testing is restricted to the Monnify sandbox gateway.'
+      })
+    }
+    if (gateway.status !== 'inactive') {
+      return res.status(409).json({
+        success: false,
+        code: gateway.status === 'maintenance'
+          ? 'MONNIFY_SANDBOX_CHECKOUT_MAINTENANCE'
+          : 'MONNIFY_SANDBOX_CHECKOUT_REQUIRES_INACTIVE',
+        message: gateway.status === 'maintenance'
+          ? 'Leave maintenance mode before starting a hosted checkout test.'
+          : 'The Monnify sandbox gateway must remain inactive during checkout validation.'
+      })
+    }
+
+    const amount = Number(req.body?.amount)
+    const amountKobo = Math.round(amount * 100)
+    if (
+      !Number.isFinite(amount) || amount < 50 || amount > 5000 ||
+      !Number.isSafeInteger(amountKobo) ||
+      Math.abs(amount * 100 - amountKobo) > 1e-7
+    ) {
+      return res.status(400).json({
+        success: false,
+        code: 'MONNIFY_SANDBOX_CHECKOUT_AMOUNT_INVALID',
+        message: 'Sandbox checkout amount must be between N50 and N5,000 with at most two decimal places.'
+      })
+    }
+
+    const result = await paymentGatewayService.initializeFunding({
+      gatewayCode: 'monnify',
+      requiredGatewayId: String(gateway._id),
+      requiredEnvironment: 'test',
+      requiredStatus: 'inactive',
+      requiredMutationVersion: Number(gateway.virtualAccountMutationVersion || 0),
+      allowInactiveGateway: true,
+      administrativeSandboxTest: true,
+      user: {
+        _id: admin._id,
+        name: admin.name,
+        email: admin.email,
+        phone: admin.phone
+      },
+      amount,
+      metadata: { administrativeSandboxTest: true }
+    })
+
+    const markerVersion = Number(gateway.virtualAccountMutationVersion || 0)
+    const marker = await PaymentGateway.updateOne(
+      {
+        _id: gateway._id,
+        status: 'inactive',
+        environment: 'test',
+        baseUrl: gateway.baseUrl,
+        ...(markerVersion === 0
+          ? {
+              $or: [
+                { virtualAccountMutationVersion: 0 },
+                { virtualAccountMutationVersion: { $exists: false } }
+              ]
+            }
+          : { virtualAccountMutationVersion: markerVersion })
+      },
+      {
+        $set: {
+          lastHealthCheck: {
+            status: 'online',
+            checkedAt: new Date(),
+            message: MONNIFY_CHECKOUT_VALIDATED_MESSAGE
+          }
+        }
+      }
+    )
+    if (!mutationMatched(marker)) {
+      const error = new Error('The Monnify gateway changed during checkout initialization. It remains inactive and unvalidated.')
+      error.statusCode = 409
+      error.code = 'MONNIFY_SANDBOX_CHECKOUT_CONFIGURATION_CHANGED'
+      error.status = 'pending'
+      error.reference = result.reference
+      throw error
+    }
+
+    await logAction(
+      req.user?._id || req.user?.id,
+      admin.name || req.user?.name || 'SuperAdmin',
+      'MONNIFY_SANDBOX_CHECKOUT_INITIALIZED',
+      `Gateway: ${gateway.name}`,
+      {
+        gatewayId: gateway._id,
+        reference: result.reference,
+        amount,
+        environment: 'test',
+        defaultGatewayChanged: false
+      },
+      'success',
+      req
+    )
+
+    return res.json({
+      success: true,
+      authorizationUrl: result.authorizationUrl,
+      reference: result.reference,
+      provider: result.provider,
+      environment: 'test'
+    })
+  } catch (error) {
+    if (error.code === 'PAYMENT_INITIALIZATION_AMBIGUOUS') {
+      return res.status(202).json({
+        success: false,
+        code: error.code,
+        message: error.message,
+        status: 'pending',
+        reference: error.reference
+      })
+    }
+    return res.status(error.statusCode || 400).json({
+      success: false,
+      ...(error.code ? { code: error.code } : {}),
+      ...(error.reference
+        ? { reference: error.reference, status: error.status || 'pending' }
+        : {}),
+      message: error.message
+    })
   }
 }
 
@@ -1359,6 +2225,8 @@ module.exports = {
   updateGatewayStatus,
   setDefaultGateway,
   testGatewayConnection,
+  replaceMonnifyMerchant,
+  testMonnifyHostedCheckout,
   deleteGateway,
   getReconciliationTransactions,
   resolveReconciliationTransaction,

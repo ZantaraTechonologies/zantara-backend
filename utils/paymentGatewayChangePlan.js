@@ -26,6 +26,11 @@ function sameCanonicalValue(left, right) {
     return JSON.stringify(canonicalize(left)) === JSON.stringify(canonicalize(right));
 }
 
+function changedMetadataKeys(current = {}, next = {}) {
+    return [...new Set([...Object.keys(current), ...Object.keys(next)])]
+        .filter(key => !sameCanonicalValue(current[key], next[key]));
+}
+
 function paystackCredentialEnvironment(value, kind) {
     if (typeof value !== 'string' || !['public', 'secret'].includes(kind)) return null;
     const resolved = isEncrypted(value) ? decryptSecretStrict(value) : value;
@@ -93,6 +98,7 @@ function buildGatewayChangePlan(gateway, body = {}) {
         metadata: !sameCanonicalValue(currentMetadata, mergedMetadata),
     };
     const effectiveChanges = Object.keys(changes).filter(field => changes[field]);
+    const metadataChanges = changedMetadataKeys(currentMetadata, mergedMetadata);
     const verificationChanges = effectiveChanges.filter(field => [
         'adapterType', 'baseUrl', 'publicKey', 'secretKey', 'webhookSecret', 'environment', 'metadata'
     ].includes(field));
@@ -105,6 +111,7 @@ function buildGatewayChangePlan(gateway, body = {}) {
         next,
         changes,
         effectiveChanges,
+        metadataChanges,
         verificationChanges,
         paystackVerificationChanges,
         requiresMutationFence: verificationChanges.length > 0,
@@ -117,6 +124,7 @@ module.exports = {
     plainMetadata,
     canonicalize,
     sameCanonicalValue,
+    changedMetadataKeys,
     paystackCredentialEnvironment,
     isValidPaystackCredential,
 };

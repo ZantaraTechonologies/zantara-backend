@@ -59,6 +59,18 @@ const getVirtualAccounts = async (req, res) => {
 
 const requestBankAccounts = async (req, res) => {
     try {
+        const requestedProviders = req.body?.providers;
+        if (requestedProviders !== undefined && (
+            !Array.isArray(requestedProviders)
+            || requestedProviders.length !== 1
+            || !['paystack', 'monnify'].includes(requestedProviders[0])
+        )) {
+            return res.status(400).json({
+                success: false,
+                code: 'VIRTUAL_ACCOUNT_PROVIDER_INVALID',
+                message: 'Select exactly one supported virtual-account provider'
+            });
+        }
         const consents = req.body?.consents;
         if (consents !== undefined && (!consents || typeof consents !== 'object' || Array.isArray(consents))) {
             return res.status(400).json({
@@ -72,6 +84,7 @@ const requestBankAccounts = async (req, res) => {
             : [];
         const result = await virtualAccountService.requestBankAccounts({
             userId: req.user.id,
+            providers: requestedProviders,
             consents: consents || {},
             retryRejectedProviders
         });

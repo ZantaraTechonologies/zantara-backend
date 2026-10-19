@@ -31,7 +31,7 @@ const {
 
 const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60 * 1000
 const SETTLEMENT_LEASE_MS = 15 * 60 * 1000
-const AUTOMATIC_SETTLEMENT_TYPES = new Set(['funding', 'investment_buy'])
+const AUTOMATIC_SETTLEMENT_TYPES = new Set(['funding', 'investment_buy', 'gateway_test'])
 const CREDENTIAL_STORAGE_STATE = Symbol('paymentGatewayCredentialStorageState')
 
 class PaymentGatewayService {
@@ -363,6 +363,12 @@ class PaymentGatewayService {
    */
   async initializeFunding ({
     gatewayCode,
+    requiredGatewayId,
+    requiredEnvironment,
+    requiredStatus,
+    requiredMutationVersion,
+    allowInactiveGateway = false,
+    administrativeSandboxTest = false,
     channel,
     channels: requestedChannels,
     user,
@@ -384,7 +390,9 @@ class PaymentGatewayService {
       throw new Error('Minimum funding amount is ₦50.00')
     }
 
-    const txType = metadata?.type || 'funding'
+    const txType = administrativeSandboxTest
+      ? 'gateway_test'
+      : metadata?.type || 'funding'
     if (txType === 'investment_buy') assertPublicShareholdingAvailable()
 
     let gateway = null
@@ -398,7 +406,7 @@ class PaymentGatewayService {
         throw err
       }
 
-      if (gateway.status === 'inactive') {
+      if (gateway.status === 'inactive' && !allowInactiveGateway) {
         const err = new Error(
           `Payment gateway '${gateway.name}' is currently inactive`
         )
@@ -438,6 +446,62 @@ class PaymentGatewayService {
         err.code = 'PAYMENT_CONFIGURATION_ERROR'
         throw err
       }
+    }
+
+    if (
+      allowInactiveGateway &&
+      (
+        !administrativeSandboxTest ||
+        !requiredGatewayId ||
+        !requiredEnvironment ||
+        requiredStatus !== 'inactive' ||
+        requiredMutationVersion === undefined ||
+        !gatewayCode
+      )
+    ) {
+      const err = new Error(
+        'Inactive gateway initialization requires pinned gateway identity and environment.'
+      )
+      err.code = 'PAYMENT_GATEWAY_INACTIVE_OVERRIDE_INVALID'
+      throw err
+    }
+
+    if (
+      requiredGatewayId !== undefined &&
+      String(gateway._id || gateway.gatewayId || '') !== String(requiredGatewayId)
+    ) {
+      const err = new Error('The selected payment gateway configuration changed. Please retry.')
+      err.code = 'PAYMENT_GATEWAY_IDENTITY_MISMATCH'
+      throw err
+    }
+    if (
+      requiredEnvironment !== undefined &&
+      gateway.environment !== requiredEnvironment
+    ) {
+      const err = new Error('The selected payment gateway environment changed. Please retry.')
+      err.code = 'PAYMENT_GATEWAY_ENVIRONMENT_MISMATCH'
+      throw err
+    }
+    if (requiredStatus !== undefined && gateway.status !== requiredStatus) {
+      const err = new Error('The selected payment gateway status changed. Please retry.')
+      err.code = 'PAYMENT_GATEWAY_STATUS_MISMATCH'
+      throw err
+    }
+    if (
+      requiredMutationVersion !== undefined &&
+      Number(gateway.virtualAccountMutationVersion || 0) !== Number(requiredMutationVersion)
+    ) {
+      const err = new Error('The selected payment gateway configuration changed. Please retry.')
+      err.code = 'PAYMENT_GATEWAY_CONFIGURATION_MISMATCH'
+      throw err
+    }
+    const gatewayMetadata = gateway.metadata instanceof Map
+      ? Object.fromEntries(gateway.metadata)
+      : gateway.metadata || {}
+    if (gatewayMetadata.administrativeSandboxOnly === true && !administrativeSandboxTest) {
+      const err = new Error('This payment gateway is restricted to administrative sandbox validation.')
+      err.code = 'PAYMENT_GATEWAY_SANDBOX_ISOLATED'
+      throw err
     }
 
     const requested = channel
@@ -997,7 +1061,11 @@ class PaymentGatewayService {
             }
           }
         )
-        if (failed.modifiedCount === 1 && transactionStatus.userId) {
+        if (
+          failed.modifiedCount === 1 &&
+          transactionStatus.userId &&
+          transactionStatus.type !== 'gateway_test'
+        ) {
           notificationService
             .sendFundingAdvisory(transactionStatus.userId, {
               kind: 'failed',
@@ -1296,7 +1364,7 @@ class PaymentGatewayService {
           throw error
         }
         credited = !(fulfillment && fulfillment.message === 'Already processed')
-      } else {
+      } else if (transactionStatus.type !== 'gateway_test') {
         const settlementKey = `payment:${evidence.provider}:${refId}`
         const historicalCredit = await WalletLedger.findOne({
           reference: refId,
@@ -1412,21 +1480,23 @@ class PaymentGatewayService {
       session.endSession()
     }
 
-    notificationService
-      .sendFundingSuccess({
-        userId: transactionStatus.userId,
-        amount: amountNaira,
-        method:
-          (transactionStatus.channels?.length === 1
-            ? transactionStatus.channels[0]
-            : transactionStatus.service || transactionStatus.provider) ||
-          'funding',
-        reference: refId,
-        type: transactionStatus.type
-      })
-      .catch(error =>
-        console.error('[Funding Notification Background Error]', error.message)
-      )
+    if (transactionStatus.type !== 'gateway_test') {
+      notificationService
+        .sendFundingSuccess({
+          userId: transactionStatus.userId,
+          amount: amountNaira,
+          method:
+            (transactionStatus.channels?.length === 1
+              ? transactionStatus.channels[0]
+              : transactionStatus.service || transactionStatus.provider) ||
+            'funding',
+          reference: refId,
+          type: transactionStatus.type
+        })
+        .catch(error =>
+          console.error('[Funding Notification Background Error]', error.message)
+        )
+    }
 
     return {
       success: true,
@@ -1511,7 +1581,7 @@ class PaymentGatewayService {
     const now = new Date()
     const stranded = await TransactionStatus.find({
       status: { $in: ['processing', 'settlement_pending'] },
-      type: { $in: ['funding', 'investment_buy'] },
+      type: { $in: ['funding', 'investment_buy', 'gateway_test'] },
       settlementLeaseExpiresAt: { $lte: now }
     })
     if (stranded.length === 0) return { scanned: 0, settled: 0, skipped: 0 }
@@ -1769,8 +1839,12 @@ class PaymentGatewayService {
   _extractVirtualAccountReference (providerCode, payload) {
     if (String(providerCode || '').toLowerCase() !== 'monnify') return null
     const data = payload?.eventData || {}
+    const product = data.product || {}
+    const productReference = String(product.type || '').toUpperCase() === 'RESERVED_ACCOUNT'
+      ? product.reference
+      : ''
     const value = String(
-      data.accountReference || data.destinationAccountReference || ''
+      productReference || data.accountReference || data.destinationAccountReference || ''
     )
     return /^VIRTUAL_[a-f\d]{24}$/i.test(value) ? value : null
   }

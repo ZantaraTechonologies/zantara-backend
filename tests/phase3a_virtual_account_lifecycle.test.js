@@ -187,6 +187,36 @@ test('Request Bank Account rejects stale consent per provider without blocking a
     assert.deepEqual(calls.map(call => call.providerCode), ['monnify']);
 });
 
+test('Request Bank Account scopes provisioning and consent to one selected provider', async () => {
+    const user = { _id: 'user-1', virtualAccounts: [], virtualAccountPreferences: {} };
+    const service = new VirtualAccountService({
+        repository: {
+            async getUser() { return user; },
+            async listLegacyUnverified() { return []; }
+        },
+        legal: eligibleLegalService
+    });
+    const calls = [];
+    service.provision = async request => {
+        calls.push(request);
+        return { status: 'pending', state: 'awaiting_assignment', existing: false, accounts: [] };
+    };
+
+    const result = await service.requestBankAccounts({
+        userId: 'user-1',
+        providers: ['monnify'],
+        consents: {
+            monnify: { granted: true, version: VIRTUAL_ACCOUNT_CONSENT_VERSION }
+        },
+        retryRejectedProviders: ['paystack']
+    });
+
+    assert.deepEqual(calls.map(call => call.providerCode), ['monnify']);
+    assert.equal(result.status, 'pending');
+    assert.equal(result.providers.monnify.status, 'awaiting_assignment');
+    assert.equal(result.providers.paystack.status, 'consent_required');
+});
+
 test('recovery claims persisted work once and a fresh service can resume it after restart', async () => {
     const candidate = {
         userId: 'user-1',
@@ -423,6 +453,39 @@ test('Monnify recovery requires the exact deterministic account reference', () =
     assert.equal(service._validMonnifyResult({ ...result, accountReference: 'VIRTUAL_000000000000000000000000' }, accountReference), false);
 });
 
+test('Monnify V2 completion requires exact merchant, customer, status, and unique bank evidence', () => {
+    const service = new VirtualAccountService();
+    const accountReference = 'VIRTUAL_507f1f77bcf86cd799439011';
+    const gateway = { metadata: { contractCode: '1234567890' } };
+    const user = { email: 'ada@example.com' };
+    const result = {
+        status: true,
+        apiVersion: 'v2',
+        contractCode: '1234567890',
+        accountReference,
+        currencyCode: 'NGN',
+        customerEmail: 'ada@example.com',
+        reservationReference: 'RESERVATION-1',
+        reservedAccountType: 'GENERAL',
+        providerStatus: 'ACTIVE',
+        accounts: [{
+            bankName: 'Moniepoint',
+            bankCode: '50515',
+            accountName: 'Ada Lovelace',
+            accountNumber: '9988776655'
+        }]
+    };
+
+    assert.equal(service._validMonnifyResult(result, accountReference, { gateway, user }), true);
+    assert.equal(service._validMonnifyResult({ ...result, contractCode: 'other' }, accountReference, { gateway, user }), false);
+    assert.equal(service._validMonnifyResult({ ...result, customerEmail: 'other@example.com' }, accountReference, { gateway, user }), false);
+    assert.equal(service._validMonnifyResult({ ...result, providerStatus: 'PENDING' }, accountReference, { gateway, user }), false);
+    assert.equal(service._validMonnifyResult({
+        ...result,
+        accounts: [result.accounts[0], { ...result.accounts[0] }]
+    }, accountReference, { gateway, user }), false);
+});
+
 test('Monnify ambiguous creation is reconciled without repeating the mutation', async () => {
     const service = new VirtualAccountService();
     let createCalls = 0;
@@ -462,7 +525,8 @@ test('Monnify deposit ownership requires exactly one gateway/reference/account m
                 assert.deepEqual(request, {
                     gatewayId: 'gateway-monnify',
                     accountReference,
-                    accountNumber: '9988776655'
+                    accountNumber: '9988776655',
+                    allowUnscopedCanonical: true
                 });
                 return lookup;
             }

@@ -769,6 +769,87 @@ test('malformed Monnify creation evidence is reconciled without repeating the mu
     assert.equal(repository.user.virtualAccounts[0].provisioningFailureDisposition, 'ambiguous_mutation');
 });
 
+test('Monnify duplicate-reference rejection reconciles by exact reference before classification', async () => {
+    const repository = new FakeVirtualAccountRepository(userFixture());
+    const providerResult = {
+        status: true,
+        accountReference: 'VIRTUAL_user-1',
+        accounts: [{
+            bankName: 'Moniepoint',
+            bankCode: '50515',
+            accountName: 'Ada Lovelace',
+            accountNumber: '9988776655'
+        }]
+    };
+    let reads = 0;
+    let creates = 0;
+    const notFound = () => {
+        const error = new Error('not found');
+        error.response = { status: 404 };
+        return error;
+    };
+    const monnifyAdapter = {
+        async getReservedAccount() {
+            reads += 1;
+            if (reads === 1) throw notFound();
+            return providerResult;
+        },
+        async createReservedAccount() {
+            creates += 1;
+            const error = new Error('Account reference already used');
+            error.response = { status: 400 };
+            error.requestDispatched = true;
+            throw error;
+        }
+    };
+    const service = new VirtualAccountService({
+        repository,
+        gatewayService: makeGatewayService({ monnifyAdapter })
+    });
+
+    const result = await service.provision({ userId: 'user-1', providerCode: 'monnify', consent: true });
+
+    assert.equal(result.status, 'active');
+    assert.equal(reads, 2);
+    assert.equal(creates, 1);
+    assert.equal(repository.user.virtualAccounts[0].provisioningAttemptCount, 1);
+    assert.equal(repository.user.virtualAccounts[0].provisioningDispatchState, 'complete');
+});
+
+test('Monnify duplicate-reference ambiguity never blindly repeats account creation', async () => {
+    const repository = new FakeVirtualAccountRepository(userFixture());
+    let reads = 0;
+    let creates = 0;
+    const monnifyAdapter = {
+        async getReservedAccount() {
+            reads += 1;
+            const error = new Error('not found');
+            error.response = { status: 404 };
+            throw error;
+        },
+        async createReservedAccount() {
+            creates += 1;
+            const error = new Error('Account reference already exists');
+            error.response = { status: 400 };
+            error.requestDispatched = true;
+            throw error;
+        }
+    };
+    const service = new VirtualAccountService({
+        repository,
+        gatewayService: makeGatewayService({ monnifyAdapter })
+    });
+
+    const first = await service.provision({ userId: 'user-1', providerCode: 'monnify', consent: true });
+    repository.user.virtualAccounts[0].provisioningExpiresAt = new Date(Date.now() - 1000);
+    const second = await service.provision({ userId: 'user-1', providerCode: 'monnify', consent: true });
+
+    assert.equal(first.state, 'reconciliation_required');
+    assert.equal(second.state, 'reconciliation_required');
+    assert.equal(creates, 1);
+    assert.equal(reads, 3);
+});
+
 test('repeated Paystack provisioning returns the provider-scoped account without another provider call', async () => {
     const repository = new FakeVirtualAccountRepository(userFixture());
     let dvaCalls = 0;
@@ -1366,10 +1447,10 @@ const lifecycleMonnifyAdapter = overrides => ({
             throw error;
         }
     },
-    async createReservedAccount(user) {
+    async createReservedAccount({ user, accountReference }) {
         return {
             status: true,
-            accountReference: `VIRTUAL_${user._id}`,
+            accountReference,
             accounts: [{
                 bankName: 'Moniepoint',
                 bankCode: '50515',
@@ -1620,9 +1701,9 @@ test('automatic lifecycle preserves existing provider accounts and fills only mi
                         async createDedicatedVirtualAccount() { paystackMutations++; return paystackDvaResult(); }
                     }),
                     monnifyAdapter: lifecycleMonnifyAdapter({
-                        async createReservedAccount(user) {
+                        async createReservedAccount(request) {
                             monnifyMutations++;
-                            return lifecycleMonnifyAdapter().createReservedAccount(user);
+                            return lifecycleMonnifyAdapter().createReservedAccount(request);
                         }
                     })
                 })

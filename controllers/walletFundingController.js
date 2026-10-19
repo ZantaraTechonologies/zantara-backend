@@ -10,6 +10,7 @@ const publicInitializationError = (err) => {
         'PAYMENT_GATEWAY_NOT_FOUND',
         'PAYMENT_GATEWAY_INACTIVE',
         'PAYMENT_GATEWAY_MAINTENANCE',
+        'PAYMENT_GATEWAY_SANDBOX_ISOLATED',
         'PAYMENT_GATEWAY_ADAPTER_UNSUPPORTED'
     ].includes(err.code);
     return {
@@ -42,8 +43,6 @@ function normalizeChannel(input) {
 const fundWallet = async (req, res) => {
     try {
         const rawAmount = Number(req.body?.amount);
-        const gatewayCode = req.body?.gatewayCode || req.body?.provider || null;
-        
         const rawKobo = rawAmount * 100;
         if (!Number.isFinite(rawAmount) || rawAmount < MIN_AMOUNT || !Number.isSafeInteger(Math.round(rawKobo)) || Math.abs(rawKobo - Math.round(rawKobo)) > 1e-7) {
             return res.status(400).json({ message: `Minimum amount is ₦${MIN_AMOUNT}` });
@@ -61,7 +60,6 @@ const fundWallet = async (req, res) => {
         const callbackUrl = req.body?.callback_url;
 
         const result = await paymentGatewayService.initializeFunding({
-            gatewayCode,
             channel,
             user,
             amount: rawAmount,

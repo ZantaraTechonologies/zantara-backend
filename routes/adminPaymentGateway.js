@@ -3,6 +3,7 @@
 const express = require('express');
 const router = express.Router();
 const { verifyJWT, checkRoles } = require('../middlewares/auth');
+const { adminReauthenticationLimiter } = require('../middlewares/limiter');
 const {
     getAllGateways,
     getGatewayById,
@@ -12,6 +13,8 @@ const {
     updateGatewayStatus,
     setDefaultGateway,
     testGatewayConnection,
+    replaceMonnifyMerchant,
+    testMonnifyHostedCheckout,
     deleteGateway,
     getReconciliationTransactions,
     resolveReconciliationTransaction
@@ -39,7 +42,8 @@ router.put('/:id', verifyJWT, checkRoles('superAdmin'), updateGateway);
 router.patch('/:id/status', verifyJWT, checkRoles('superAdmin'), updateGatewayStatus);
 router.post('/:id/set-default', verifyJWT, checkRoles('superAdmin'), setDefaultGateway);
 router.post('/:id/test-connection', verifyJWT, checkRoles('superAdmin'), testGatewayConnection);
+router.post('/:id/replace-monnify-merchant', verifyJWT, checkRoles('superAdmin'), adminReauthenticationLimiter, replaceMonnifyMerchant);
+router.post('/:id/test-monnify-checkout', verifyJWT, checkRoles('superAdmin'), adminReauthenticationLimiter, testMonnifyHostedCheckout);
 router.delete('/:id', verifyJWT, checkRoles('superAdmin'), deleteGateway);
 
 module.exports = router;
-

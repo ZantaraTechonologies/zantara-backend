@@ -245,10 +245,19 @@ class MongoVirtualAccountRepository {
         };
     }
 
-    async findActiveMonnifyDepositOwner({ gatewayId, accountReference, accountNumber }) {
+    async findActiveMonnifyDepositOwner({ gatewayId, accountReference, accountNumber, allowUnscopedCanonical = false }) {
         const scope = {
             provider: 'monnify',
-            gatewayId: String(gatewayId),
+            ...(allowUnscopedCanonical
+                ? {
+                    $or: [
+                        { gatewayId: String(gatewayId) },
+                        { gatewayId: { $exists: false } },
+                        { gatewayId: null },
+                        { gatewayId: '' }
+                    ]
+                }
+                : { gatewayId: String(gatewayId) }),
             accountReference,
             accountNumber,
             provisioningStatus: 'active',
@@ -266,7 +275,10 @@ class MongoVirtualAccountRepository {
                 const account = asPlainAccount(value);
                 if (
                     account.provider === 'monnify'
-                    && String(account.gatewayId || '') === String(gatewayId)
+                    && (
+                        String(account.gatewayId || '') === String(gatewayId)
+                        || (allowUnscopedCanonical && !account.gatewayId)
+                    )
                     && account.accountReference === accountReference
                     && account.accountNumber === accountNumber
                     && account.provisioningStatus === 'active'
@@ -751,12 +763,14 @@ class VirtualAccountService {
         gatewayService = paymentGatewayService,
         repository = new MongoVirtualAccountRepository(),
         onboarding = onboardingService,
-        legal = legalService
+        legal = legalService,
+        bankIdentityService = null
     } = {}) {
         this.gatewayService = gatewayService;
         this.repository = repository;
         this.onboardingService = onboarding;
         this.legalService = legal;
+        this.bankIdentityService = bankIdentityService;
         this.recoveryRunning = false;
         this.eligibilitySweepCursor = null;
     }
@@ -1082,21 +1096,24 @@ class VirtualAccountService {
         };
     }
 
-    async requestBankAccounts({ userId, consents = {}, retryRejectedProviders = [] } = {}) {
+    async requestBankAccounts({ userId, providers: requestedProviders, consents = {}, retryRejectedProviders = [] } = {}) {
         await this._assertOnboardingEligibility(userId);
         await this._assertLegalEligibility(userId);
         const user = await this.repository.getUser(userId);
         if (!user) throw this._error('User not found', 'USER_NOT_FOUND', 404);
         const initial = await this.getAccountStatus({ userId });
-        const providers = {};
+        const providerOutcomes = {};
+        const providersToRequest = requestedProviders === undefined
+            ? VIRTUAL_ACCOUNT_PROVIDERS
+            : VIRTUAL_ACCOUNT_PROVIDERS.filter(provider => requestedProviders.includes(provider));
 
-        for (const provider of VIRTUAL_ACCOUNT_PROVIDERS) {
+        for (const provider of providersToRequest) {
             if (initial.providers[provider]?.status === 'active') {
-                providers[provider] = initial.providers[provider];
+                providerOutcomes[provider] = initial.providers[provider];
                 continue;
             }
             if (initial.providers[provider]?.status === 'legacy_review_required') {
-                providers[provider] = initial.providers[provider];
+                providerOutcomes[provider] = initial.providers[provider];
                 continue;
             }
 
@@ -1106,7 +1123,7 @@ class VirtualAccountService {
             let consentEvidence = persisted;
             if (submitted?.granted === true) {
                 if (submitted.version !== VIRTUAL_ACCOUNT_CONSENT_VERSION) {
-                    providers[provider] = {
+                    providerOutcomes[provider] = {
                         status: 'consent_required',
                         code: 'VIRTUAL_ACCOUNT_CONSENT_VERSION_INVALID',
                         consent: consentRequirement
@@ -1121,7 +1138,7 @@ class VirtualAccountService {
                 };
             }
             if (!consentEvidence) {
-                providers[provider] = {
+                providerOutcomes[provider] = {
                     status: 'consent_required',
                     code: this._consentRequiredCode(provider),
                     consent: consentRequirement
@@ -1140,14 +1157,14 @@ class VirtualAccountService {
                     preferredBank: submitted?.preferredBank || consentEvidence.preferredBank,
                     retryRejected: retryRejectedProviders.includes(provider)
                 });
-                providers[provider] = {
+                providerOutcomes[provider] = {
                     status: result.state || (result.status === 'active' ? 'active' : 'awaiting_assignment'),
                     ...(result.code ? { code: result.code } : {}),
                     existing: result.existing === true
                 };
             } catch (error) {
                 const disposition = error?.paystackDvaDisposition || error?.provisioningDisposition;
-                providers[provider] = {
+                providerOutcomes[provider] = {
                     status: disposition === 'definitive_rejection'
                         ? 'definitive_rejection'
                         : disposition === 'ambiguous_mutation'
@@ -1161,7 +1178,8 @@ class VirtualAccountService {
         }
 
         const current = await this.getAccountStatus({ userId });
-        const states = Object.values(providers).map(value => value.status);
+        const providers = { ...current.providers, ...providerOutcomes };
+        const states = Object.values(providerOutcomes).map(value => value.status);
         const status = states.every(value => value === 'active')
             ? 'active'
             : states.some(value => value === 'active')
@@ -1994,6 +2012,7 @@ class VirtualAccountService {
     async resolveMonnifyDepositOwner({ gateway, accountReference, accountNumber }) {
         const gatewayId = String(gateway?._id || gateway?.gatewayId || '');
         const adapterType = String(gateway?.adapterType || gateway?.code || '').toLowerCase();
+        const gatewayCode = String(gateway?.code || '').toLowerCase();
         if (!gatewayId || adapterType !== 'monnify') {
             throw this._terminalWebhookError('Monnify reserved-account deposit gateway is invalid', 'MONNIFY_VIRTUAL_ACCOUNT_GATEWAY_INVALID');
         }
@@ -2003,7 +2022,8 @@ class VirtualAccountService {
         const lookup = await this.repository.findActiveMonnifyDepositOwner({
             gatewayId,
             accountReference,
-            accountNumber
+            accountNumber,
+            allowUnscopedCanonical: gatewayCode === 'monnify'
         });
         if (lookup.matchCount !== 1 || !lookup.match) {
             throw this._terminalWebhookError(
@@ -2018,29 +2038,75 @@ class VirtualAccountService {
         return lookup.match;
     }
 
-    _validMonnifyResult(result, accountReference) {
-        return !!result?.status
+    _validMonnifyResult(result, accountReference, { gateway, user } = {}) {
+        const accounts = Array.isArray(result?.accounts) ? result.accounts : [];
+        const accountKeys = accounts.map(account => (
+            `${String(account?.bankCode || '').trim()}:${String(account?.accountNumber || '').trim()}`
+        ));
+        const basicEvidenceValid = !!result?.status
             && result.accountReference === accountReference
-            && Array.isArray(result.accounts)
-            && result.accounts.length > 0
-            && result.accounts.every(account => (
+            && accounts.length > 0
+            && new Set(accountKeys).size === accountKeys.length
+            && accounts.every(account => (
                 /^\d{10}$/.test(String(account?.accountNumber || ''))
                 && !!String(account?.bankName || '').trim()
                 && !!String(account?.bankCode || '').trim()
             ));
+        if (!basicEvidenceValid || result.apiVersion !== 'v2') return basicEvidenceValid;
+
+        const expectedContractCode = String(gateway?.metadata?.contractCode || '').trim();
+        const expectedEmail = String(user?.email || '').trim().toLowerCase();
+        return !!expectedContractCode
+            && !!expectedEmail
+            && result.contractCode === expectedContractCode
+            && result.currencyCode === 'NGN'
+            && result.reservedAccountType === 'GENERAL'
+            && result.providerStatus === 'ACTIVE'
+            && String(result.customerEmail || '').trim().toLowerCase() === expectedEmail
+            && !!String(result.reservationReference || '').trim()
+            && accounts.every(account => !!String(account?.accountName || '').trim());
     }
 
     _isMonnifyNotFound(error) {
-        return Number(error?.response?.status) === 404
+        return Number(error?.providerHttpStatus ?? error?.response?.status) === 404
             || error?.code === 'MONNIFY_RESERVED_ACCOUNT_NOT_FOUND';
     }
 
     _isMonnifyDefinitiveRejection(error) {
-        const status = Number(error?.response?.status);
+        const status = Number(error?.providerHttpStatus ?? error?.response?.status);
         return Number.isInteger(status)
             && status >= 400
             && status < 500
             && ![408, 409, 425, 429].includes(status);
+    }
+
+    _isMonnifyDuplicateReference(error) {
+        const evidence = `${error?.providerResponseCode || ''} ${error?.message || ''}`.toLowerCase();
+        return evidence.includes('reference')
+            && (evidence.includes('already') || evidence.includes('exist') || evidence.includes('used'));
+    }
+
+    async _verifiedMonnifyIdentity(userId, adapter) {
+        if (adapter?.requiresVerifiedBankIdentity !== true) return null;
+        if (typeof this.bankIdentityService?.getVerifiedMonnifyIdentity !== 'function') {
+            throw this._error(
+                'Verified bank identity processing is not configured',
+                'MONNIFY_IDENTITY_VERIFICATION_UNAVAILABLE',
+                503
+            );
+        }
+        const identity = await this.bankIdentityService.getVerifiedMonnifyIdentity(String(userId));
+        if (
+            identity?.verified !== true
+            || (!/^\d{11}$/.test(String(identity?.bvn || '')) && !/^\d{11}$/.test(String(identity?.nin || '')))
+        ) {
+            throw this._error(
+                'Verified BVN or NIN is required for Monnify virtual-account provisioning',
+                'MONNIFY_IDENTITY_VERIFICATION_REQUIRED',
+                403
+            );
+        }
+        return identity;
     }
 
     async _markMonnifyReconciliation({ userId, provisioningKey, token, error }) {
@@ -2062,7 +2128,7 @@ class VirtualAccountService {
         };
     }
 
-    async _provisionMonnify({ user, gateway, adapter, provisioningKey, token, consentEvidence, existingOperation }) {
+    async _provisionMonnify({ user, gateway, adapter, provisioningKey, token, consentEvidence, existingOperation, verifiedIdentity }) {
         adapter.assertVirtualAccountCustomer(user);
         const accountReference = `VIRTUAL_${user._id}`;
         let result = null;
@@ -2080,7 +2146,7 @@ class VirtualAccountService {
                         error
                     });
                 }
-                if (existingOperation?.provisioningDispatchState === 'reconciling') {
+                if (['dispatching', 'reconciling'].includes(existingOperation?.provisioningDispatchState)) {
                     return this._markMonnifyReconciliation({
                         userId: user._id,
                         provisioningKey,
@@ -2092,23 +2158,45 @@ class VirtualAccountService {
             }
         }
 
-        if (result && !this._validMonnifyResult(result, accountReference)) {
+        if (result && !this._validMonnifyResult(result, accountReference, { gateway, user })) {
             throw this._error('Monnify returned incomplete reserved-account evidence', 'MONNIFY_VIRTUAL_ACCOUNT_RESPONSE_INVALID', 502);
         }
         if (!result && mayCreate) {
+            const dispatchUpdated = await this.repository.setPaystackDispatchState({
+                userId: user._id,
+                provisioningKey,
+                token,
+                state: 'dispatching',
+                message: null,
+                code: null,
+                disposition: null,
+                incrementAttempt: true
+            });
+            if (!dispatchUpdated) throw this._claimLostError();
             try {
                 creationDispatched = true;
-                result = await adapter.createReservedAccount(user);
+                result = await adapter.createReservedAccount({ user, accountReference, verifiedIdentity });
             } catch (error) {
-                if (this._isMonnifyDefinitiveRejection(error)) {
-                    error.code = error.code || 'MONNIFY_VIRTUAL_ACCOUNT_PROVIDER_REJECTED';
-                    error.provisioningDisposition = 'definitive_rejection';
+                if (error?.requestDispatched === false) {
                     throw error;
                 }
                 try {
                     if (typeof adapter.getReservedAccount !== 'function') throw error;
                     result = await adapter.getReservedAccount(accountReference);
                 } catch (lookupError) {
+                    if (this._isMonnifyNotFound(lookupError) && this._isMonnifyDefinitiveRejection(error)) {
+                        if (this._isMonnifyDuplicateReference(error)) {
+                            return this._markMonnifyReconciliation({
+                                userId: user._id,
+                                provisioningKey,
+                                token,
+                                error
+                            });
+                        }
+                        error.code = error.code || 'MONNIFY_VIRTUAL_ACCOUNT_PROVIDER_REJECTED';
+                        error.provisioningDisposition = 'definitive_rejection';
+                        throw error;
+                    }
                     return this._markMonnifyReconciliation({
                         userId: user._id,
                         provisioningKey,
@@ -2118,7 +2206,7 @@ class VirtualAccountService {
                 }
             }
         }
-        if (!this._validMonnifyResult(result, accountReference)) {
+        if (!this._validMonnifyResult(result, accountReference, { gateway, user })) {
             if (creationDispatched) {
                 return this._markMonnifyReconciliation({
                     userId: user._id,
@@ -2149,6 +2237,7 @@ class VirtualAccountService {
                 consentGrantedAt: consentEvidence?.consentGrantedAt,
                 consentVersion: consentEvidence?.consentVersion,
                 consentChannel: consentEvidence?.consentChannel,
+                provisioningDispatchState: 'complete',
                 active: true,
                 assigned: true
             })),
@@ -2301,11 +2390,13 @@ class VirtualAccountService {
             consentChannel: effectiveConsentChannel,
             ...(preferredBank ? { preferredBank } : {})
         };
+        let verifiedMonnifyIdentity = null;
         try {
             if (provider === 'paystack') {
                 adapter.getVirtualAccountCustomer(user);
             } else if (provider === 'monnify') {
                 adapter.assertVirtualAccountCustomer(user);
+                verifiedMonnifyIdentity = await this._verifiedMonnifyIdentity(userId, adapter);
             }
         } catch (error) {
             if (!consentGrantedAt && this._isEligibilityError(error)) {
@@ -2404,7 +2495,8 @@ class VirtualAccountService {
                     provisioningKey,
                     token: claim.token,
                     consentEvidence,
-                    existingOperation
+                    existingOperation,
+                    verifiedIdentity: verifiedMonnifyIdentity
                 });
             }
             throw this._error(`${provider} virtual-account provisioning is not implemented`, 'VIRTUAL_ACCOUNT_PROVIDER_UNSUPPORTED');

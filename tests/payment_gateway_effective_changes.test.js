@@ -1,6 +1,7 @@
 'use strict'
 
 const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
 const test = require('node:test')
 const mongoose = require('mongoose')
 const PaymentGateway = require('../models/PaymentGateway')
@@ -8,6 +9,7 @@ const TransactionStatus = require('../models/TransactionStatus')
 const User = require('../models/User')
 const AuditLog = require('../models/AuditLog')
 const controller = require('../controllers/adminPaymentGatewayController')
+const paymentGatewayService = require('../services/paymentGateway.service')
 const { encryptSecret, isEncrypted } = require('../utils/crypto')
 const {
   buildGatewayChangePlan,
@@ -84,10 +86,336 @@ test('gateway change plan compares effective values rather than submitted fields
     nested: { enabled: true }
   })
   assert.equal(changed.requiresMutationFence, true)
+  assert.deepEqual(changed.metadataChanges, ['alpha'])
   assert.equal(
     sameCanonicalValue({ a: 1, b: { x: 2, y: 3 } }, { b: { y: 3, x: 2 }, a: 1 }),
     true
   )
+})
+
+test('Monnify API credential rotation verifies an existing reserved account', async t => {
+  const gateway = gatewayFixture({
+    name: 'Monnify',
+    code: 'monnify',
+    adapterType: 'monnify',
+    status: 'inactive',
+    publicKey: 'MK_old',
+    secretKey: encryptSecret('monnify-old-secret'),
+    webhookSecret: encryptSecret('stable-webhook-secret'),
+    baseUrl: 'https://sandbox.monnify.com',
+    metadata: { contractCode: '1234567890', label: 'Primary' }
+  })
+  const originals = {
+    findById: PaymentGateway.findById,
+    updateOne: PaymentGateway.updateOne,
+    startSession: mongoose.startSession,
+    transactionCount: TransactionStatus.countDocuments,
+    userCount: User.countDocuments,
+    userFindOne: User.findOne,
+    auditCreate: AuditLog.create,
+    getAdapterInstance: paymentGatewayService.getAdapterInstance
+  }
+  let candidate
+  let countFilter
+  PaymentGateway.findById = async () => gateway
+  PaymentGateway.updateOne = async () => ({ matchedCount: 1 })
+  mongoose.startSession = async () => ({
+    startTransaction () {},
+    async commitTransaction () {},
+    async abortTransaction () {},
+    async endSession () {}
+  })
+  TransactionStatus.countDocuments = async () => 0
+  User.countDocuments = async filter => {
+    countFilter = filter
+    return 1
+  }
+  User.findOne = async () => ({
+    virtualAccounts: [{
+      provider: 'monnify',
+      gatewayId: gateway._id,
+      accountReference: 'VIRTUAL_507f1f77bcf86cd799439011',
+      accountNumber: '1234567890'
+    }]
+  })
+  paymentGatewayService.getAdapterInstance = config => {
+    candidate = config
+    return {
+      async verifyReservedAccountOwnership (probe) {
+        assert.deepEqual(probe, {
+          accountReference: 'VIRTUAL_507f1f77bcf86cd799439011',
+          accountNumber: '1234567890'
+        })
+        return true
+      }
+    }
+  }
+  AuditLog.create = async value => value
+  t.after(() => {
+    PaymentGateway.findById = originals.findById
+    PaymentGateway.updateOne = originals.updateOne
+    mongoose.startSession = originals.startSession
+    TransactionStatus.countDocuments = originals.transactionCount
+    User.countDocuments = originals.userCount
+    User.findOne = originals.userFindOne
+    AuditLog.create = originals.auditCreate
+    paymentGatewayService.getAdapterInstance = originals.getAdapterInstance
+  })
+
+  const res = response()
+  await controller.updateGateway(request(gateway, {
+    publicKey: 'MK_next',
+    secretKey: 'monnify-next-secret',
+    metadata: { label: 'Renamed' }
+  }), res)
+
+  assert.equal(res.statusCode, 200)
+  assert.equal(candidate.publicKey, 'MK_next')
+  assert.equal(candidate.secretKey, 'monnify-next-secret')
+  assert.equal(gateway.publicKey, 'MK_next')
+  assert.equal(gateway.webhookVerificationSnapshots.length, 0)
+  assert.equal(JSON.stringify(countFilter).includes('accountNumber'), false)
+  assert.equal(JSON.stringify(countFilter).includes('$exists'), false)
+})
+
+test('Monnify credential rotation fails closed when reserved-account ownership is unverified', async t => {
+  const gateway = gatewayFixture({
+    name: 'Monnify',
+    code: 'monnify',
+    adapterType: 'monnify',
+    status: 'inactive',
+    publicKey: 'MK_old',
+    secretKey: encryptSecret('monnify-old-secret'),
+    baseUrl: 'https://sandbox.monnify.com',
+    metadata: { contractCode: '1234567890' }
+  })
+  let saves = 0
+  gateway.save = async () => { saves++; return gateway }
+  const originals = {
+    findById: PaymentGateway.findById,
+    updateOne: PaymentGateway.updateOne,
+    startSession: mongoose.startSession,
+    transactionCount: TransactionStatus.countDocuments,
+    userCount: User.countDocuments,
+    userFindOne: User.findOne,
+    getAdapterInstance: paymentGatewayService.getAdapterInstance
+  }
+  PaymentGateway.findById = async () => gateway
+  PaymentGateway.updateOne = async () => ({ matchedCount: 1 })
+  mongoose.startSession = async () => ({
+    startTransaction () {},
+    async commitTransaction () {},
+    async abortTransaction () {},
+    async endSession () {}
+  })
+  TransactionStatus.countDocuments = async () => 0
+  User.countDocuments = async () => 1
+  User.findOne = async () => ({
+    virtualAccounts: [{
+      provider: 'monnify',
+      gatewayId: gateway._id,
+      accountReference: 'VIRTUAL_507f1f77bcf86cd799439011',
+      accountNumber: '1234567890'
+    }]
+  })
+  paymentGatewayService.getAdapterInstance = () => ({
+    async verifyReservedAccountOwnership () { return false }
+  })
+  t.after(() => {
+    PaymentGateway.findById = originals.findById
+    PaymentGateway.updateOne = originals.updateOne
+    mongoose.startSession = originals.startSession
+    TransactionStatus.countDocuments = originals.transactionCount
+    User.countDocuments = originals.userCount
+    User.findOne = originals.userFindOne
+    paymentGatewayService.getAdapterInstance = originals.getAdapterInstance
+  })
+
+  const res = response()
+  await controller.updateGateway(request(gateway, {
+    publicKey: 'MK_other-merchant',
+    secretKey: 'other-merchant-secret'
+  }), res)
+
+  assert.equal(res.statusCode, 409)
+  assert.equal(res.body.code, 'MONNIFY_CREDENTIAL_IDENTITY_UNVERIFIED')
+  assert.equal(gateway.publicKey, 'MK_old')
+  assert.equal(saves, 0)
+})
+
+test('Monnify merchant binding changes with no reserved accounts require replacement workflow', async t => {
+  const gateway = gatewayFixture({
+    name: 'Monnify',
+    code: 'monnify',
+    adapterType: 'monnify',
+    status: 'inactive',
+    publicKey: 'MK_old',
+    secretKey: encryptSecret('monnify-old-secret'),
+    baseUrl: 'https://sandbox.monnify.com',
+    metadata: {}
+  })
+  const originals = {
+    findById: PaymentGateway.findById,
+    updateOne: PaymentGateway.updateOne,
+    startSession: mongoose.startSession,
+    transactionCount: TransactionStatus.countDocuments,
+    userCount: User.countDocuments
+  }
+  let saved = false
+  gateway.save = async () => { saved = true; return gateway }
+  PaymentGateway.findById = async () => gateway
+  PaymentGateway.updateOne = async () => ({ matchedCount: 1 })
+  mongoose.startSession = async () => ({
+    startTransaction () {},
+    async commitTransaction () {},
+    async abortTransaction () {},
+    async endSession () {}
+  })
+  TransactionStatus.countDocuments = async () => 0
+  User.countDocuments = async () => 0
+  t.after(() => {
+    PaymentGateway.findById = originals.findById
+    PaymentGateway.updateOne = originals.updateOne
+    mongoose.startSession = originals.startSession
+    TransactionStatus.countDocuments = originals.transactionCount
+    User.countDocuments = originals.userCount
+  })
+
+  const res = response()
+  await controller.updateGateway(request(gateway, {
+    publicKey: 'MK_new',
+    secretKey: 'new-secret',
+    metadata: { contractCode: '2222222222' }
+  }), res)
+
+  assert.equal(res.statusCode, 409)
+  assert.equal(res.body.code, 'MONNIFY_MERCHANT_REPLACEMENT_REQUIRED')
+  assert.equal(saved, false)
+})
+
+test('Monnify contract routing remains locked but unrelated metadata is not', async t => {
+  const gateway = gatewayFixture({
+    name: 'Monnify',
+    code: 'monnify',
+    adapterType: 'monnify',
+    status: 'inactive',
+    publicKey: 'MK_current',
+    secretKey: encryptSecret('monnify-current-secret'),
+    baseUrl: 'https://sandbox.monnify.com',
+    metadata: { contractCode: '1234567890', label: 'Primary' }
+  })
+  const originals = {
+    findById: PaymentGateway.findById,
+    updateOne: PaymentGateway.updateOne,
+    startSession: mongoose.startSession,
+    transactionCount: TransactionStatus.countDocuments,
+    userCount: User.countDocuments,
+    auditCreate: AuditLog.create
+  }
+  PaymentGateway.findById = async () => gateway
+  PaymentGateway.updateOne = async () => ({ matchedCount: 1 })
+  mongoose.startSession = async () => ({
+    startTransaction () {},
+    async commitTransaction () {},
+    async abortTransaction () {},
+    async endSession () {}
+  })
+  TransactionStatus.countDocuments = async () => 0
+  User.countDocuments = async () => 2
+  AuditLog.create = async value => value
+  t.after(() => {
+    PaymentGateway.findById = originals.findById
+    PaymentGateway.updateOne = originals.updateOne
+    mongoose.startSession = originals.startSession
+    TransactionStatus.countDocuments = originals.transactionCount
+    User.countDocuments = originals.userCount
+    AuditLog.create = originals.auditCreate
+  })
+
+  const blocked = response()
+  await controller.updateGateway(request(gateway, {
+    metadata: { contractCode: '0987654321' }
+  }), blocked)
+  assert.equal(blocked.statusCode, 409)
+  assert.equal(blocked.body.code, 'MONNIFY_RESERVED_ACCOUNT_ROUTING_LOCKED')
+  assert.deepEqual(blocked.body.details.routingChanges, ['metadata.contractCode'])
+
+  const allowed = response()
+  await controller.updateGateway(request(gateway, {
+    metadata: { label: 'Renamed' }
+  }), allowed)
+  assert.equal(allowed.statusCode, 200)
+  assert.equal(gateway.metadata.contractCode, '1234567890')
+  assert.equal(gateway.metadata.label, 'Renamed')
+})
+
+test('Monnify webhook rotation preserves all historical verification contexts', async t => {
+  const historical = Array.from({ length: 5 }, (_, index) => ({
+    gatewayId: 'gateway-effective-changes',
+    code: 'monnify',
+    adapterType: 'monnify',
+    secretKey: encryptSecret(`old-secret-${index}`)
+  }))
+  const gateway = gatewayFixture({
+    name: 'Monnify',
+    code: 'monnify',
+    adapterType: 'monnify',
+    status: 'inactive',
+    publicKey: 'MK_current',
+    secretKey: encryptSecret('monnify-current-secret'),
+    webhookSecret: encryptSecret('monnify-current-webhook'),
+    baseUrl: 'https://sandbox.monnify.com',
+    metadata: { contractCode: '1234567890' },
+    webhookVerificationSnapshots: historical
+  })
+  const originals = {
+    findById: PaymentGateway.findById,
+    updateOne: PaymentGateway.updateOne,
+    startSession: mongoose.startSession,
+    transactionCount: TransactionStatus.countDocuments,
+    auditCreate: AuditLog.create
+  }
+  PaymentGateway.findById = async () => gateway
+  PaymentGateway.updateOne = async () => ({ matchedCount: 1 })
+  mongoose.startSession = async () => ({
+    startTransaction () {},
+    async commitTransaction () {},
+    async abortTransaction () {},
+    async endSession () {}
+  })
+  TransactionStatus.countDocuments = async () => 0
+  AuditLog.create = async value => value
+  t.after(() => {
+    PaymentGateway.findById = originals.findById
+    PaymentGateway.updateOne = originals.updateOne
+    mongoose.startSession = originals.startSession
+    TransactionStatus.countDocuments = originals.transactionCount
+    AuditLog.create = originals.auditCreate
+  })
+
+  const previousWebhookSecret = gateway.webhookSecret
+  const res = response()
+  await controller.updateGateway(request(gateway, {
+    webhookSecret: 'monnify-next-webhook'
+  }), res)
+
+  assert.equal(res.statusCode, 200)
+  assert.equal(gateway.webhookVerificationSnapshots.length, 6)
+  assert.equal(gateway.webhookVerificationSnapshots.includes(historical[0]), true)
+  assert.equal(gateway.webhookVerificationSnapshots[5].webhookSecret, previousWebhookSecret)
+
+  const body = Buffer.from('{"eventType":"SUCCESSFUL_TRANSACTION"}')
+  const signature = crypto
+    .createHmac('sha512', 'monnify-current-webhook')
+    .update(body)
+    .digest('hex')
+  const selected = paymentGatewayService._selectWebhookGateway(
+    paymentGatewayService._hydrateGatewayCredentials(gateway),
+    { 'monnify-signature': signature },
+    body
+  )
+  assert.equal(selected.matched, true)
+  assert.equal(selected.gateway.webhookSecret, 'monnify-current-webhook')
 })
 
 test('same secret and canonically identical metadata do not fence or archive', async t => {
