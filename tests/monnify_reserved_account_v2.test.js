@@ -54,14 +54,15 @@ const v2Body = overrides => ({
     ...(overrides || {})
 });
 
-const makeAdapter = () => {
+const makeAdapter = (overrides = {}) => {
     const adapter = new MonnifyAdapter({
         code: 'monnify',
         environment: 'test',
         baseUrl: 'https://sandbox.monnify.com',
         publicKey: 'MK_TEST_KEY',
         secretKey: 'test-secret',
-        metadata: gateway.metadata
+        metadata: gateway.metadata,
+        ...overrides
     });
     adapter.getAccessToken = async () => 'sandbox-token';
     return adapter;
@@ -178,9 +179,11 @@ test('real Monnify adapter is blocked before a claim when no approved identity s
         repository,
         gatewayService: {
             async getGateway() { return gateway; },
+            _isCustomerFundingEligible() { return true; },
             getAdapterInstance() { return adapter; }
         }
     });
+    service._assertOnboardingEligibility = async () => null;
 
     await assert.rejects(
         service.provision({
@@ -289,6 +292,75 @@ test('Monnify sandbox checkout rejects a non-sandbox Monnify host', async t => {
         }),
         error => error.code === 'MONNIFY_INITIALIZATION_RESPONSE_INVALID'
     );
+});
+
+test('Monnify live checkout accepts only the exact live SDK host', async t => {
+    const originalPost = axios.post;
+    t.after(() => { axios.post = originalPost; });
+    axios.post = async () => ({
+        data: {
+            requestSuccessful: true,
+            responseBody: {
+                checkoutUrl: 'https://sdk.monnify.com/checkout/live',
+                paymentReference: 'MONNIFY-23456789ABCDEFGH'
+            }
+        }
+    });
+    const adapter = makeAdapter({ baseUrl: 'https://api.monnify.com' });
+
+    const result = await adapter.initializePayment({
+        user,
+        amount: 100,
+        reference: 'MONNIFY-23456789ABCDEFGH'
+    });
+
+    assert.equal(result.authorizationUrl, 'https://sdk.monnify.com/checkout/live');
+});
+
+test('Monnify initialization rejects a provider reference mismatch', async t => {
+    const originalPost = axios.post;
+    t.after(() => { axios.post = originalPost; });
+    axios.post = async () => ({
+        data: {
+            requestSuccessful: true,
+            responseBody: {
+                checkoutUrl: 'https://sandbox.sdk.monnify.com/checkout/test',
+                paymentReference: 'DIFFERENT_REFERENCE'
+            }
+        }
+    });
+    const adapter = makeAdapter();
+
+    await assert.rejects(
+        adapter.initializePayment({
+            user,
+            amount: 100,
+            reference: 'MONNIFY-23456789ABCDEFGH'
+        }),
+        error => error.code === 'MONNIFY_INITIALIZATION_RESPONSE_INVALID'
+    );
+});
+
+test('successful Monnify verification does not invent missing currency', async t => {
+    const originalGet = axios.get;
+    t.after(() => { axios.get = originalGet; });
+    axios.get = async () => ({
+        data: {
+            requestSuccessful: true,
+            responseBody: {
+                paymentReference: 'MONNIFY-23456789ABCDEFGH',
+                transactionReference: 'MNFY_PROVIDER_REFERENCE',
+                paymentStatus: 'PAID',
+                amountPaid: 100
+            }
+        }
+    });
+    const adapter = makeAdapter();
+
+    const result = await adapter.verifyPayment('MONNIFY-23456789ABCDEFGH');
+
+    assert.equal(result.status, 'success');
+    assert.equal(result.currency, '');
 });
 
 test('Monnify status lookup queries v2 by merchant paymentReference', async t => {

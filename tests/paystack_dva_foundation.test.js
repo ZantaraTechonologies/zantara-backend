@@ -344,6 +344,7 @@ const makeGatewayService = ({
     };
     return {
         async getGateway(code) { return gateways[code] || null; },
+        _isCustomerFundingEligible() { return true; },
         getAdapterInstance(gateway) {
             return gateway.adapterType === 'paystack' ? paystackAdapter : monnifyAdapter;
         },

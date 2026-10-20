@@ -33,6 +33,7 @@ function validateRuntimeConfiguration(env = process.env) {
     const clientBaseUrlValue = String(env.CLIENT_BASE_URL || '').trim();
     const corsValue = String(env.CORS_ORIGIN || '').trim();
     const requireLiveValue = String(env.PAYMENT_GATEWAY_REQUIRE_LIVE || '').trim().toLowerCase();
+    const paymentGatewayEnvironment = String(env.PAYMENT_GATEWAY_ENVIRONMENT || '').trim().toLowerCase();
 
     if (deployment && !clientBaseUrlValue) throw new Error('CLIENT_BASE_URL is required in staging and production');
     if (deployment && !corsValue) throw new Error('CORS_ORIGIN is required in staging and production');
@@ -44,6 +45,18 @@ function validateRuntimeConfiguration(env = process.env) {
     }
     if (nodeEnv === 'production' && requireLiveValue !== 'true') {
         throw new Error('PAYMENT_GATEWAY_REQUIRE_LIVE must be true in production');
+    }
+    if (paymentGatewayEnvironment && !['test', 'live'].includes(paymentGatewayEnvironment)) {
+        throw new Error('PAYMENT_GATEWAY_ENVIRONMENT must be test or live');
+    }
+    if (nodeEnv === 'production' && paymentGatewayEnvironment && paymentGatewayEnvironment !== 'live') {
+        throw new Error('PAYMENT_GATEWAY_ENVIRONMENT must be live in production');
+    }
+    if (paymentGatewayEnvironment && ['true', 'false'].includes(requireLiveValue)) {
+        const requiredEnvironment = requireLiveValue === 'true' ? 'live' : 'test';
+        if (paymentGatewayEnvironment !== requiredEnvironment) {
+            throw new Error('PAYMENT_GATEWAY_ENVIRONMENT conflicts with PAYMENT_GATEWAY_REQUIRE_LIVE');
+        }
     }
 
     const clientBaseUrl = clientBaseUrlValue
@@ -61,7 +74,14 @@ function validateRuntimeConfiguration(env = process.env) {
         nodeEnv,
         clientBaseUrl,
         corsOrigins,
-        paymentGatewayRequireLive: requireLiveValue === 'true'
+        paymentGatewayRequireLive: requireLiveValue === 'true',
+        paymentGatewayEnvironment: paymentGatewayEnvironment || (
+            nodeEnv === 'production'
+                ? 'live'
+                : nodeEnv === 'staging'
+                    ? (requireLiveValue === 'true' ? 'live' : 'test')
+                    : null
+        )
     };
 }
 

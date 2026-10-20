@@ -265,7 +265,43 @@ async function runPaymentGatewayTests() {
         await test('1. Multiple gateways can simultaneously have status=active', async () => {
             mockGateways = [
                 { _id: 'gw-1', name: 'Paystack', code: 'paystack', adapterType: 'paystack', status: 'active', isDefault: true, supportedChannels: ['card', 'bank_transfer'] },
-                { _id: 'gw-2', name: 'Monnify', code: 'monnify', adapterType: 'monnify', status: 'active', isDefault: false, supportedChannels: ['bank_transfer', 'virtual_account'] },
+                {
+                    _id: 'gw-2',
+                    name: 'Monnify',
+                    code: 'monnify',
+                    adapterType: 'monnify',
+                    status: 'active',
+                    environment: 'test',
+                    baseUrl: 'https://sandbox.monnify.com',
+                    isDefault: false,
+                    supportedChannels: ['bank_transfer', 'virtual_account'],
+                    virtualAccountMutationVersion: 0,
+                    metadata: {
+                        administrativeSandboxOnly: false,
+                        checkoutValidation: {
+                            status: 'verified',
+                            reference: 'MNFY_ARCHITECTURE_TEST',
+                            gatewayId: 'gw-2',
+                            environment: 'test',
+                            configurationVersion: 0,
+                            amountKobo: 10000,
+                            currency: 'NGN',
+                            provider: 'monnify',
+                            providerTransactionId: 'MNFY_ARCHITECTURE_PROVIDER_TX'
+                        },
+                        customerFundingEligibility: {
+                            status: 'eligible',
+                            reference: 'MNFY_ARCHITECTURE_TEST',
+                            gatewayId: 'gw-2',
+                            environment: 'test',
+                            configurationVersion: 0,
+                            amountKobo: 10000,
+                            currency: 'NGN',
+                            provider: 'monnify',
+                            providerTransactionId: 'MNFY_ARCHITECTURE_PROVIDER_TX'
+                        }
+                    }
+                },
                 { _id: 'gw-3', name: 'Flutterwave', code: 'flutterwave', adapterType: 'flutterwave', status: 'active', isDefault: false, supportedChannels: ['card', 'ussd'] }
             ];
 

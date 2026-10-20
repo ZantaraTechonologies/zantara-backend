@@ -335,7 +335,8 @@ test('Paystack DVA gateway lifecycle retains verification and blocks deletion', 
         assert.equal(gateway.webhookVerificationSnapshots[1].secretKey, previousSecret);
     });
 
-    await t.test('stored historical secret verifies exact raw webhook after rotation', () => {
+    await t.test('deactivated gateway retains historical webhook verification', () => {
+        gateway.status = 'inactive';
         const body = Buffer.from('{"event":"charge.success","data":{"id":71}}');
         const signature = crypto.createHmac('sha512', 'sk_live_old').update(body).digest('hex');
         const hydrated = paymentGatewayService._hydrateGatewayCredentials(gateway);
@@ -380,7 +381,7 @@ test('Paystack DVA gateway lifecycle retains verification and blocks deletion', 
         assert.equal(selectedSecret, 'sk_live_old');
     });
 
-    await t.test('gateway deletion is blocked while any Paystack DVA references it', async () => {
+    await t.test('deactivated gateway retains DVA and webhook verification history', async () => {
         const res = response();
         await adminGatewayController.deleteGateway({
             params: { id: gateway._id },
@@ -388,8 +389,10 @@ test('Paystack DVA gateway lifecycle retains verification and blocks deletion', 
             headers: {},
             ip: '127.0.0.1'
         }, res);
-        assert.equal(res.statusCode, 400);
-        assert.match(res.body.message, /virtual-account users/);
+        assert.equal(res.statusCode, 409);
+        assert.equal(res.body.code, 'PAYMENT_GATEWAY_HARD_DELETE_DISABLED');
+        assert.match(res.body.message, /historical verification and reconciliation/);
+        assert.equal(gateway.webhookVerificationSnapshots.length, 2);
         assert.equal(deleted, false);
     });
 });

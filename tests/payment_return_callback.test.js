@@ -37,9 +37,34 @@ async function runPaymentReturnCallbackTests() {
         },
         {
             _id: 'g-monnify', code: 'monnify', name: 'Monnify', adapterType: 'monnify',
-            status: 'active', isDefault: false, priority: 2, baseUrl: 'https://sandbox.monnify.com',
+            status: 'active', environment: 'test', isDefault: false, priority: 2, baseUrl: 'https://sandbox.monnify.com',
             supportedChannels: ['card', 'bank_transfer', 'virtual_account'], publicKey: 'MK', secretKey: 'sk',
-            webhookSecret: '', metadata: { contractCode: '123456' }
+            webhookSecret: '', metadata: {
+                contractCode: '123456',
+                administrativeSandboxOnly: false,
+                checkoutValidation: {
+                    status: 'verified',
+                    reference: 'MNFY_CALLBACK_TEST',
+                    gatewayId: 'g-monnify',
+                    environment: 'test',
+                    configurationVersion: 0,
+                    amountKobo: 10000,
+                    currency: 'NGN',
+                    provider: 'monnify',
+                    providerTransactionId: 'MNFY_CALLBACK_PROVIDER_TX'
+                },
+                customerFundingEligibility: {
+                    status: 'eligible',
+                    reference: 'MNFY_CALLBACK_TEST',
+                    gatewayId: 'g-monnify',
+                    environment: 'test',
+                    configurationVersion: 0,
+                    amountKobo: 10000,
+                    currency: 'NGN',
+                    provider: 'monnify',
+                    providerTransactionId: 'MNFY_CALLBACK_PROVIDER_TX'
+                }
+            }
         },
         {
             _id: 'g-flw', code: 'flutterwave', name: 'Flutterwave', adapterType: 'flutterwave',
@@ -114,6 +139,33 @@ async function runPaymentReturnCallbackTests() {
         }
     };
 
+    const eligibleMonnifyMetadata = () => ({
+        contractCode: '123456',
+        administrativeSandboxOnly: false,
+        checkoutValidation: {
+            status: 'verified',
+            reference: 'MNFY_CALLBACK_TEST',
+            gatewayId: 'g-monnify',
+            environment: 'test',
+            configurationVersion: 0,
+            amountKobo: 10000,
+            currency: 'NGN',
+            provider: 'monnify',
+            providerTransactionId: 'MNFY_CALLBACK_PROVIDER_TX'
+        },
+        customerFundingEligibility: {
+            status: 'eligible',
+            reference: 'MNFY_CALLBACK_TEST',
+            gatewayId: 'g-monnify',
+            environment: 'test',
+            configurationVersion: 0,
+            amountKobo: 10000,
+            currency: 'NGN',
+            provider: 'monnify',
+            providerTransactionId: 'MNFY_CALLBACK_PROVIDER_TX'
+        }
+    });
+
     process.env[envKey] = 'https://dahavtu.netlify.app';
 
     await test('1. Paystack funding callback derives /paystack/return (no override)', async () => {
@@ -163,13 +215,15 @@ async function runPaymentReturnCallbackTests() {
 
     await test('5. Missing CLIENT_BASE_URL defaults to localhost (must be flagged in prod)', async () => {
         delete process.env[envKey];
-        const restore = stubAdapter('monnify');
-        const res = await paymentGatewayService.initializeFunding({
-            gatewayCode: 'monnify', user: { _id: 'u1', email: 'a@z.ng' }, amount: 1000, channel: 'card'
-        });
-        restore();
-        process.env[envKey] = 'https://dahavtu.netlify.app';
-        assert.strictEqual(res.callbackUrl, 'http://localhost:5173/monnify/return');
+        try {
+            const res = await withStubbedAdapter('monnify', () =>
+                paymentGatewayService.initializeFunding({
+                    gatewayCode: 'monnify', user: { _id: 'u1', email: 'a@z.ng' }, amount: 1000, channel: 'card'
+                }));
+            assert.strictEqual(res.callbackUrl, 'http://localhost:5173/monnify/return');
+        } finally {
+            process.env[envKey] = 'https://dahavtu.netlify.app';
+        }
     });
 
     await test('6. /wallet/fund ignores provider compatibility input and exposes the default callback', async () => {
@@ -197,7 +251,7 @@ async function runPaymentReturnCallbackTests() {
     await test('8. Amount-only funding uses a normal active Monnify default', async () => {
         const monnify = mockGateways.find(g => g.code === 'monnify');
         mockGateways.forEach(g => { g.isDefault = g.code === 'monnify'; });
-        monnify.metadata = { contractCode: '123456' };
+        monnify.metadata = eligibleMonnifyMetadata();
         const result = await withStubbedAdapter('monnify', () =>
             paymentGatewayService.initializeFunding({
                 user: { _id: 'u1', email: 'a@z.ng' }, amount: 500
@@ -218,7 +272,7 @@ async function runPaymentReturnCallbackTests() {
 
     await test('10. Switching the eligible default changes amount-only routing', async () => {
         const monnify = mockGateways.find(g => g.code === 'monnify');
-        monnify.metadata = { contractCode: '123456' };
+        monnify.metadata = eligibleMonnifyMetadata();
         mockGateways.forEach(g => { g.isDefault = g.code === 'paystack'; });
         const before = await withStubbedAdapter('paystack', () =>
             paymentGatewayService.initializeFunding({

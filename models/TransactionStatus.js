@@ -26,6 +26,7 @@ const transactionStatusSchema = new mongoose.Schema({
     gatewayId: { type: String },                       // exact gateway configuration used for provider-owned deposits
     service: { type: String, default: '' },             // human-readable gateway name e.g. 'Paystack'
     gatewayConfigSnapshot: { type: mongoose.Schema.Types.Mixed, select: false },
+    administrativeValidationLeaseToken: { type: String, select: false },
     initializationOutcome: {
         type: String,
         enum: ['pending', 'ambiguous', 'definitive_failure'],

@@ -2335,6 +2335,15 @@ class VirtualAccountService {
         if (gateway.status !== 'active') {
             throw this._error(`${normalizedCode} gateway is not active`, 'VIRTUAL_ACCOUNT_GATEWAY_INACTIVE', 503);
         }
+        const customerFundingEligible = typeof this.gatewayService._isCustomerFundingEligible === 'function'
+            && this.gatewayService._isCustomerFundingEligible(gateway);
+        if (!customerFundingEligible) {
+            throw this._error(
+                `${normalizedCode} gateway is not eligible for customer funding`,
+                'VIRTUAL_ACCOUNT_GATEWAY_CUSTOMER_FUNDING_INELIGIBLE',
+                503
+            );
+        }
         if (consent !== true) {
             throw this._error(
                 `Express consent is required for ${provider} permanent-account provisioning`,

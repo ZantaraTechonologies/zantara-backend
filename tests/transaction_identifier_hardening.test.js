@@ -192,7 +192,7 @@ async function main() {
         assert.match(flutterwave, /^FLUTTERWAVE-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{16}$/);
     });
 
-    await test('environment-only Monnify and Flutterwave configurations remain recoverable', async () => {
+    await test('environment-only Monnify is disabled while Flutterwave compatibility remains', async () => {
         const originalCount = PaymentGateway.countDocuments;
         const previous = {
             MONNIFY_API_KEY: process.env.MONNIFY_API_KEY,
@@ -206,8 +206,7 @@ async function main() {
             process.env.FLUTTERWAVE_SECRET_KEY = 'flutterwave-secret';
             const monnify = await paymentGatewayService.getGateway('monnify');
             const flutterwave = await paymentGatewayService.getGateway('flutterwave');
-            assert.strictEqual(monnify.adapterType, 'monnify');
-            assert.strictEqual(monnify.publicKey, 'monnify-public');
+            assert.strictEqual(monnify, null);
             assert.strictEqual(flutterwave.adapterType, 'flutterwave');
             assert.strictEqual(flutterwave.secretKey, 'flutterwave-secret');
         } finally {

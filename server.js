@@ -19,6 +19,7 @@ const {
 } = require('./config/db')
 const { assertOnboardingConfiguration } = require('./config/onboarding')
 const { validateRuntimeConfiguration } = require('./config/runtime')
+const { resolveCustomerFundingEnvironment } = require('./utils/paymentGatewayEligibility')
 const securityHeaders = require('./middlewares/securityHeaders')
 
 // Fail before binding the HTTP port if the permanent production key is unsafe.
@@ -215,6 +216,7 @@ mongoose
       mongoose.connection.name,
       expectedDatabaseName
     )
+    resolveCustomerFundingEnvironment()
 
     await require('./services/onboardingConfig.service').initialize()
 

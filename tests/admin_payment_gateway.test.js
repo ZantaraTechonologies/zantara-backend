@@ -126,7 +126,9 @@ async function runAdminPaymentGatewayTests() {
         }
         return null;
     };
-    PaymentGateway.create = async (doc) => {
+    PaymentGateway.create = async (input) => {
+        const isBatch = Array.isArray(input);
+        const doc = isBatch ? input[0] : input;
         const gw = {
             ...doc,
             _id: new mongoose.Types.ObjectId(),
@@ -139,7 +141,7 @@ async function runAdminPaymentGatewayTests() {
             markModified: function () {}
         };
         gatewaysDB.push(gw);
-        return gw;
+        return isBatch ? [gw] : gw;
     };
     PaymentGateway.findByIdAndDelete = async (id) => {
         const idx = gatewaysDB.findIndex(g => String(g._id) === String(id));
@@ -168,7 +170,8 @@ async function runAdminPaymentGatewayTests() {
     };
 
     AuditLog.create = async (log) => {
-        auditLogsDB.push(log);
+        const entries = Array.isArray(log) ? log : [log];
+        auditLogsDB.push(...entries);
         return log;
     };
 
@@ -338,14 +341,15 @@ async function runAdminPaymentGatewayTests() {
         // 4. MULTIPLE ACTIVE GATEWAYS & SINGLE DEFAULT CONCURRENCY
         // ─────────────────────────────────────────────────────────────────────────────
         await test('9. Multiple active gateways can coexist simultaneously', async () => {
-            // Add Monnify and Flutterwave as active
+            // Monnify must be created inactive, then becomes active only after
+            // the dedicated validation lifecycle (represented by exact evidence here).
             const { req: req1, res: res1 } = mockReqRes({
                 user: { role: 'superAdmin' },
                 body: {
                     name: 'Monnify Direct',
                     code: 'monnify',
                     adapterType: 'monnify',
-                    status: 'active',
+                    status: 'inactive',
                     isDefault: false,
                     publicKey: 'MK_TEST_123',
                     secretKey: 'MNFY_SECRET_123',
@@ -355,6 +359,34 @@ async function runAdminPaymentGatewayTests() {
             });
             await adminGatewayController.createGateway(req1, res1);
             assert.strictEqual(res1.statusCode, 201);
+            const monnify = gatewaysDB.find(g => g.code === 'monnify');
+            monnify.status = 'active';
+            monnify.metadata = {
+                ...monnify.metadata,
+                administrativeSandboxOnly: false,
+                checkoutValidation: {
+                    status: 'verified',
+                    reference: 'MNFY_ADMIN_TEST',
+                    gatewayId: String(monnify._id),
+                    environment: 'test',
+                    configurationVersion: 0,
+                    amountKobo: 10000,
+                    currency: 'NGN',
+                    provider: 'monnify',
+                    providerTransactionId: 'MNFY_ADMIN_PROVIDER_TX'
+                },
+                customerFundingEligibility: {
+                    status: 'eligible',
+                    reference: 'MNFY_ADMIN_TEST',
+                    gatewayId: String(monnify._id),
+                    environment: 'test',
+                    configurationVersion: 0,
+                    amountKobo: 10000,
+                    currency: 'NGN',
+                    provider: 'monnify',
+                    providerTransactionId: 'MNFY_ADMIN_PROVIDER_TX'
+                }
+            };
 
             const { req: req2, res: res2 } = mockReqRes({
                 user: { role: 'superAdmin' },
@@ -416,7 +448,7 @@ async function runAdminPaymentGatewayTests() {
                 assert.strictEqual(res.responseData?.code, 'PAYMENT_GATEWAY_SANDBOX_ISOLATED');
                 assert.strictEqual(monnify.isDefault, false);
             } finally {
-                delete monnify.metadata.administrativeSandboxOnly;
+                monnify.metadata.administrativeSandboxOnly = false;
             }
         });
 
@@ -589,9 +621,8 @@ async function runAdminPaymentGatewayTests() {
         // ─────────────────────────────────────────────────────────────────────────────
         // 8. DELETION SAFEGUARD
         // ─────────────────────────────────────────────────────────────────────────────
-        await test('19. Gateway deletion is blocked if historical financial transactions exist', async () => {
+        await test('19. Gateway hard deletion is permanently disabled', async () => {
             const paystack = gatewaysDB.find(g => g.code === 'paystack');
-            // Mock that 1 transaction exists for paystack
             transactionsDB = [{ provider: 'paystack', refId: 'REF-OLD-1' }];
 
             const { req, res } = mockReqRes({
@@ -600,8 +631,9 @@ async function runAdminPaymentGatewayTests() {
             });
 
             await adminGatewayController.deleteGateway(req, res);
-            assert.strictEqual(res.statusCode, 400);
-            assert.ok(res.responseData?.message.includes('historical financial records'));
+            assert.strictEqual(res.statusCode, 409);
+            assert.strictEqual(res.responseData?.code, 'PAYMENT_GATEWAY_HARD_DELETE_DISABLED');
+            assert.ok(res.responseData?.message.includes('Deactivate it'));
             assert.ok(gatewaysDB.some(g => g.code === 'paystack'), 'Paystack must NOT be deleted');
         });
 

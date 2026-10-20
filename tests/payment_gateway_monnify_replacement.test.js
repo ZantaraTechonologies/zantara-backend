@@ -38,6 +38,15 @@ function response () {
   }
 }
 
+function transactionSession (state = {}) {
+  return {
+    startTransaction () { state.started = true },
+    async commitTransaction () { state.committed = true },
+    async abortTransaction () { state.aborted = true },
+    async endSession () { state.ended = true }
+  }
+}
+
 function request (gateway, body = {}) {
   return {
     params: { id: gateway._id },
@@ -63,11 +72,47 @@ function gatewayFixture () {
     webhookSecret: encryptSecret('old-webhook'),
     baseUrl: 'https://sandbox.monnify.com',
     supportedChannels: ['card', 'bank_transfer'],
-    metadata: { contractCode: '1111111111', label: 'Existing' },
+    metadata: {
+      contractCode: '1111111111',
+      label: 'Existing',
+      administrativeSandboxOnly: true
+    },
     webhookVerificationSnapshots: [],
     virtualAccountMutationVersion: 3,
     markModified () {},
     async save () { return this }
+  }
+}
+
+function approveGatewayForCustomerFunding (gateway) {
+  const reference = 'MNFY_APPROVED_TEST'
+  const providerTransactionId = 'MNFY_APPROVED_PROVIDER_TX'
+  const version = Number(gateway.virtualAccountMutationVersion || 0)
+  gateway.metadata = {
+    ...gateway.metadata,
+    administrativeSandboxOnly: false,
+    checkoutValidation: {
+      status: 'verified',
+      reference,
+      gatewayId: gateway._id,
+      environment: gateway.environment,
+      configurationVersion: version,
+      amountKobo: 10000,
+      currency: 'NGN',
+      provider: 'monnify',
+      providerTransactionId
+    },
+    customerFundingEligibility: {
+      status: 'eligible',
+      reference,
+      gatewayId: gateway._id,
+      environment: gateway.environment,
+      configurationVersion: version,
+      amountKobo: 10000,
+      currency: 'NGN',
+      provider: 'monnify',
+      providerTransactionId
+    }
   }
 }
 
@@ -123,7 +168,8 @@ async function executeReplacement (t, {
   gateway,
   owners = [],
   unresolvedPayments = 0,
-  body = replacementBody()
+  body = replacementBody(),
+  auditFailure = false
 }) {
   const password = await bcrypt.hash('correct-password', 4)
   const originals = {
@@ -140,6 +186,8 @@ async function executeReplacement (t, {
   const snapshotUpdates = []
   let adapterCalls = 0
   let sessionStarted = false
+  let committed = false
+  let aborted = false
   PaymentGateway.findById = () => queryResult(gateway)
   PaymentGateway.updateOne = async () => ({ matchedCount: 1 })
   TransactionStatus.countDocuments = async () => unresolvedPayments
@@ -156,13 +204,16 @@ async function executeReplacement (t, {
     snapshotUpdates.push({ filter, update })
     return { matchedCount: 1 }
   }
-  AuditLog.create = async value => value
+  AuditLog.create = async value => {
+    if (auditFailure) throw new Error('replacement audit unavailable')
+    return value
+  }
   mongoose.startSession = async () => {
     sessionStarted = true
     return {
       startTransaction () {},
-      async commitTransaction () {},
-      async abortTransaction () {},
+      async commitTransaction () { committed = true },
+      async abortTransaction () { aborted = true },
       async endSession () {}
     }
   }
@@ -189,7 +240,142 @@ async function executeReplacement (t, {
     snapshotUpdates,
     adapterCalls,
     sessionStarted,
+    committed,
+    aborted,
     realGetAdapterInstance: originals.getAdapterInstance
+  }
+}
+
+async function executeEligibility (t, {
+  verificationStatus = 'success',
+  expiresAt = new Date(Date.now() + 60_000),
+  gatewayEnvironment = 'test',
+  checkoutEnvironment = gatewayEnvironment,
+  snapshotEnvironment = gatewayEnvironment,
+  checkoutStatus = 'initialized',
+  checkoutHasReference = true,
+  transactionLeaseToken = checkoutStatus === 'initializing' ? 'owned-lease' : undefined,
+  auditFailure = false
+} = {}) {
+  const gateway = gatewayFixture()
+  gateway.environment = gatewayEnvironment
+  gateway.baseUrl = gatewayEnvironment === 'live'
+    ? 'https://api.monnify.com'
+    : 'https://sandbox.monnify.com'
+  const reference = 'MNFY_VALIDATION_REFERENCE'
+  gateway.metadata.checkoutValidation = {
+    status: checkoutStatus,
+    ...(checkoutHasReference ? { reference } : {}),
+    ...(checkoutStatus === 'initializing' ? { leaseToken: 'owned-lease' } : {}),
+    gatewayId: gateway._id,
+    environment: checkoutEnvironment,
+    configurationVersion: 3,
+    amountKobo: 10000,
+    currency: 'NGN',
+    initializedAt: new Date(Date.now() - 1000),
+    expiresAt
+  }
+  const transaction = {
+    refId: reference,
+    userId: 'admin-monnify-replacement',
+    type: 'gateway_test',
+    status: 'pending',
+    provider: 'monnify',
+    gatewayId: gateway._id,
+    amountKobo: 10000,
+    expectedCurrency: 'NGN',
+    ...(transactionLeaseToken ? { administrativeValidationLeaseToken: transactionLeaseToken } : {}),
+    gatewayConfigSnapshot: {
+      gatewayId: gateway._id,
+      code: 'monnify',
+      adapterType: 'monnify',
+      environment: snapshotEnvironment,
+      configurationVersion: 3
+    }
+  }
+  const password = await bcrypt.hash('correct-password', 4)
+  const originals = {
+    gatewayFindById: PaymentGateway.findById,
+    gatewayUpdateOne: PaymentGateway.updateOne,
+    txFindOne: TransactionStatus.findOne,
+    userFindById: User.findById,
+    auditCreate: AuditLog.create,
+    verifyFunding: paymentGatewayService.verifyFunding,
+    startSession: mongoose.startSession
+  }
+  let gatewayUpdate
+  let verificationCalls = 0
+  let committed = false
+  let aborted = false
+  let auditWrite
+  PaymentGateway.findById = () => queryResult(gateway)
+  PaymentGateway.updateOne = async (filter, update) => {
+    gatewayUpdate = { filter, update }
+    return { matchedCount: 1 }
+  }
+  TransactionStatus.findOne = () => queryResult(transaction)
+  User.findById = () => queryResult({
+    _id: 'admin-monnify-replacement',
+    name: 'Test SuperAdmin',
+    password,
+    status: true,
+    role: 'superAdmin',
+    roles: ['superAdmin']
+  })
+  AuditLog.create = async (value, options) => {
+    auditWrite = { value, options }
+    if (auditFailure) throw new Error('audit unavailable')
+    return value
+  }
+  const session = {
+    startTransaction () {},
+    async commitTransaction () { committed = true },
+    async abortTransaction () { aborted = true },
+    async endSession () {}
+  }
+  mongoose.startSession = async () => session
+  paymentGatewayService.verifyFunding = async () => {
+    verificationCalls++
+    if (verificationStatus === 'success') {
+      Object.assign(transaction, {
+        status: 'success',
+        confirmedProvider: 'monnify',
+        confirmedReference: reference,
+        confirmedAmountKobo: 10000,
+        confirmedCurrency: 'NGN',
+        confirmedProviderRef: 'MNFY_PROVIDER_TRANSACTION'
+      })
+    }
+    return { status: verificationStatus, reference }
+  }
+  t.after(() => {
+    PaymentGateway.findById = originals.gatewayFindById
+    PaymentGateway.updateOne = originals.gatewayUpdateOne
+    TransactionStatus.findOne = originals.txFindOne
+    User.findById = originals.userFindById
+    AuditLog.create = originals.auditCreate
+    paymentGatewayService.verifyFunding = originals.verifyFunding
+    mongoose.startSession = originals.startSession
+  })
+
+  const res = response()
+  await controller.enableMonnifyCustomerFunding(request(gateway, {
+    reference,
+    currentPassword: 'correct-password',
+    confirmation: gatewayEnvironment === 'live'
+      ? 'enable-monnify-live-customer-funding'
+      : 'enable-monnify-test-customer-funding'
+  }), res)
+  return {
+    res,
+    gateway,
+    transaction,
+    gatewayUpdate,
+    verificationCalls,
+    auditWrite,
+    committed,
+    aborted,
+    session
   }
 }
 
@@ -296,6 +482,50 @@ test('confirmed Monnify replacement archives old account context and preserves g
     'old-secret'
   )
   assert.equal(res.body.diagnostics.defaultGatewayChanged, false)
+})
+
+test('live Monnify replacement requires live confirmation and exact live API base', async t => {
+  const gateway = gatewayFixture()
+  const rejected = await executeReplacement(t, {
+    gateway,
+    body: replacementBody({ environment: 'live' })
+  })
+  assert.equal(rejected.res.statusCode, 409)
+  assert.equal(
+    rejected.res.body.details.requiredConfirmation,
+    'replace-monnify-live-merchant'
+  )
+})
+
+test('confirmed live Monnify replacement remains inactive, non-default, and admin-isolated', async t => {
+  const gateway = gatewayFixture()
+  const result = await executeReplacement(t, {
+    gateway,
+    body: replacementBody({
+      environment: 'live',
+      baseUrl: 'https://api.monnify.com',
+      confirmation: 'replace-monnify-live-merchant'
+    })
+  })
+
+  assert.equal(result.res.statusCode, 200)
+  assert.equal(gateway.environment, 'live')
+  assert.equal(gateway.baseUrl, 'https://api.monnify.com')
+  assert.equal(gateway.status, 'inactive')
+  assert.equal(gateway.isDefault, false)
+  assert.equal(gateway.metadata.administrativeSandboxOnly, true)
+})
+
+test('replacement audit failure aborts the merchant replacement transaction', async t => {
+  const result = await executeReplacement(t, {
+    gateway: gatewayFixture(),
+    auditFailure: true
+  })
+
+  assert.equal(result.res.statusCode, 400)
+  assert.match(result.res.body.message, /replacement audit unavailable/)
+  assert.equal(result.committed, false)
+  assert.equal(result.aborted, true)
 })
 
 test('replacement uses the old API secret when the optional webhook secret was never configured', async t => {
@@ -600,7 +830,8 @@ test('sandbox checkout pins Monnify gateway identity/environment without changin
     auditCreate: AuditLog.create,
     initializeFunding: paymentGatewayService.initializeFunding,
     gatewayUpdateOne: PaymentGateway.updateOne,
-    setDefault: PaymentGateway.setDefault
+    setDefault: PaymentGateway.setDefault,
+    startSession: mongoose.startSession
   }
   let initialization
   let markerUpdate
@@ -613,6 +844,7 @@ test('sandbox checkout pins Monnify gateway identity/environment without changin
     return { matchedCount: 1 }
   }
   PaymentGateway.setDefault = async () => { defaultChanged = true }
+  mongoose.startSession = async () => transactionSession()
   paymentGatewayService.initializeFunding = async options => {
     initialization = options
     return {
@@ -628,6 +860,7 @@ test('sandbox checkout pins Monnify gateway identity/environment without changin
     paymentGatewayService.initializeFunding = originals.initializeFunding
     PaymentGateway.updateOne = originals.gatewayUpdateOne
     PaymentGateway.setDefault = originals.setDefault
+    mongoose.startSession = originals.startSession
   })
 
   const res = response()
@@ -644,13 +877,304 @@ test('sandbox checkout pins Monnify gateway identity/environment without changin
   assert.equal(initialization.requiredMutationVersion, 3)
   assert.equal(initialization.allowInactiveGateway, true)
   assert.equal(initialization.administrativeSandboxTest, true)
+  assert.match(initialization.administrativeValidationLeaseToken, /^[a-f0-9]{64}$/)
   assert.equal(initialization.metadata.administrativeSandboxTest, true)
-  assert.equal(
-    markerUpdate.update.$set.lastHealthCheck.message,
-    'Monnify sandbox hosted checkout initialized successfully'
-  )
+  assert.equal(markerUpdate.update.$set['metadata.checkoutValidation'].status, 'initialized')
+  assert.equal(markerUpdate.update.$set['metadata.checkoutValidation'].reference, 'MNFY_TEST_REFERENCE')
+  assert.equal(markerUpdate.update.$set['metadata.checkoutValidation'].configurationVersion, 3)
+  assert.equal(markerUpdate.update.$set['metadata.checkoutValidation'].amountKobo, 10000)
+  assert.equal(markerUpdate.update.$set['metadata.checkoutValidation'].currency, 'NGN')
   assert.equal(defaultChanged, false)
   assert.equal(gateway.isDefault, false)
+})
+
+test('coded checkout audit failure returns the accepted reference when recovery persistence also fails', async t => {
+  const gateway = gatewayFixture()
+  const password = await bcrypt.hash('correct-password', 4)
+  const originals = {
+    userFindById: User.findById,
+    gatewayFindById: PaymentGateway.findById,
+    gatewayUpdateOne: PaymentGateway.updateOne,
+    initializeFunding: paymentGatewayService.initializeFunding,
+    auditCreate: AuditLog.create,
+    startSession: mongoose.startSession
+  }
+  const state = { updates: [] }
+  User.findById = () => queryResult({
+    _id: 'admin-monnify-replacement',
+    name: 'Test SuperAdmin',
+    email: 'admin@example.test',
+    password,
+    status: true,
+    role: 'superAdmin',
+    roles: ['superAdmin']
+  })
+  PaymentGateway.findById = () => queryResult(gateway)
+  PaymentGateway.updateOne = async (filter, update, options) => {
+    state.updates.push({ filter, update, options })
+    if (update.$set?.['metadata.checkoutValidation']?.status === 'ambiguous') {
+      const error = new Error('recovery write unavailable')
+      error.code = 91
+      throw error
+    }
+    return { matchedCount: 1 }
+  }
+  paymentGatewayService.initializeFunding = async () => ({
+    authorizationUrl: 'https://sandbox.sdk.monnify.com/checkout/test',
+    reference: 'MNFY_AUDIT_RECOVERY_REFERENCE',
+    provider: 'monnify'
+  })
+  AuditLog.create = async () => {
+    const error = new Error('audit unavailable')
+    error.code = 112
+    throw error
+  }
+  mongoose.startSession = async () => transactionSession(state)
+  t.after(() => {
+    User.findById = originals.userFindById
+    PaymentGateway.findById = originals.gatewayFindById
+    PaymentGateway.updateOne = originals.gatewayUpdateOne
+    paymentGatewayService.initializeFunding = originals.initializeFunding
+    AuditLog.create = originals.auditCreate
+    mongoose.startSession = originals.startSession
+  })
+
+  const res = response()
+  await controller.testMonnifyHostedCheckout(
+    request(gateway, { amount: 100, currentPassword: 'correct-password' }),
+    res
+  )
+
+  assert.equal(res.statusCode, 202)
+  assert.equal(res.body.code, 'PAYMENT_INITIALIZATION_AMBIGUOUS')
+  assert.equal(res.body.reference, 'MNFY_AUDIT_RECOVERY_REFERENCE')
+  assert.equal(state.committed, undefined)
+  assert.equal(state.aborted, true)
+  const recovery = state.updates.find(item => (
+    item.update.$set?.['metadata.checkoutValidation']?.status === 'ambiguous'
+  ))
+  assert.ok(recovery)
+  assert.equal(recovery.options, undefined)
+})
+
+test('a second validation checkout is rejected before provider dispatch while the lease is held', async t => {
+  const gateway = gatewayFixture()
+  const password = await bcrypt.hash('correct-password', 4)
+  const originals = {
+    userFindById: User.findById,
+    gatewayFindById: PaymentGateway.findById,
+    gatewayUpdateOne: PaymentGateway.updateOne,
+    initializeFunding: paymentGatewayService.initializeFunding,
+    auditCreate: AuditLog.create,
+    startSession: mongoose.startSession
+  }
+  let leaseHeld = false
+  let initializeCalls = 0
+  let releaseInitialization
+  let providerEntered
+  const providerStarted = new Promise(resolve => { providerEntered = resolve })
+  const providerResult = new Promise(resolve => { releaseInitialization = resolve })
+
+  User.findById = () => queryResult({
+    _id: 'admin-monnify-replacement',
+    name: 'Test SuperAdmin',
+    email: 'admin@example.test',
+    password,
+    status: true,
+    role: 'superAdmin',
+    roles: ['superAdmin']
+  })
+  PaymentGateway.findById = () => queryResult(gateway)
+  PaymentGateway.updateOne = async (filter, update) => {
+    if (update.$set?.['metadata.checkoutValidation']?.status === 'initializing') {
+      if (leaseHeld) return { matchedCount: 0 }
+      leaseHeld = true
+      return { matchedCount: 1 }
+    }
+    return { matchedCount: 1 }
+  }
+  paymentGatewayService.initializeFunding = async () => {
+    initializeCalls++
+    providerEntered()
+    return providerResult
+  }
+  AuditLog.create = async value => value
+  mongoose.startSession = async () => transactionSession()
+  t.after(() => {
+    User.findById = originals.userFindById
+    PaymentGateway.findById = originals.gatewayFindById
+    PaymentGateway.updateOne = originals.gatewayUpdateOne
+    paymentGatewayService.initializeFunding = originals.initializeFunding
+    AuditLog.create = originals.auditCreate
+    mongoose.startSession = originals.startSession
+  })
+
+  const firstRes = response()
+  const first = controller.testMonnifyHostedCheckout(
+    request(gateway, { amount: 100, currentPassword: 'correct-password' }),
+    firstRes
+  )
+  await providerStarted
+
+  const secondRes = response()
+  await controller.testMonnifyHostedCheckout(
+    request(gateway, { amount: 100, currentPassword: 'correct-password' }),
+    secondRes
+  )
+
+  assert.equal(secondRes.statusCode, 409)
+  assert.equal(secondRes.body.code, 'MONNIFY_VALIDATION_CHECKOUT_IN_PROGRESS')
+  assert.equal(initializeCalls, 1)
+
+  releaseInitialization({
+    authorizationUrl: 'https://sandbox.sdk.monnify.com/checkout/test',
+    reference: 'MNFY_TEST_REFERENCE',
+    provider: 'monnify'
+  })
+  await first
+  assert.equal(firstRes.statusCode, 200)
+})
+
+test('ambiguous validation initialization retains exact evidence for later verification', async t => {
+  const gateway = gatewayFixture()
+  const password = await bcrypt.hash('correct-password', 4)
+  const originals = {
+    userFindById: User.findById,
+    gatewayFindById: PaymentGateway.findById,
+    gatewayUpdateOne: PaymentGateway.updateOne,
+    initializeFunding: paymentGatewayService.initializeFunding
+  }
+  const updates = []
+  User.findById = () => queryResult({
+    _id: 'admin-monnify-replacement',
+    name: 'Test SuperAdmin',
+    password,
+    status: true,
+    role: 'superAdmin',
+    roles: ['superAdmin']
+  })
+  PaymentGateway.findById = () => queryResult(gateway)
+  PaymentGateway.updateOne = async (filter, update) => {
+    updates.push({ filter, update })
+    return { matchedCount: 1 }
+  }
+  paymentGatewayService.initializeFunding = async () => {
+    const error = new Error('Provider outcome is ambiguous')
+    error.code = 'PAYMENT_INITIALIZATION_AMBIGUOUS'
+    error.reference = 'MNFY_AMBIGUOUS_REFERENCE'
+    error.status = 'pending'
+    throw error
+  }
+  t.after(() => {
+    User.findById = originals.userFindById
+    PaymentGateway.findById = originals.gatewayFindById
+    PaymentGateway.updateOne = originals.gatewayUpdateOne
+    paymentGatewayService.initializeFunding = originals.initializeFunding
+  })
+
+  const res = response()
+  await controller.testMonnifyHostedCheckout(
+    request(gateway, { amount: 100, currentPassword: 'correct-password' }),
+    res
+  )
+
+  assert.equal(res.statusCode, 202)
+  assert.equal(res.body.reference, 'MNFY_AMBIGUOUS_REFERENCE')
+  const retained = updates.find(item => (
+    item.update.$set?.['metadata.checkoutValidation']?.status === 'ambiguous'
+  ))
+  assert.ok(retained)
+  assert.equal(
+    retained.update.$set['metadata.checkoutValidation'].configurationVersion,
+    gateway.virtualAccountMutationVersion
+  )
+})
+
+test('definitive pre-dispatch validation failure releases only the owned checkout lease', async t => {
+  const gateway = gatewayFixture()
+  const password = await bcrypt.hash('correct-password', 4)
+  const originals = {
+    userFindById: User.findById,
+    gatewayFindById: PaymentGateway.findById,
+    gatewayUpdateOne: PaymentGateway.updateOne,
+    initializeFunding: paymentGatewayService.initializeFunding
+  }
+  const updates = []
+  User.findById = () => queryResult({
+    _id: 'admin-monnify-replacement',
+    name: 'Test SuperAdmin',
+    password,
+    status: true,
+    role: 'superAdmin',
+    roles: ['superAdmin']
+  })
+  PaymentGateway.findById = () => queryResult(gateway)
+  PaymentGateway.updateOne = async (filter, update) => {
+    updates.push({ filter, update })
+    return { matchedCount: 1 }
+  }
+  paymentGatewayService.initializeFunding = async () => {
+    const error = new Error('Credentials are unavailable')
+    error.gatewayInitializationOutcome = 'definitive_failure'
+    error.requestDispatched = false
+    throw error
+  }
+  t.after(() => {
+    User.findById = originals.userFindById
+    PaymentGateway.findById = originals.gatewayFindById
+    PaymentGateway.updateOne = originals.gatewayUpdateOne
+    paymentGatewayService.initializeFunding = originals.initializeFunding
+  })
+
+  const res = response()
+  await controller.testMonnifyHostedCheckout(
+    request(gateway, { amount: 100, currentPassword: 'correct-password' }),
+    res
+  )
+
+  assert.equal(res.statusCode, 400)
+  const release = updates.find(item => item.update.$unset?.['metadata.checkoutValidation'] === 1)
+  assert.ok(release)
+  assert.equal(release.filter['metadata.checkoutValidation.status'], 'initializing')
+  assert.ok(release.filter['metadata.checkoutValidation.leaseToken'])
+})
+
+test('live validation checkout requires its literal confirmation before initialization', async t => {
+  const gateway = gatewayFixture()
+  gateway.environment = 'live'
+  gateway.baseUrl = 'https://api.monnify.com'
+  const password = await bcrypt.hash('correct-password', 4)
+  const originals = {
+    userFindById: User.findById,
+    gatewayFindById: PaymentGateway.findById,
+    initializeFunding: paymentGatewayService.initializeFunding
+  }
+  let initialized = false
+  User.findById = () => queryResult({
+    _id: 'admin-monnify-replacement',
+    name: 'Test SuperAdmin',
+    password,
+    status: true,
+    role: 'superAdmin',
+    roles: ['superAdmin']
+  })
+  PaymentGateway.findById = () => queryResult(gateway)
+  paymentGatewayService.initializeFunding = async () => { initialized = true }
+  t.after(() => {
+    User.findById = originals.userFindById
+    PaymentGateway.findById = originals.gatewayFindById
+    paymentGatewayService.initializeFunding = originals.initializeFunding
+  })
+
+  const res = response()
+  await controller.testMonnifyHostedCheckout(
+    request(gateway, { amount: 100, currentPassword: 'correct-password' }),
+    res
+  )
+
+  assert.equal(res.statusCode, 409)
+  assert.equal(res.body.code, 'MONNIFY_LIVE_VALIDATION_CONFIRMATION_REQUIRED')
+  assert.equal(initialized, false)
 })
 
 test('Monnify activation requires successful hosted checkout validation', async t => {
@@ -663,15 +1187,18 @@ test('Monnify activation requires successful hosted checkout validation', async 
   const originals = {
     gatewayFindById: PaymentGateway.findById,
     gatewayUpdateOne: PaymentGateway.updateOne,
-    auditCreate: AuditLog.create
+    auditCreate: AuditLog.create,
+    startSession: mongoose.startSession
   }
   PaymentGateway.findById = () => queryResult(gateway)
   PaymentGateway.updateOne = async () => ({ matchedCount: 1 })
   AuditLog.create = async value => value
+  mongoose.startSession = async () => transactionSession()
   t.after(() => {
     PaymentGateway.findById = originals.gatewayFindById
     PaymentGateway.updateOne = originals.gatewayUpdateOne
     AuditLog.create = originals.auditCreate
+    mongoose.startSession = originals.startSession
   })
 
   const blocked = response()
@@ -680,10 +1207,10 @@ test('Monnify activation requires successful hosted checkout validation', async 
     blocked
   )
   assert.equal(blocked.statusCode, 409)
-  assert.equal(blocked.body.code, 'MONNIFY_SANDBOX_CHECKOUT_VALIDATION_REQUIRED')
+  assert.equal(blocked.body.code, 'MONNIFY_CUSTOMER_FUNDING_ELIGIBILITY_REQUIRED')
   assert.equal(gateway.status, 'inactive')
 
-  gateway.lastHealthCheck.message = 'Monnify sandbox hosted checkout initialized successfully'
+  approveGatewayForCustomerFunding(gateway)
   const allowed = response()
   await controller.updateGatewayStatus(
     request(gateway, { status: 'active' }),
@@ -691,6 +1218,269 @@ test('Monnify activation requires successful hosted checkout validation', async 
   )
   assert.equal(allowed.statusCode, 200)
   assert.equal(gateway.status, 'active')
+})
+
+test('activation audit failure aborts the canonical Monnify status transition', async t => {
+  const gateway = gatewayFixture()
+  approveGatewayForCustomerFunding(gateway)
+  const originals = {
+    gatewayFindById: PaymentGateway.findById,
+    gatewayUpdateOne: PaymentGateway.updateOne,
+    auditCreate: AuditLog.create,
+    startSession: mongoose.startSession
+  }
+  const state = {}
+  PaymentGateway.findById = () => queryResult(gateway)
+  PaymentGateway.updateOne = async () => ({ matchedCount: 1 })
+  AuditLog.create = async () => { throw new Error('audit unavailable') }
+  mongoose.startSession = async () => transactionSession(state)
+  t.after(() => {
+    PaymentGateway.findById = originals.gatewayFindById
+    PaymentGateway.updateOne = originals.gatewayUpdateOne
+    AuditLog.create = originals.auditCreate
+    mongoose.startSession = originals.startSession
+  })
+
+  const res = response()
+  await controller.updateGatewayStatus(
+    request(gateway, { status: 'active' }),
+    res
+  )
+
+  assert.equal(res.statusCode, 400)
+  assert.match(res.body.message, /audit unavailable/)
+  assert.equal(state.committed, undefined)
+  assert.equal(state.aborted, true)
+  assert.equal(gateway.status, 'inactive')
+})
+
+test('paid exact gateway-test evidence enables activation, default, and customer initialization', async t => {
+  const result = await executeEligibility(t)
+
+  assert.equal(result.res.statusCode, 200, JSON.stringify(result.res.body))
+  assert.equal(result.verificationCalls, 1)
+  assert.equal(result.gateway.metadata.administrativeSandboxOnly, false)
+  assert.equal(result.gateway.metadata.checkoutValidation.status, 'verified')
+  assert.equal(result.gateway.metadata.customerFundingEligibility.status, 'eligible')
+  assert.equal(
+    result.gateway.metadata.customerFundingEligibility.providerTransactionId,
+    'MNFY_PROVIDER_TRANSACTION'
+  )
+  assert.equal(
+    result.gatewayUpdate.update.$set['metadata.administrativeSandboxOnly'],
+    false
+  )
+  assert.equal(result.transaction.type, 'gateway_test')
+  assert.equal(result.committed, true)
+  assert.equal(result.aborted, false)
+  assert.equal(result.auditWrite.value[0].action, 'MONNIFY_CUSTOMER_FUNDING_ENABLED')
+  assert.equal(result.auditWrite.options.session, result.session)
+
+  const originals = {
+    setDefault: PaymentGateway.setDefault,
+    getDefaultGateway: paymentGatewayService.getDefaultGateway,
+    getAdapterInstance: paymentGatewayService.getAdapterInstance,
+    transactionCreate: TransactionStatus.create
+  }
+  let customerTransaction
+  PaymentGateway.setDefault = async () => {
+    result.gateway.isDefault = true
+    return { modifiedCount: 1 }
+  }
+  paymentGatewayService.getDefaultGateway = async () => result.gateway
+  paymentGatewayService.getAdapterInstance = () => ({
+    async initializePayment ({ reference }) {
+      return {
+        authorizationUrl: 'https://sandbox.sdk.monnify.com/checkout/customer',
+        reference
+      }
+    }
+  })
+  TransactionStatus.create = async value => { customerTransaction = value }
+  t.after(() => {
+    PaymentGateway.setDefault = originals.setDefault
+    paymentGatewayService.getDefaultGateway = originals.getDefaultGateway
+    paymentGatewayService.getAdapterInstance = originals.getAdapterInstance
+    TransactionStatus.create = originals.transactionCreate
+  })
+
+  const activation = response()
+  await controller.updateGatewayStatus(
+    request(result.gateway, { status: 'active' }),
+    activation
+  )
+  assert.equal(activation.statusCode, 200)
+  assert.equal(result.gateway.status, 'active')
+
+  const defaultResponse = response()
+  let defaultProjection
+  PaymentGateway.findById = () => ({
+    select (fields) { defaultProjection = fields; return this },
+    then (resolve, reject) {
+      return Promise.resolve(result.gateway).then(resolve, reject)
+    }
+  })
+  await controller.setDefaultGateway(request(result.gateway), defaultResponse)
+  assert.equal(defaultResponse.statusCode, 200)
+  assert.equal(result.gateway.isDefault, true)
+  assert.match(defaultProjection, /virtualAccountMutationVersion/)
+
+  const customerInitialization = await paymentGatewayService.initializeFunding({
+    user: { _id: 'customer-1', email: 'customer@example.test' },
+    amount: 100
+  })
+  assert.equal(customerInitialization.provider, 'monnify')
+  assert.equal(customerTransaction.type, 'funding')
+  assert.equal(customerTransaction.gatewayId, result.gateway._id)
+  assert.equal(customerTransaction.gatewayConfigSnapshot.configurationVersion, 3)
+})
+
+test('audit failure aborts the eligibility transition', async t => {
+  const result = await executeEligibility(t, { auditFailure: true })
+
+  assert.equal(result.res.statusCode, 400)
+  assert.match(result.res.body.message, /audit unavailable/)
+  assert.equal(result.committed, false)
+  assert.equal(result.aborted, true)
+  assert.equal(result.gateway.metadata.administrativeSandboxOnly, true)
+  assert.equal(result.gateway.metadata.customerFundingEligibility, undefined)
+})
+
+test('paid ambiguous checkout evidence can complete the exact eligibility transition', async t => {
+  const result = await executeEligibility(t, { checkoutStatus: 'ambiguous' })
+
+  assert.equal(result.res.statusCode, 200)
+  assert.equal(result.gateway.metadata.checkoutValidation.status, 'verified')
+  assert.equal(result.committed, true)
+})
+
+test('provider-accepted initializing evidence can recover through exact gateway-test verification', async t => {
+  const result = await executeEligibility(t, {
+    checkoutStatus: 'initializing',
+    checkoutHasReference: false
+  })
+
+  assert.equal(result.res.statusCode, 200)
+  assert.equal(result.gateway.metadata.checkoutValidation.status, 'verified')
+  assert.equal(
+    result.gateway.metadata.checkoutValidation.reference,
+    'MNFY_VALIDATION_REFERENCE'
+  )
+  assert.equal(result.gateway.metadata.checkoutValidation.leaseToken, undefined)
+  assert.equal(result.committed, true)
+})
+
+test('initializing recovery rejects a gateway-test transaction from another lease', async t => {
+  const result = await executeEligibility(t, {
+    checkoutStatus: 'initializing',
+    checkoutHasReference: false,
+    transactionLeaseToken: 'stale-lease'
+  })
+
+  assert.equal(result.res.statusCode, 409)
+  assert.equal(result.res.body.code, 'MONNIFY_GATEWAY_TEST_SNAPSHOT_MISMATCH')
+  assert.equal(result.verificationCalls, 0)
+  assert.equal(result.gatewayUpdate, undefined)
+  assert.equal(result.gateway.metadata.administrativeSandboxOnly, true)
+})
+
+test('pending validation payment returns 202 without an eligibility transition', async t => {
+  const result = await executeEligibility(t, { verificationStatus: 'pending' })
+
+  assert.equal(result.res.statusCode, 202)
+  assert.equal(result.res.body.code, 'MONNIFY_VALIDATION_PAYMENT_PENDING')
+  assert.equal(result.gatewayUpdate, undefined)
+  assert.equal(result.gateway.metadata.administrativeSandboxOnly, true)
+})
+
+test('failed validation payment returns non-success without an eligibility transition', async t => {
+  const result = await executeEligibility(t, { verificationStatus: 'failed' })
+
+  assert.equal(result.res.statusCode, 422)
+  assert.equal(result.res.body.code, 'MONNIFY_VALIDATION_PAYMENT_NOT_SUCCESSFUL')
+  assert.equal(result.gatewayUpdate, undefined)
+  assert.equal(result.gateway.metadata.administrativeSandboxOnly, true)
+})
+
+test('expired checkout evidence fails before provider verification', async t => {
+  const result = await executeEligibility(t, {
+    expiresAt: new Date(Date.now() - 1000)
+  })
+
+  assert.equal(result.res.statusCode, 410)
+  assert.equal(result.res.body.code, 'MONNIFY_CHECKOUT_EVIDENCE_EXPIRED')
+  assert.equal(result.verificationCalls, 0)
+})
+
+test('test and live validation evidence cannot be interchanged', async t => {
+  const result = await executeEligibility(t, {
+    gatewayEnvironment: 'live',
+    checkoutEnvironment: 'test'
+  })
+
+  assert.equal(result.res.statusCode, 409)
+  assert.equal(result.res.body.code, 'MONNIFY_CHECKOUT_EVIDENCE_MISMATCH')
+  assert.equal(result.verificationCalls, 0)
+})
+
+test('wrong gateway snapshot cannot enable customer funding', async t => {
+  const result = await executeEligibility(t, { snapshotEnvironment: 'live' })
+
+  assert.equal(result.res.statusCode, 409)
+  assert.equal(result.res.body.code, 'MONNIFY_GATEWAY_TEST_SNAPSHOT_MISMATCH')
+  assert.equal(result.verificationCalls, 0)
+})
+
+test('canonical Monnify configuration mutation invalidates eligibility and restores admin isolation', async t => {
+  const gateway = gatewayFixture()
+  gateway.metadata.checkoutValidation = {
+    status: 'verified',
+    reference: 'OLD_REFERENCE',
+    environment: 'test',
+    configurationVersion: 3
+  }
+  gateway.metadata.customerFundingEligibility = {
+    status: 'eligible',
+    gatewayId: gateway._id,
+    environment: 'test',
+    configurationVersion: 3
+  }
+  gateway.metadata.administrativeSandboxOnly = false
+  const originals = {
+    gatewayFindById: PaymentGateway.findById,
+    gatewayUpdateOne: PaymentGateway.updateOne,
+    txCount: TransactionStatus.countDocuments,
+    auditCreate: AuditLog.create,
+    startSession: mongoose.startSession
+  }
+  PaymentGateway.findById = () => queryResult(gateway)
+  PaymentGateway.updateOne = async () => ({ matchedCount: 1 })
+  TransactionStatus.countDocuments = async () => 0
+  AuditLog.create = async value => value
+  mongoose.startSession = async () => ({
+    startTransaction () {},
+    async commitTransaction () {},
+    async abortTransaction () {},
+    async endSession () {}
+  })
+  t.after(() => {
+    PaymentGateway.findById = originals.gatewayFindById
+    PaymentGateway.updateOne = originals.gatewayUpdateOne
+    TransactionStatus.countDocuments = originals.txCount
+    AuditLog.create = originals.auditCreate
+    mongoose.startSession = originals.startSession
+  })
+
+  const res = response()
+  await controller.updateGateway(request(gateway, {
+    metadata: { label: 'Changed configuration' }
+  }), res)
+
+  assert.equal(res.statusCode, 200)
+  assert.equal(gateway.virtualAccountMutationVersion, 4)
+  assert.equal(gateway.metadata.administrativeSandboxOnly, true)
+  assert.equal(gateway.metadata.checkoutValidation, undefined)
+  assert.equal(gateway.metadata.customerFundingEligibility, undefined)
 })
 
 test('ordinary gateway update cannot activate Monnify outside the atomic status path', async t => {
@@ -799,11 +1589,13 @@ test('administrative sandbox initialization persists a no-credit transaction typ
     requiredMutationVersion: 4,
     allowInactiveGateway: true,
     administrativeSandboxTest: true,
+    administrativeValidationLeaseToken: 'owned-lease',
     user: { _id: 'admin-1', email: 'admin@example.test' },
     amount: 100
   })
 
   assert.equal(created.type, 'gateway_test')
+  assert.equal(created.administrativeValidationLeaseToken, 'owned-lease')
 })
 
 test('administrative sandbox isolation blocks normal funding before transaction creation', async t => {
@@ -861,6 +1653,43 @@ test('administrative sandbox gateway cannot be made the platform default', async
   assert.equal(res.statusCode, 409)
   assert.equal(res.body.code, 'PAYMENT_GATEWAY_SANDBOX_ISOLATED')
   assert.equal(defaultChanged, false)
+})
+
+test('default audit failure aborts the routing transition', async t => {
+  const gateway = gatewayFixture()
+  gateway.status = 'active'
+  approveGatewayForCustomerFunding(gateway)
+  const originals = {
+    gatewayFindById: PaymentGateway.findById,
+    setDefault: PaymentGateway.setDefault,
+    auditCreate: AuditLog.create,
+    startSession: mongoose.startSession
+  }
+  const state = {}
+  let defaultSession
+  PaymentGateway.findById = () => queryResult(gateway)
+  PaymentGateway.setDefault = async (id, options) => {
+    assert.equal(id, gateway._id)
+    defaultSession = options.session
+    return { modifiedCount: 1 }
+  }
+  AuditLog.create = async () => { throw new Error('audit unavailable') }
+  mongoose.startSession = async () => transactionSession(state)
+  t.after(() => {
+    PaymentGateway.findById = originals.gatewayFindById
+    PaymentGateway.setDefault = originals.setDefault
+    AuditLog.create = originals.auditCreate
+    mongoose.startSession = originals.startSession
+  })
+
+  const res = response()
+  await controller.setDefaultGateway(request(gateway), res)
+
+  assert.equal(res.statusCode, 400)
+  assert.match(res.body.message, /audit unavailable/)
+  assert.ok(defaultSession)
+  assert.equal(state.committed, undefined)
+  assert.equal(state.aborted, true)
 })
 
 test('wallet funding ignores caller-selected gateway compatibility fields', async t => {

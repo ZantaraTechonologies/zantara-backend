@@ -15,6 +15,7 @@ const {
     testGatewayConnection,
     replaceMonnifyMerchant,
     testMonnifyHostedCheckout,
+    enableMonnifyCustomerFunding,
     deleteGateway,
     getReconciliationTransactions,
     resolveReconciliationTransaction
@@ -44,6 +45,8 @@ router.post('/:id/set-default', verifyJWT, checkRoles('superAdmin'), setDefaultG
 router.post('/:id/test-connection', verifyJWT, checkRoles('superAdmin'), testGatewayConnection);
 router.post('/:id/replace-monnify-merchant', verifyJWT, checkRoles('superAdmin'), adminReauthenticationLimiter, replaceMonnifyMerchant);
 router.post('/:id/test-monnify-checkout', verifyJWT, checkRoles('superAdmin'), adminReauthenticationLimiter, testMonnifyHostedCheckout);
+router.post('/:id/enable-monnify-customer-funding', verifyJWT, checkRoles('superAdmin'), adminReauthenticationLimiter, enableMonnifyCustomerFunding);
+// Compatibility endpoint: always returns the durable no-hard-delete policy.
 router.delete('/:id', verifyJWT, checkRoles('superAdmin'), deleteGateway);
 
 module.exports = router;

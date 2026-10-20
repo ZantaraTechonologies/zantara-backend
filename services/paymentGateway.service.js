@@ -20,6 +20,10 @@ const {
 const { generatePaymentReference } = require('../utils/generateID')
 const { createWithIdentifierRetry } = require('../utils/identifierRetry')
 const { decryptSecret, encryptSecret, isEncrypted } = require('../utils/crypto')
+const {
+  isCustomerFundingEligible,
+  resolveCustomerFundingEnvironment
+} = require('../utils/paymentGatewayEligibility')
 
 const PaystackAdapter = require('../adapters/payment/paystack.adapter')
 const MonnifyAdapter = require('../adapters/payment/monnify.adapter')
@@ -92,7 +96,12 @@ class PaymentGatewayService {
       webhookSecret: protect(gateway.webhookSecret),
       baseUrl: gateway.baseUrl,
       supportedChannels: gateway.supportedChannels || [],
-      metadata: gateway.metadata || {}
+      metadata: gateway.metadata || {},
+      configurationVersion: Number(
+        gateway.configurationVersion ??
+        gateway.virtualAccountMutationVersion ??
+        0
+      )
     }
   }
 
@@ -161,28 +170,6 @@ class PaymentGatewayService {
     // Paystack is DB-only. Other legacy adapters remain unchanged in Phase 5A.
     if (normalizedCode === 'paystack') return null
     if (
-      normalizedCode === 'monnify' &&
-      process.env.MONNIFY_API_KEY &&
-      process.env.MONNIFY_SECRET_KEY
-    ) {
-      return {
-        _id: 'legacy-env-monnify',
-        name: 'Monnify',
-        code: 'monnify',
-        adapterType: 'monnify',
-        status: 'active',
-        environment: process.env.MONNIFY_ENV || 'test',
-        isDefault: false,
-        publicKey: process.env.MONNIFY_API_KEY,
-        secretKey: process.env.MONNIFY_SECRET_KEY,
-        webhookSecret:
-          process.env.MONNIFY_WEBHOOK_SECRET || process.env.MONNIFY_SECRET_KEY,
-        baseUrl: process.env.MONNIFY_BASE_URL || 'https://sandbox.monnify.com',
-        supportedChannels: ['card', 'bank_transfer'],
-        metadata: { contractCode: process.env.MONNIFY_CONTRACT_CODE || '' }
-      }
-    }
-    if (
       normalizedCode === 'flutterwave' &&
       process.env.FLUTTERWAVE_SECRET_KEY
     ) {
@@ -240,8 +227,14 @@ class PaymentGatewayService {
   async getActiveGateways () {
     const count = await PaymentGateway.countDocuments()
     if (count === 0) return []
-    const gateways = await PaymentGateway.find({ status: 'active' })
-    return gateways.map(g => this._hydrateGatewayCredentials(g))
+    let query = PaymentGateway.find({ status: 'active' })
+    if (typeof query?.select === 'function') {
+      query = query.select('+virtualAccountMutationVersion')
+    }
+    const gateways = await query
+    return gateways
+      .map(g => this._hydrateGatewayCredentials(g))
+      .filter(g => this._isCustomerFundingEligible(g))
   }
 
   /**
@@ -250,28 +243,32 @@ class PaymentGatewayService {
   async getDefaultGateway () {
     const count = await PaymentGateway.countDocuments()
     if (count === 0) return null
-    const gateway = await PaymentGateway.findOne({
+    let query = PaymentGateway.findOne({
       isDefault: true,
       status: 'active'
     })
-    return gateway ? this._hydrateGatewayCredentials(gateway) : null
+    if (typeof query?.select === 'function') {
+      query = query.select('+virtualAccountMutationVersion')
+    }
+    const gateway = await query
+    const hydrated = gateway ? this._hydrateGatewayCredentials(gateway) : null
+    return this._isCustomerFundingEligible(hydrated) ? hydrated : null
   }
 
   _isCustomerFundingEligible (gateway) {
-    if (!gateway || gateway.status !== 'active') return false
-    const metadata = gateway.metadata instanceof Map
-      ? Object.fromEntries(gateway.metadata)
-      : gateway.metadata || {}
-    return metadata.administrativeSandboxOnly !== true
+    return isCustomerFundingEligible(gateway)
   }
 
   async getEligibleFundingGateway () {
-    const gateways = await PaymentGateway.find({
-      status: 'active',
-      'metadata.administrativeSandboxOnly': { $ne: true }
-    }).sort({ priority: 1, createdAt: 1 })
-    const gateway = gateways[0]
-    return gateway ? this._hydrateGatewayCredentials(gateway) : null
+    let query = PaymentGateway.find({ status: 'active' })
+      .sort({ priority: 1, createdAt: 1 })
+    if (typeof query?.select === 'function') {
+      query = query.select('+virtualAccountMutationVersion')
+    }
+    const gateways = await query
+    return gateways
+      .map(candidate => this._hydrateGatewayCredentials(candidate))
+      .find(candidate => this._isCustomerFundingEligible(candidate)) || null
   }
 
   /**
@@ -281,12 +278,17 @@ class PaymentGatewayService {
     const count = await PaymentGateway.countDocuments()
     if (count === 0) return []
 
-    const gateways = await PaymentGateway.find({
+    let query = PaymentGateway.find({
       status: 'active',
-      supportedChannels: channel,
-      'metadata.administrativeSandboxOnly': { $ne: true }
+      supportedChannels: channel
     }).sort({ priority: 1, createdAt: 1 })
-    return gateways.map(g => this._hydrateGatewayCredentials(g))
+    if (typeof query?.select === 'function') {
+      query = query.select('+virtualAccountMutationVersion')
+    }
+    const gateways = await query
+    return gateways
+      .map(g => this._hydrateGatewayCredentials(g))
+      .filter(g => this._isCustomerFundingEligible(g))
   }
 
   async assertDatabaseManagedPaystackReady ({
@@ -387,6 +389,7 @@ class PaymentGatewayService {
     requiredMutationVersion,
     allowInactiveGateway = false,
     administrativeSandboxTest = false,
+    administrativeValidationLeaseToken,
     channel,
     channels: requestedChannels,
     user,
@@ -524,6 +527,13 @@ class PaymentGatewayService {
       err.code = 'PAYMENT_GATEWAY_SANDBOX_ISOLATED'
       throw err
     }
+    if (!administrativeSandboxTest && !this._isCustomerFundingEligible(gateway)) {
+      const err = new Error(
+        'This payment gateway is not eligible for customer funding in the current environment.'
+      )
+      err.code = 'PAYMENT_GATEWAY_CUSTOMER_FUNDING_INELIGIBLE'
+      throw err
+    }
 
     const requested = channel
       ? [channel]
@@ -656,8 +666,12 @@ class PaymentGatewayService {
           expectedCurrency: 'NGN',
           channels,
           provider: gateway.code,
+          gatewayId: String(gateway._id || gateway.gatewayId || ''),
           service: gateway.name,
           gatewayConfigSnapshot: this._snapshotGatewayConfig(gateway),
+          ...(txType === 'gateway_test' && administrativeValidationLeaseToken
+            ? { administrativeValidationLeaseToken }
+            : {}),
           initializationOutcome: 'pending',
           ...(sharePriceSnapshot != null
             ? { sharePrice: sharePriceSnapshot }
@@ -728,6 +742,7 @@ class PaymentGatewayService {
         ambiguous.reference = reference
         ambiguous.provider = gateway.code
         ambiguous.checkoutProvider = gateway.adapterType || gateway.code
+        ambiguous.requestDispatched = error.requestDispatched
         ambiguous.cause = error
         throw ambiguous
       }
@@ -761,6 +776,21 @@ class PaymentGatewayService {
       token: crypto.randomBytes(32).toString('hex'),
       claimedAt: now,
       expiresAt: new Date(now.getTime() + SETTLEMENT_LEASE_MS)
+    }
+  }
+
+  _assertSettlementEnvironment (transactionStatus) {
+    if (!transactionStatus || transactionStatus.type === 'gateway_test') return
+    const runtimeEnvironment = resolveCustomerFundingEnvironment()
+    const snapshotEnvironment = String(
+      transactionStatus.gatewayConfigSnapshot?.environment || ''
+    ).trim().toLowerCase()
+    if (runtimeEnvironment && snapshotEnvironment !== runtimeEnvironment) {
+      const error = new Error(
+        `Payment environment mismatch: runtime is '${runtimeEnvironment}', transaction is '${snapshotEnvironment}'`
+      )
+      error.code = 'PAYMENT_GATEWAY_RUNTIME_ENVIRONMENT_MISMATCH'
+      throw error
     }
   }
 
@@ -1047,6 +1077,7 @@ class PaymentGatewayService {
   }) {
     if (!transactionStatus)
       throw new Error('[Funding Safety] TransactionStatus record is required')
+    this._assertSettlementEnvironment(transactionStatus)
     const refId = transactionStatus.refId
 
     if (transactionStatus.status === 'success') {
@@ -1283,11 +1314,14 @@ class PaymentGatewayService {
     let credited = false
 
     try {
-      transactionStatus = await TransactionStatus.findOne({ refId }).session(
-        session
-      )
+      let settlementQuery = TransactionStatus.findOne({ refId })
+      if (typeof settlementQuery?.select === 'function') {
+        settlementQuery = settlementQuery.select('+gatewayConfigSnapshot')
+      }
+      transactionStatus = await settlementQuery.session(session)
       if (!transactionStatus)
         throw new Error(`TransactionStatus record '${refId}' not found`)
+      this._assertSettlementEnvironment(transactionStatus)
       const bypassPublicShareholdingHold = source === 'admin_reconciliation'
       if (
         transactionStatus.type === 'investment_buy' &&
@@ -1660,6 +1694,7 @@ class PaymentGatewayService {
     if (!transaction) {
       return { status: 'not_found', message: 'Transaction record not found' }
     }
+    this._assertSettlementEnvironment(transaction)
 
     // If already in a terminal or intermediate state, report without re-verifying
     if (transaction.status === 'success') {
@@ -2125,7 +2160,8 @@ class PaymentGatewayService {
           'PAYMENT_AMOUNT_MISMATCH',
           'PAYMENT_PROVIDER_TRANSACTION_REUSED',
           'PAYMENT_EVIDENCE_INVALID',
-          'SETTLEMENT_EVIDENCE_INVALID'
+          'SETTLEMENT_EVIDENCE_INVALID',
+          'PAYMENT_GATEWAY_RUNTIME_ENVIRONMENT_MISMATCH'
         ].includes(error.code)
       await this._setWebhookEventState(
         webhookEvent,
@@ -2499,7 +2535,8 @@ class PaymentGatewayService {
               'PAYMENT_GATEWAY_MISMATCH',
               'PAYMENT_REFERENCE_MISMATCH',
               'PAYMENT_CURRENCY_MISMATCH',
-              'PAYMENT_AMOUNT_MISMATCH'
+              'PAYMENT_AMOUNT_MISMATCH',
+              'PAYMENT_GATEWAY_RUNTIME_ENVIRONMENT_MISMATCH'
             ].includes(settlementErr.code)
             await this._setWebhookEventState(
               webhookEvent,

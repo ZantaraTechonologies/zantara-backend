@@ -88,6 +88,7 @@ async function runCapabilitiesTests() {
     const origCreate = PaymentGateway.create;
     const origCountDocuments = PaymentGateway.countDocuments;
     const origAuditCreate = AuditLog.create;
+    const origStartSession = mongoose.startSession;
 
     PaymentGateway.find = () => ({
         sort: () => Promise.resolve(gatewaysDB.map(g => ({ ...g })))
@@ -118,7 +119,9 @@ async function runCapabilitiesTests() {
         return Promise.resolve(null);
     };
 
-    PaymentGateway.create = async (data) => {
+    PaymentGateway.create = async (input) => {
+        const isBatch = Array.isArray(input);
+        const data = isBatch ? input[0] : input;
         const doc = {
             _id: new mongoose.Types.ObjectId(),
             ...data,
@@ -126,7 +129,7 @@ async function runCapabilitiesTests() {
             updatedAt: new Date()
         };
         gatewaysDB.push(doc);
-        return doc;
+        return isBatch ? [doc] : doc;
     };
 
     PaymentGateway.countDocuments = async (query = {}) => {
@@ -137,6 +140,12 @@ async function runCapabilitiesTests() {
     };
 
     AuditLog.create = async (entry) => entry;
+    mongoose.startSession = async () => ({
+        startTransaction() {},
+        async commitTransaction() {},
+        async abortTransaction() {},
+        async endSession() {}
+    });
 
     try {
         // Test 1: Public capabilities registry structure
@@ -330,8 +339,13 @@ async function runCapabilitiesTests() {
             assert.strictEqual(res.statusCode, 201);
             assert.strictEqual(res.responseData?.success, true);
             assert.strictEqual(res.responseData?.data?.code, 'monnify_direct');
+            assert.strictEqual(res.responseData?.data?.status, 'active');
             assert.ok(res.responseData?.data?.supportedChannels.includes('virtual_account'));
             assert.strictEqual(res.responseData?.data?.virtualAccounts?.supported, false);
+            assert.strictEqual(
+                res.responseData?.data?.metadata?.administrativeSandboxOnly,
+                undefined
+            );
         });
 
         // Test 6: Inactive gateway cannot be set as default on creation
@@ -445,6 +459,7 @@ async function runCapabilitiesTests() {
         PaymentGateway.create = origCreate;
         PaymentGateway.countDocuments = origCountDocuments;
         AuditLog.create = origAuditCreate;
+        mongoose.startSession = origStartSession;
     }
 
     console.log('\n----------------------------------------------------');

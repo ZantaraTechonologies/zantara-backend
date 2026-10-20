@@ -428,13 +428,19 @@ test('same secret and canonically identical metadata do not fence or archive', a
     auditCreate: AuditLog.create
   }
   let sessionStarted = false
+  let sessionCommitted = false
   let transactionCounted = false
   let userCounted = false
 
   PaymentGateway.findById = async () => gateway
   mongoose.startSession = async () => {
     sessionStarted = true
-    throw new Error('A no-op verification update must not start a transaction')
+    return {
+      startTransaction () {},
+      async commitTransaction () { sessionCommitted = true },
+      async abortTransaction () {},
+      async endSession () {}
+    }
   }
   TransactionStatus.countDocuments = async () => {
     transactionCounted = true
@@ -462,7 +468,8 @@ test('same secret and canonically identical metadata do not fence or archive', a
   }), res)
 
   assert.equal(res.statusCode, 200)
-  assert.equal(sessionStarted, false)
+  assert.equal(sessionStarted, true)
+  assert.equal(sessionCommitted, true)
   assert.equal(transactionCounted, false)
   assert.equal(userCounted, false)
   assert.equal(gateway.webhookVerificationSnapshots.length, 0)
@@ -604,6 +611,35 @@ test('invalid default request is rejected before saving ordinary changes', async
   assert.equal(res.body.code, 'PAYMENT_GATEWAY_DEFAULT_REQUIRES_ACTIVE')
   assert.equal(saves, 0)
   assert.equal(gateway.name, 'Paystack')
+})
+
+test('an active default cannot be changed into a runtime-ineligible environment', async t => {
+  const previousEnvironment = process.env.PAYMENT_GATEWAY_ENVIRONMENT
+  const previousRequireLive = process.env.PAYMENT_GATEWAY_REQUIRE_LIVE
+  process.env.PAYMENT_GATEWAY_ENVIRONMENT = 'test'
+  process.env.PAYMENT_GATEWAY_REQUIRE_LIVE = 'false'
+  const gateway = gatewayFixture({ isDefault: true })
+  const originalFindById = PaymentGateway.findById
+  PaymentGateway.findById = async () => gateway
+  t.after(() => {
+    PaymentGateway.findById = originalFindById
+    if (previousEnvironment === undefined) delete process.env.PAYMENT_GATEWAY_ENVIRONMENT
+    else process.env.PAYMENT_GATEWAY_ENVIRONMENT = previousEnvironment
+    if (previousRequireLive === undefined) delete process.env.PAYMENT_GATEWAY_REQUIRE_LIVE
+    else process.env.PAYMENT_GATEWAY_REQUIRE_LIVE = previousRequireLive
+  })
+
+  const res = response()
+  await controller.updateGateway(request(gateway, {
+    environment: 'live',
+    publicKey: 'pk_live_public',
+    secretKey: 'sk_live_current',
+    confirmEnvironmentChange: 'test-to-live'
+  }), res)
+
+  assert.equal(res.statusCode, 409)
+  assert.equal(res.body.code, 'PAYMENT_GATEWAY_CUSTOMER_FUNDING_INELIGIBLE')
+  assert.equal(gateway.environment, 'test')
 })
 
 test('transactional reload revalidates credentials against a concurrent environment change', async t => {

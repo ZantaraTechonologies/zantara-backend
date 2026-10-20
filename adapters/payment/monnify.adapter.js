@@ -114,10 +114,14 @@ class MonnifyAdapter extends BasePaymentAdapter {
 
     async initializePayment({ user, amount, channel, channels, reference, callbackUrl, metadata = {} }) {
         if (!user || (!user.email && !user.phone)) {
-            throw this._definitiveInitializationError('MonnifyAdapter: customer email or phone is required');
+            const error = this._definitiveInitializationError('MonnifyAdapter: customer email or phone is required');
+            error.requestDispatched = false;
+            throw error;
         }
         if (!amount || Number(amount) < 1) {
-            throw this._definitiveInitializationError('MonnifyAdapter: invalid amount');
+            const error = this._definitiveInitializationError('MonnifyAdapter: invalid amount');
+            error.requestDispatched = false;
+            throw error;
         }
 
         let token;
@@ -128,6 +132,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
             const preflightError = this._definitiveInitializationError(
                 error?.message || 'Monnify authentication unavailable'
             );
+            preflightError.requestDispatched = false;
             preflightError.cause = error;
             throw preflightError;
         }
@@ -158,10 +163,16 @@ class MonnifyAdapter extends BasePaymentAdapter {
             }
         };
 
-        const response = await axios.post(`${this.baseUrl}/api/v1/merchant/transactions/init-transaction`, body, {
-            headers: { Authorization: `Bearer ${token}` },
-            timeout: 20000
-        });
+        let response;
+        try {
+            response = await axios.post(`${this.baseUrl}/api/v1/merchant/transactions/init-transaction`, body, {
+                headers: { Authorization: `Bearer ${token}` },
+                timeout: 20000
+            });
+        } catch (error) {
+            error.requestDispatched = true;
+            throw error;
+        }
 
         if (response.data && response.data.requestSuccessful) {
             const checkoutUrl = String(response.data.responseBody?.checkoutUrl || '').trim();
@@ -170,28 +181,42 @@ class MonnifyAdapter extends BasePaymentAdapter {
                 const parsedCheckout = new URL(checkoutUrl);
                 const host = parsedCheckout.hostname.toLowerCase();
                 const requiresSandboxHost = this.baseUrl === 'https://sandbox.monnify.com';
+                const expectedHost = requiresSandboxHost
+                    ? 'sandbox.sdk.monnify.com'
+                    : this.baseUrl === 'https://api.monnify.com'
+                        ? 'sdk.monnify.com'
+                        : null;
                 trustedCheckout = parsedCheckout.protocol === 'https:'
                     && !parsedCheckout.username
                     && !parsedCheckout.password
                     && (!parsedCheckout.port || parsedCheckout.port === '443')
-                    && (requiresSandboxHost
-                        ? host === 'sandbox.sdk.monnify.com'
-                        : host === 'monnify.com' || host.endsWith('.monnify.com'));
+                    && expectedHost !== null
+                    && host === expectedHost;
             } catch (_) {}
             if (!trustedCheckout) {
                 const error = new Error('Monnify returned an invalid hosted checkout URL');
                 error.code = 'MONNIFY_INITIALIZATION_RESPONSE_INVALID';
+                error.requestDispatched = true;
+                throw error;
+            }
+            const returnedReference = String(response.data.responseBody?.paymentReference || '').trim();
+            if (returnedReference !== String(reference)) {
+                const error = new Error('Monnify returned a mismatched payment reference');
+                error.code = 'MONNIFY_INITIALIZATION_RESPONSE_INVALID';
+                error.requestDispatched = true;
                 throw error;
             }
             return {
                 success: true,
                 authorizationUrl: checkoutUrl,
-                reference: response.data.responseBody.paymentReference || reference,
+                reference: returnedReference,
                 raw: response.data.responseBody
             };
         }
 
-        throw this._definitiveInitializationError(response.data?.responseMessage || 'Monnify payment initialization failed');
+        const error = this._definitiveInitializationError(response.data?.responseMessage || 'Monnify payment initialization failed');
+        error.requestDispatched = true;
+        throw error;
     }
 
     async createReservedAccount({ user, accountReference, verifiedIdentity } = {}) {
@@ -316,12 +341,12 @@ class MonnifyAdapter extends BasePaymentAdapter {
             }
 
             const amountPaid = Number(body.amountPaid ?? body.payableAmount ?? 0);
-            const currency = (body.currencyCode || 'NGN').toUpperCase();
+            const currency = String(body.currencyCode || '').toUpperCase();
 
             return {
                 success: normalizedStatus === 'success',
                 status: normalizedStatus,
-                reference: body.paymentReference || reference,
+                reference: String(body.paymentReference || ''),
                 providerTransactionId: String(body.transactionReference || ''),
                 amount: amountPaid,
                 currency,
@@ -349,10 +374,10 @@ class MonnifyAdapter extends BasePaymentAdapter {
                     return {
                         success: isPaid,
                         status: isPaid ? 'success' : (isFailed ? 'failed' : 'pending'),
-                        reference: body.paymentReference || reference,
+                        reference: String(body.paymentReference || ''),
                         providerTransactionId: String(body.transactionReference || ''),
                         amount: Number(body.amountPaid ?? 0),
-                        currency: (body.currencyCode || 'NGN').toUpperCase(),
+                        currency: String(body.currencyCode || '').toUpperCase(),
                         raw: body
                     };
                 }
@@ -373,12 +398,14 @@ class MonnifyAdapter extends BasePaymentAdapter {
     }
 
     verifyWebhookSignature(headers, rawBody) {
-        const signature = headers['monnify-signature'];
+        const signature = String(headers['monnify-signature'] || '').trim().toLowerCase();
         if (!signature || (!this.webhookSecret && !this.secretKey)) return false;
 
         const buf = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody || '', 'utf8');
-        const expected = crypto.createHmac('sha512', this.webhookSecret || this.secretKey).update(buf).digest('hex');
-        return expected === signature;
+        const expected = crypto.createHmac('sha512', this.webhookSecret || this.secretKey).update(buf).digest();
+        if (!/^[a-f\d]{128}$/.test(signature)) return false;
+        const supplied = Buffer.from(signature, 'hex');
+        return supplied.length === expected.length && crypto.timingSafeEqual(expected, supplied);
     }
 
     normalizeWebhook(payload) {
@@ -414,7 +441,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
             reference: data.paymentReference || accountRef,
             providerTransactionId: String(data.transactionReference || ''),
             amount: Number(data.amountPaid || 0),
-            currency: (data.currency || data.currencyCode || 'NGN').toUpperCase(),
+            currency: String(data.currency || data.currencyCode || '').toUpperCase(),
             userId,
             virtualAccountReference,
             destinationAccountNumber,

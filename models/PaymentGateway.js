@@ -1,5 +1,12 @@
 const mongoose = require('mongoose');
 const { encryptSecret, isEncrypted } = require('../utils/crypto');
+const {
+    MONNIFY_BASE_URLS,
+    configurationVersion,
+    isCanonicalMonnify,
+    isCustomerFundingEligible,
+    resolveCustomerFundingEnvironment
+} = require('../utils/paymentGatewayEligibility');
 
 const paymentGatewaySchema = new mongoose.Schema({
     name: {
@@ -100,6 +107,23 @@ const paymentGatewaySchema = new mongoose.Schema({
     }
 }, { timestamps: true });
 
+function rejectPaymentGatewayHardDelete(next) {
+    const error = new Error('Payment gateway records cannot be hard-deleted. Deactivate the gateway instead.');
+    error.code = 'PAYMENT_GATEWAY_HARD_DELETE_DISABLED';
+    error.statusCode = 409;
+    next(error);
+}
+
+paymentGatewaySchema.pre('deleteOne', { document: true, query: true }, rejectPaymentGatewayHardDelete);
+paymentGatewaySchema.pre('deleteMany', rejectPaymentGatewayHardDelete);
+paymentGatewaySchema.pre('findOneAndDelete', rejectPaymentGatewayHardDelete);
+paymentGatewaySchema.pre('findOneAndRemove', rejectPaymentGatewayHardDelete);
+paymentGatewaySchema.pre('bulkWrite', function(next, operations) {
+    const includesDelete = operations.some(operation => operation?.deleteOne || operation?.deleteMany);
+    if (includesDelete) return rejectPaymentGatewayHardDelete(next);
+    next();
+});
+
 // ─── INDEXES ──────────────────────────────────────────────────────────────────
 //
 // Enforce at most one isDefault=true across all gateway documents.
@@ -144,36 +168,106 @@ paymentGatewaySchema.pre('save', async function (next) {
 //
 // Usage:  await PaymentGateway.setDefault(gatewayId);
 //
-// Pattern:
-//   Step 1 — Clear any existing default (atomic updateOne).
-//   Step 2 — Set new gateway as default (atomic updateOne).
-//
-// Because the partial unique index prevents two simultaneous isDefault=true commits,
-// and because we clear BEFORE setting, concurrent calls to setDefault are serialized
-// at the application level by Step 1 and race-protected at DB level by the index.
-//
-// If Step 2 fails (e.g. invalid id), no gateway has isDefault=true, which is
-// a safe state: getDefaultGateway() returns null.
+// Both writes execute in one transaction. Callers may supply a transaction session
+// when default assignment must be atomic with another write such as an audit record.
 //
 paymentGatewaySchema.statics.setDefault = async function (gatewayId, options = {}) {
     if (!gatewayId) throw new Error('gatewayId is required to set a default gateway');
-    const session = options.session;
-
-    // Step 1: Atomically clear any existing default
-    await this.updateMany({ isDefault: true }, { $set: { isDefault: false } }, { session });
-
-    // Step 2: Atomically set the new default
-    const result = await this.updateOne(
-        { _id: gatewayId, status: 'active' },
-        { $set: { isDefault: true } },
-        { session }
-    );
-
-    if (result.modifiedCount !== 1) {
-        throw new Error(`Cannot set gateway ${gatewayId} as default: gateway not found or not active`);
+    const suppliedSession = options.session;
+    if (
+        suppliedSession &&
+        (
+            typeof suppliedSession.inTransaction !== 'function' ||
+            !suppliedSession.inTransaction()
+        )
+    ) {
+        throw new Error('A supplied default-assignment session must already be in a transaction');
     }
+    const session = suppliedSession || await mongoose.startSession();
+    let transactionFinished = false;
 
-    return result;
+    const assignDefault = async () => {
+        let query = this.findOne({ _id: gatewayId });
+        if (typeof query?.select === 'function') {
+            query = query.select('+virtualAccountMutationVersion');
+        }
+        if (typeof query?.session === 'function') query = query.session(session);
+        const gateway = await query;
+        if (!isCustomerFundingEligible(gateway)) {
+            throw new Error(
+                `Cannot set gateway ${gatewayId} as default: gateway is not eligible for customer funding`
+            );
+        }
+
+        const targetFilter = {
+            _id: gatewayId,
+            status: 'active',
+            environment: gateway.environment,
+            'metadata.administrativeSandboxOnly': { $ne: true }
+        };
+        const runtimeEnvironment = resolveCustomerFundingEnvironment();
+        if (runtimeEnvironment) targetFilter.environment = runtimeEnvironment;
+
+        if (isCanonicalMonnify(gateway)) {
+            const version = configurationVersion(gateway);
+            Object.assign(targetFilter, {
+                code: 'monnify',
+                adapterType: 'monnify',
+                baseUrl: MONNIFY_BASE_URLS[gateway.environment],
+                'metadata.customerFundingEligibility.status': 'eligible',
+                'metadata.customerFundingEligibility.gatewayId': String(gateway._id),
+                'metadata.customerFundingEligibility.environment': gateway.environment,
+                'metadata.customerFundingEligibility.configurationVersion': version,
+                ...(version === 0
+                    ? {
+                        $or: [
+                            { virtualAccountMutationVersion: 0 },
+                            { virtualAccountMutationVersion: { $exists: false } }
+                        ]
+                    }
+                    : { virtualAccountMutationVersion: version })
+            });
+        }
+
+        await this.updateMany(
+            { isDefault: true },
+            { $set: { isDefault: false } },
+            { session }
+        );
+        const result = await this.updateOne(
+            targetFilter,
+            { $set: { isDefault: true } },
+            { session }
+        );
+
+        if (Number(result.modifiedCount ?? result.nModified ?? result.matchedCount ?? 0) !== 1) {
+            throw new Error(
+                `Cannot set gateway ${gatewayId} as default: gateway changed or is no longer eligible`
+            );
+        }
+        return result;
+    };
+
+    if (suppliedSession) return assignDefault();
+
+    try {
+        session.startTransaction();
+        const result = await assignDefault();
+        await session.commitTransaction();
+        transactionFinished = true;
+        return result;
+    } catch (error) {
+        if (!transactionFinished) {
+            try { await session.abortTransaction(); } catch (_) {}
+            transactionFinished = true;
+        }
+        throw error;
+    } finally {
+        if (!transactionFinished) {
+            try { await session.abortTransaction(); } catch (_) {}
+        }
+        await session.endSession();
+    }
 };
 
 module.exports = mongoose.model('PaymentGateway', paymentGatewaySchema);

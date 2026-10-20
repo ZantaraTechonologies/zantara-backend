@@ -81,9 +81,12 @@ function runPriorityTests() {
     const origFindOne = PaymentGateway.findOne;
     const origFindById = PaymentGateway.findById;
     const origAuditCreate = AuditLog.create;
+    const origStartSession = mongoose.startSession;
 
     // Install mocks
-    PaymentGateway.create = async (data) => {
+    PaymentGateway.create = async (input) => {
+        const isBatch = Array.isArray(input);
+        const data = isBatch ? input[0] : input;
         const doc = {
             _id: new mongoose.Types.ObjectId(),
             ...data,
@@ -94,7 +97,7 @@ function runPriorityTests() {
         };
         doc.save = async function () {};
         gatewaysDB.push(doc);
-        return doc;
+        return isBatch ? [doc] : doc;
     };
     PaymentGateway.findOne = async (filter) => {
         if (filter.$or) {
@@ -113,6 +116,12 @@ function runPriorityTests() {
         return g;
     };
     AuditLog.create = async () => ({});
+    mongoose.startSession = async () => ({
+        startTransaction() {},
+        async commitTransaction() {},
+        async abortTransaction() {},
+        async endSession() {}
+    });
 
     const baseCreateBody = {
         name: 'Test Gateway',
@@ -427,6 +436,7 @@ function runPriorityTests() {
         PaymentGateway.findOne = origFindOne;
         PaymentGateway.findById = origFindById;
         AuditLog.create = origAuditCreate;
+        mongoose.startSession = origStartSession;
 
         console.log('\n------------------------------------------');
         console.log(`Priority Suite: ${passed} passed, ${failed} failed`);

@@ -2,6 +2,7 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const PaymentGateway = require('../models/PaymentGateway');
 const { encryptSecret, isEncrypted } = require('../utils/crypto');
+const { hasExactMonnifyEligibility } = require('../utils/paymentGatewayEligibility');
 
 async function seedPaymentGateways() {
     console.log('====================================================');
@@ -68,14 +69,15 @@ async function seedPaymentGateways() {
         const monnifyContractCode = process.env.MONNIFY_CONTRACT_CODE || '';
         const monnifyBaseUrl = process.env.MONNIFY_BASE_URL || 'https://sandbox.monnify.com';
 
-        let monnify = await PaymentGateway.findOne({ code: 'monnify' });
+        let monnify = await PaymentGateway.findOne({ code: 'monnify' })
+            .select('+virtualAccountMutationVersion');
         if (!monnify) {
             console.log('[+] Creating initial Monnify gateway record...');
             monnify = new PaymentGateway({
                 name: 'Monnify',
                 code: 'monnify',
                 adapterType: 'monnify',
-                status: (monnifyApiKey && monnifySecretKey) ? 'active' : 'inactive',
+                status: 'inactive',
                 environment: monnifyBaseUrl.includes('sandbox') ? 'test' : 'live',
                 isDefault: false,
                 priority: 2,
@@ -85,13 +87,31 @@ async function seedPaymentGateways() {
                 baseUrl: monnifyBaseUrl,
                 supportedChannels: ['bank_transfer', 'virtual_account', 'card'],
                 metadata: {
-                    contractCode: monnifyContractCode
+                    contractCode: monnifyContractCode,
+                    administrativeSandboxOnly: true
                 }
             });
             await monnify.save();
             console.log(`    -> Monnify seeded (status: ${monnify.status}, default: false)`);
         } else {
             console.log('[*] Monnify gateway record already exists.');
+            const metadata = monnify.metadata instanceof Map
+                ? Object.fromEntries(monnify.metadata)
+                : { ...(monnify.metadata || {}) };
+            if (
+                metadata.administrativeSandboxOnly === true ||
+                !hasExactMonnifyEligibility(monnify)
+            ) {
+                monnify.status = 'inactive';
+                monnify.isDefault = false;
+                monnify.metadata = {
+                    ...metadata,
+                    administrativeSandboxOnly: true
+                };
+                monnify.markModified('metadata');
+                await monnify.save();
+                console.log('    -> Monnify kept inactive until exact checkout validation is approved');
+            }
         }
 
         // 3. Flutterwave Configuration (Tertiary)
