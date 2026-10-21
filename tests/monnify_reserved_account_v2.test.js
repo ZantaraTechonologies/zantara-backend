@@ -360,7 +360,62 @@ test('successful Monnify verification does not invent missing currency', async t
     const result = await adapter.verifyPayment('MONNIFY-23456789ABCDEFGH');
 
     assert.equal(result.status, 'success');
+    assert.equal(result.providerStatus, 'PAID');
     assert.equal(result.currency, '');
+});
+
+for (const providerStatus of ['FAILED', 'EXPIRED']) {
+    test(`Monnify verification preserves provider-confirmed ${providerStatus}`, async t => {
+        const originalGet = axios.get;
+        t.after(() => { axios.get = originalGet; });
+        axios.get = async () => ({
+            data: {
+                requestSuccessful: true,
+                responseBody: {
+                    paymentReference: 'MONNIFY-23456789ABCDEFGH',
+                    transactionReference: `MNFY_${providerStatus}`,
+                    paymentStatus: providerStatus,
+                    amountPaid: 0,
+                    currencyCode: 'NGN'
+                }
+            }
+        });
+
+        const result = await makeAdapter().verifyPayment('MONNIFY-23456789ABCDEFGH');
+
+        assert.equal(result.status, 'failed');
+        assert.equal(result.providerStatus, providerStatus);
+        assert.equal(result.reference, 'MONNIFY-23456789ABCDEFGH');
+    });
+}
+
+test('unknown and mismatched Monnify results remain inconclusive', async t => {
+    const originalGet = axios.get;
+    t.after(() => { axios.get = originalGet; });
+    let paymentStatus = 'UNRECOGNIZED';
+    let paymentReference = 'MONNIFY-23456789ABCDEFGH';
+    axios.get = async () => ({
+        data: {
+            requestSuccessful: true,
+            responseBody: {
+                paymentReference,
+                paymentStatus,
+                amountPaid: 100,
+                currencyCode: 'NGN'
+            }
+        }
+    });
+    const adapter = makeAdapter();
+
+    const unknown = await adapter.verifyPayment('MONNIFY-23456789ABCDEFGH');
+    assert.equal(unknown.status, 'pending');
+    assert.equal(unknown.providerStatus, 'UNKNOWN');
+
+    paymentStatus = 'FAILED';
+    paymentReference = 'DIFFERENT_REFERENCE';
+    const mismatched = await adapter.verifyPayment('MONNIFY-23456789ABCDEFGH');
+    assert.equal(mismatched.status, 'pending');
+    assert.equal(mismatched.providerStatus, 'FAILED');
 });
 
 test('Monnify status lookup queries v2 by merchant paymentReference', async t => {
@@ -390,5 +445,6 @@ test('Monnify status lookup queries v2 by merchant paymentReference', async t =>
         'https://sandbox.monnify.com/api/v2/merchant/transactions/query?paymentReference=MONNIFY-23456789ABCDEFGH'
     );
     assert.equal(result.status, 'pending');
+    assert.equal(result.providerStatus, 'PENDING');
     assert.equal(result.reference, 'MONNIFY-23456789ABCDEFGH');
 });

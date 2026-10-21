@@ -19,6 +19,8 @@ const transactionStatusSchema = new mongoose.Schema({
     confirmedProvider: { type: String },
     confirmedReference: { type: String },
     confirmedProviderRef: { type: String },             // external provider transaction identifier
+    providerPaymentStatus: { type: String, uppercase: true }, // sanitized server-verified provider status
+    providerVerifiedAt: { type: Date },
     sharePrice: { type: Number },                       // investment_buy: authoritative server-side share price (₦) snapshotted at init; fulfillment MUST bind to this, never a re-read
     reconciliationReason: { type: String },             // security / anomaly justification
     channels: [{ type: String, enum: ['card', 'ussd', 'bank_transfer', 'virtual_account'] }],
@@ -27,6 +29,9 @@ const transactionStatusSchema = new mongoose.Schema({
     service: { type: String, default: '' },             // human-readable gateway name e.g. 'Paystack'
     gatewayConfigSnapshot: { type: mongoose.Schema.Types.Mixed, select: false },
     administrativeValidationLeaseToken: { type: String, select: false },
+    eligibilityVerificationLeaseToken: { type: String, select: false },
+    eligibilityVerificationLeaseExpiresAt: { type: Date, select: false },
+    eligibilityAttemptReleasedAt: { type: Date },
     initializationOutcome: {
         type: String,
         enum: ['pending', 'ambiguous', 'definitive_failure'],

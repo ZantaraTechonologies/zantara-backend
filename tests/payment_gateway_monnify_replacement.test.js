@@ -248,6 +248,11 @@ async function executeReplacement (t, {
 
 async function executeEligibility (t, {
   verificationStatus = 'success',
+  verificationProviderStatus = verificationStatus === 'success'
+    ? 'PAID'
+    : verificationStatus === 'failed'
+      ? 'FAILED'
+      : 'PENDING',
   expiresAt = new Date(Date.now() + 60_000),
   gatewayEnvironment = 'test',
   checkoutEnvironment = gatewayEnvironment,
@@ -255,7 +260,11 @@ async function executeEligibility (t, {
   checkoutStatus = 'initialized',
   checkoutHasReference = true,
   transactionLeaseToken = checkoutStatus === 'initializing' ? 'owned-lease' : undefined,
-  auditFailure = false
+  auditFailure = false,
+  gatewayUpdateMatchedCount = 1,
+  verificationLeaseAcquired = true,
+  transactionConflict = false,
+  lockedGatewayVersion
 } = {}) {
   const gateway = gatewayFixture()
   gateway.environment = gatewayEnvironment
@@ -276,6 +285,7 @@ async function executeEligibility (t, {
     expiresAt
   }
   const transaction = {
+    _id: 'gateway-test-transaction',
     refId: reference,
     userId: 'admin-monnify-replacement',
     type: 'gateway_test',
@@ -298,6 +308,8 @@ async function executeEligibility (t, {
     gatewayFindById: PaymentGateway.findById,
     gatewayUpdateOne: PaymentGateway.updateOne,
     txFindOne: TransactionStatus.findOne,
+    txFindOneAndUpdate: TransactionStatus.findOneAndUpdate,
+    txUpdateOne: TransactionStatus.updateOne,
     userFindById: User.findById,
     auditCreate: AuditLog.create,
     verifyFunding: paymentGatewayService.verifyFunding,
@@ -308,12 +320,43 @@ async function executeEligibility (t, {
   let committed = false
   let aborted = false
   let auditWrite
-  PaymentGateway.findById = () => queryResult(gateway)
-  PaymentGateway.updateOne = async (filter, update) => {
-    gatewayUpdate = { filter, update }
-    return { matchedCount: 1 }
+  let gatewayLoads = 0
+  let verificationOptions
+  PaymentGateway.findById = () => {
+    gatewayLoads++
+    if (gatewayLoads > 1 && lockedGatewayVersion !== undefined) {
+      return queryResult({
+        ...gateway,
+        virtualAccountMutationVersion: lockedGatewayVersion,
+        metadata: {
+          ...gateway.metadata,
+          checkoutValidation: { ...gateway.metadata.checkoutValidation }
+        }
+      })
+    }
+    return queryResult(gateway)
+  }
+  PaymentGateway.updateOne = async (filter, update, options) => {
+    gatewayUpdate = { filter, update, options }
+    return { matchedCount: gatewayUpdateMatchedCount }
   }
   TransactionStatus.findOne = () => queryResult(transaction)
+  TransactionStatus.findOneAndUpdate = (filter, update) => {
+    if (!verificationLeaseAcquired) return queryResult(null)
+    Object.assign(transaction, update.$set)
+    return queryResult(transaction)
+  }
+  TransactionStatus.updateOne = async (filter, update) => {
+    if (
+      filter.eligibilityVerificationLeaseToken !==
+      transaction.eligibilityVerificationLeaseToken
+    ) {
+      return { matchedCount: 0, modifiedCount: 0 }
+    }
+    Object.assign(transaction, update.$set || {})
+    for (const key of Object.keys(update.$unset || {})) delete transaction[key]
+    return { matchedCount: 1, modifiedCount: 1 }
+  }
   User.findById = () => queryResult({
     _id: 'admin-monnify-replacement',
     name: 'Test SuperAdmin',
@@ -329,13 +372,21 @@ async function executeEligibility (t, {
   }
   const session = {
     startTransaction () {},
-    async commitTransaction () { committed = true },
+    async commitTransaction () {
+      if (transactionConflict) {
+        const error = new Error('Write conflict')
+        error.code = 112
+        throw error
+      }
+      committed = true
+    },
     async abortTransaction () { aborted = true },
     async endSession () {}
   }
   mongoose.startSession = async () => session
-  paymentGatewayService.verifyFunding = async () => {
+  paymentGatewayService.verifyFunding = async (_reference, options) => {
     verificationCalls++
+    verificationOptions = options
     if (verificationStatus === 'success') {
       Object.assign(transaction, {
         status: 'success',
@@ -345,13 +396,31 @@ async function executeEligibility (t, {
         confirmedCurrency: 'NGN',
         confirmedProviderRef: 'MNFY_PROVIDER_TRANSACTION'
       })
+      delete transaction.eligibilityVerificationLeaseToken
+      delete transaction.eligibilityVerificationLeaseExpiresAt
+    } else if (
+      verificationStatus === 'failed' &&
+      ['FAILED', 'EXPIRED'].includes(verificationProviderStatus)
+    ) {
+      Object.assign(transaction, {
+        status: 'failed',
+        providerPaymentStatus: verificationProviderStatus,
+        providerVerifiedAt: new Date(),
+        confirmedReference: reference
+      })
     }
-    return { status: verificationStatus, reference }
+    return {
+      status: verificationStatus,
+      providerStatus: verificationProviderStatus,
+      reference
+    }
   }
   t.after(() => {
     PaymentGateway.findById = originals.gatewayFindById
     PaymentGateway.updateOne = originals.gatewayUpdateOne
     TransactionStatus.findOne = originals.txFindOne
+    TransactionStatus.findOneAndUpdate = originals.txFindOneAndUpdate
+    TransactionStatus.updateOne = originals.txUpdateOne
     User.findById = originals.userFindById
     AuditLog.create = originals.auditCreate
     paymentGatewayService.verifyFunding = originals.verifyFunding
@@ -372,6 +441,7 @@ async function executeEligibility (t, {
     transaction,
     gatewayUpdate,
     verificationCalls,
+    verificationOptions,
     auditWrite,
     committed,
     aborted,
@@ -1384,22 +1454,145 @@ test('initializing recovery rejects a gateway-test transaction from another leas
   assert.equal(result.gateway.metadata.administrativeSandboxOnly, true)
 })
 
-test('pending validation payment returns 202 without an eligibility transition', async t => {
-  const result = await executeEligibility(t, { verificationStatus: 'pending' })
+test('a concurrent eligibility verifier cannot query the provider without owning the lease', async t => {
+  const result = await executeEligibility(t, {
+    verificationLeaseAcquired: false
+  })
 
   assert.equal(result.res.statusCode, 202)
-  assert.equal(result.res.body.code, 'MONNIFY_VALIDATION_PAYMENT_PENDING')
+  assert.equal(
+    result.res.body.code,
+    'MONNIFY_VALIDATION_VERIFICATION_IN_PROGRESS'
+  )
+  assert.equal(result.res.body.retryAllowed, false)
+  assert.equal(result.verificationCalls, 0)
   assert.equal(result.gatewayUpdate, undefined)
   assert.equal(result.gateway.metadata.administrativeSandboxOnly, true)
 })
 
-test('failed validation payment returns non-success without an eligibility transition', async t => {
-  const result = await executeEligibility(t, { verificationStatus: 'failed' })
+test('pending validation payment returns 202 without an eligibility transition', async t => {
+  const result = await executeEligibility(t, {
+    verificationStatus: 'pending',
+    verificationProviderStatus: 'PENDING'
+  })
 
-  assert.equal(result.res.statusCode, 422)
-  assert.equal(result.res.body.code, 'MONNIFY_VALIDATION_PAYMENT_NOT_SUCCESSFUL')
+  assert.equal(result.res.statusCode, 202)
+  assert.equal(result.res.body.code, 'MONNIFY_VALIDATION_PAYMENT_PENDING')
+  assert.equal(result.res.body.retryAllowed, false)
   assert.equal(result.gatewayUpdate, undefined)
   assert.equal(result.gateway.metadata.administrativeSandboxOnly, true)
+})
+
+test('unknown validation outcome retains the protected attempt', async t => {
+  const result = await executeEligibility(t, {
+    verificationStatus: 'pending',
+    verificationProviderStatus: 'UNKNOWN'
+  })
+
+  assert.equal(result.res.statusCode, 202)
+  assert.equal(result.res.body.retryAllowed, false)
+  assert.equal(result.gatewayUpdate, undefined)
+  assert.equal(result.gateway.metadata.administrativeSandboxOnly, true)
+})
+
+for (const providerStatus of ['FAILED', 'EXPIRED']) {
+  test(`provider-confirmed ${providerStatus} releases only the exact validation attempt`, async t => {
+    const result = await executeEligibility(t, {
+      verificationStatus: 'failed',
+      verificationProviderStatus: providerStatus
+    })
+
+    assert.equal(result.res.statusCode, 422)
+    assert.equal(result.res.body.code, 'MONNIFY_VALIDATION_PAYMENT_TERMINAL')
+    assert.equal(result.res.body.providerStatus, providerStatus)
+    assert.equal(result.res.body.attemptReleased, true)
+    assert.equal(result.res.body.retryAllowed, true)
+    assert.equal(result.gatewayUpdate.filter.virtualAccountMutationVersion, 3)
+    assert.equal(
+      result.gatewayUpdate.filter['metadata.checkoutValidation.reference'],
+      result.transaction.refId
+    )
+    assert.equal(
+      result.gatewayUpdate.filter['metadata.checkoutValidation.configurationVersion'],
+      3
+    )
+    assert.equal(result.gatewayUpdate.update.$unset['metadata.checkoutValidation'], 1)
+    assert.equal(result.gatewayUpdate.update.$unset['metadata.customerFundingEligibility'], 1)
+    assert.equal(result.gatewayUpdate.options.session, result.session)
+    assert.equal(result.transaction.status, 'failed')
+    assert.equal(result.transaction.providerPaymentStatus, providerStatus)
+    assert.equal(
+      result.verificationOptions.verificationLeaseToken.length,
+      64
+    )
+    assert.ok(result.transaction.eligibilityAttemptReleasedAt instanceof Date)
+    assert.equal(result.transaction.eligibilityVerificationLeaseToken, undefined)
+    assert.ok(result.transaction.gatewayConfigSnapshot)
+    assert.equal(result.gateway.status, 'inactive')
+    assert.equal(result.gateway.isDefault, false)
+    assert.equal(result.gateway.metadata.administrativeSandboxOnly, true)
+    assert.equal(result.auditWrite.value[0].action, 'MONNIFY_VALIDATION_CHECKOUT_TERMINAL')
+    assert.equal(result.auditWrite.options.session, result.session)
+    assert.equal(result.committed, true)
+  })
+}
+
+test('terminal release loses safely to a concurrent checkout/configuration write', async t => {
+  const result = await executeEligibility(t, {
+    verificationStatus: 'failed',
+    verificationProviderStatus: 'EXPIRED',
+    gatewayUpdateMatchedCount: 0
+  })
+
+  assert.equal(result.res.statusCode, 409)
+  assert.equal(result.res.body.code, 'MONNIFY_VALIDATION_TERMINAL_RELEASE_CONFLICT')
+  assert.equal(result.committed, false)
+  assert.equal(result.aborted, true)
+  assert.equal(result.auditWrite, undefined)
+})
+
+test('configuration-version change after provider verification prevents terminal release', async t => {
+  const result = await executeEligibility(t, {
+    verificationStatus: 'failed',
+    verificationProviderStatus: 'FAILED',
+    lockedGatewayVersion: 4
+  })
+
+  assert.equal(result.res.statusCode, 409)
+  assert.equal(result.res.body.code, 'MONNIFY_CHECKOUT_EVIDENCE_MISMATCH')
+  assert.equal(result.gatewayUpdate, undefined)
+  assert.equal(result.committed, false)
+  assert.equal(result.aborted, true)
+})
+
+test('terminal release audit failure aborts the gateway transition', async t => {
+  const result = await executeEligibility(t, {
+    verificationStatus: 'failed',
+    verificationProviderStatus: 'EXPIRED',
+    auditFailure: true
+  })
+
+  assert.equal(result.res.statusCode, 400)
+  assert.match(result.res.body.message, /audit unavailable/)
+  assert.equal(result.committed, false)
+  assert.equal(result.aborted, true)
+})
+
+test('transaction conflicts require a gateway refresh before another eligibility action', async t => {
+  const result = await executeEligibility(t, {
+    verificationStatus: 'failed',
+    verificationProviderStatus: 'EXPIRED',
+    transactionConflict: true
+  })
+
+  assert.equal(result.res.statusCode, 409)
+  assert.equal(
+    result.res.body.code,
+    'MONNIFY_VALIDATION_TRANSACTION_CONFLICT'
+  )
+  assert.equal(result.res.body.refreshRequired, true)
+  assert.equal(result.committed, false)
+  assert.equal(result.aborted, true)
 })
 
 test('expired checkout evidence fails before provider verification', async t => {
@@ -1713,6 +1906,169 @@ test('wallet funding ignores caller-selected gateway compatibility fields', asyn
 
   assert.equal(res.statusCode, 200)
   assert.equal(initialization.gatewayCode, undefined)
+})
+
+test('direct gateway-test verification claims and releases the shared lease around a pending provider query', async t => {
+  const transaction = {
+    _id: 'gateway-test-lease-row',
+    refId: 'MNFY_PENDING_GATEWAY_TEST',
+    type: 'gateway_test',
+    status: 'pending',
+    provider: 'monnify',
+    gatewayId: 'gateway-monnify',
+    gatewayConfigSnapshot: {
+      code: 'monnify',
+      adapterType: 'monnify',
+      environment: 'test'
+    }
+  }
+  const originals = {
+    transactionFindOne: TransactionStatus.findOne,
+    transactionFindOneAndUpdate: TransactionStatus.findOneAndUpdate,
+    transactionUpdateOne: TransactionStatus.updateOne,
+    hydrateGateway: paymentGatewayService._hydrateGatewayCredentials,
+    getAdapter: paymentGatewayService.getAdapterInstance
+  }
+  let claimWrite
+  let releaseWrite
+  let providerQueries = 0
+  TransactionStatus.findOne = () => queryResult(transaction)
+  TransactionStatus.findOneAndUpdate = (filter, update) => {
+    claimWrite = { filter, update }
+    Object.assign(transaction, update.$set)
+    return queryResult(transaction)
+  }
+  TransactionStatus.updateOne = async (filter, update) => {
+    releaseWrite = { filter, update }
+    return { matchedCount: 1, modifiedCount: 1 }
+  }
+  paymentGatewayService._hydrateGatewayCredentials = snapshot => snapshot
+  paymentGatewayService.getAdapterInstance = () => ({
+    async verifyPayment () {
+      providerQueries++
+      return {
+        status: 'pending',
+        providerStatus: 'PENDING',
+        reference: transaction.refId
+      }
+    }
+  })
+  t.after(() => {
+    TransactionStatus.findOne = originals.transactionFindOne
+    TransactionStatus.findOneAndUpdate = originals.transactionFindOneAndUpdate
+    TransactionStatus.updateOne = originals.transactionUpdateOne
+    paymentGatewayService._hydrateGatewayCredentials = originals.hydrateGateway
+    paymentGatewayService.getAdapterInstance = originals.getAdapter
+  })
+
+  const result = await paymentGatewayService.verifyFunding(transaction.refId)
+
+  assert.equal(result.status, 'pending')
+  assert.equal(providerQueries, 1)
+  assert.equal(claimWrite.filter.status, 'pending')
+  assert.equal(claimWrite.update.$set.eligibilityVerificationLeaseToken.length, 64)
+  assert.equal(
+    releaseWrite.filter.eligibilityVerificationLeaseToken,
+    claimWrite.update.$set.eligibilityVerificationLeaseToken
+  )
+  assert.equal(releaseWrite.update.$unset.eligibilityVerificationLeaseToken, 1)
+})
+
+test('terminal gateway-test verification preserves sanitized provider evidence without wallet effects', async t => {
+  const transaction = {
+    refId: 'MNFY_TERMINAL_GATEWAY_TEST',
+    userId: 'admin-1',
+    type: 'gateway_test',
+    status: 'pending',
+    provider: 'monnify',
+    eligibilityVerificationLeaseToken: 'eligibility-lease',
+    amountKobo: 10000,
+    expectedCurrency: 'NGN'
+  }
+  const originals = {
+    transactionUpdateOne: TransactionStatus.updateOne,
+    fundingAdvisory: notificationService.sendFundingAdvisory
+  }
+  let updateWrite
+  let notificationSent = false
+  TransactionStatus.updateOne = async (filter, update) => {
+    updateWrite = { filter, update }
+    return { matchedCount: 1, modifiedCount: 1 }
+  }
+  notificationService.sendFundingAdvisory = async () => { notificationSent = true }
+  t.after(() => {
+    TransactionStatus.updateOne = originals.transactionUpdateOne
+    notificationService.sendFundingAdvisory = originals.fundingAdvisory
+  })
+
+  const result = await paymentGatewayService.finalizeFundingCredit({
+    transactionStatus: transaction,
+    gatewayPaymentResult: {
+      status: 'failed',
+      providerStatus: 'EXPIRED',
+      reference: transaction.refId,
+      amount: 0,
+      currency: 'NGN',
+      message: 'EXPIRED'
+    },
+    source: 'client_verify',
+    verificationLeaseToken: 'eligibility-lease'
+  })
+
+  assert.equal(result.status, 'failed')
+  assert.equal(result.providerStatus, 'EXPIRED')
+  assert.deepEqual(updateWrite.filter, {
+    refId: transaction.refId,
+    status: 'pending',
+    type: 'gateway_test',
+    provider: 'monnify',
+    eligibilityVerificationLeaseToken: 'eligibility-lease'
+  })
+  assert.equal(updateWrite.update.$set.status, 'failed')
+  assert.equal(updateWrite.update.$set.providerPaymentStatus, 'EXPIRED')
+  assert.ok(updateWrite.update.$set.providerVerifiedAt instanceof Date)
+  assert.equal(updateWrite.update.$set.confirmedReference, transaction.refId)
+  assert.equal(notificationSent, false)
+})
+
+test('a terminal verifier cannot overwrite a gateway test owned by another verification lease', async t => {
+  const transaction = {
+    refId: 'MNFY_LEASED_GATEWAY_TEST',
+    type: 'gateway_test',
+    status: 'pending',
+    provider: 'monnify',
+    eligibilityVerificationLeaseToken: 'active-lease'
+  }
+  const originals = {
+    transactionFindOne: TransactionStatus.findOne,
+    transactionUpdateOne: TransactionStatus.updateOne
+  }
+  let updateFilter
+  TransactionStatus.updateOne = async filter => {
+    updateFilter = filter
+    return { matchedCount: 0, modifiedCount: 0 }
+  }
+  TransactionStatus.findOne = () => queryResult(transaction)
+  t.after(() => {
+    TransactionStatus.findOne = originals.transactionFindOne
+    TransactionStatus.updateOne = originals.transactionUpdateOne
+  })
+
+  const result = await paymentGatewayService.finalizeFundingCredit({
+    transactionStatus: transaction,
+    gatewayPaymentResult: {
+      status: 'failed',
+      providerStatus: 'EXPIRED',
+      reference: transaction.refId
+    },
+    source: 'webhook'
+  })
+
+  assert.deepEqual(updateFilter.eligibilityVerificationLeaseToken, {
+    $exists: false
+  })
+  assert.equal(result.status, 'pending')
+  assert.equal(result.alreadyProcessed, true)
 })
 
 test('settled gateway tests never credit wallets or create funding audits', async t => {

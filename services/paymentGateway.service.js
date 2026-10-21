@@ -35,6 +35,7 @@ const {
 
 const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60 * 1000
 const SETTLEMENT_LEASE_MS = 15 * 60 * 1000
+const ELIGIBILITY_VERIFICATION_LEASE_MS = 2 * 60 * 1000
 const AUTOMATIC_SETTLEMENT_TYPES = new Set(['funding', 'investment_buy', 'gateway_test'])
 const CREDENTIAL_STORAGE_STATE = Symbol('paymentGatewayCredentialStorageState')
 
@@ -1073,12 +1074,18 @@ class PaymentGatewayService {
   async finalizeFundingCredit ({
     transactionStatus,
     gatewayPaymentResult,
-    source = 'webhook'
+    source = 'webhook',
+    verificationLeaseToken = null
   }) {
     if (!transactionStatus)
       throw new Error('[Funding Safety] TransactionStatus record is required')
     this._assertSettlementEnvironment(transactionStatus)
     const refId = transactionStatus.refId
+    const gatewayTestLeaseFilter = transactionStatus.type === 'gateway_test'
+      ? (verificationLeaseToken
+          ? { eligibilityVerificationLeaseToken: verificationLeaseToken }
+          : { eligibilityVerificationLeaseToken: { $exists: false } })
+      : {}
 
     if (transactionStatus.status === 'success') {
       return {
@@ -1103,18 +1110,63 @@ class PaymentGatewayService {
 
     if (!gatewayPaymentResult || gatewayPaymentResult.status !== 'success') {
       if (gatewayPaymentResult && gatewayPaymentResult.status === 'failed') {
+        const providerPaymentStatus = String(
+          gatewayPaymentResult.providerStatus || ''
+        ).trim().toUpperCase()
+        const exactGatewayTestFailure =
+          transactionStatus.type === 'gateway_test' &&
+          String(transactionStatus.provider || '').toLowerCase() === 'monnify' &&
+          ['FAILED', 'EXPIRED'].includes(providerPaymentStatus) &&
+          String(gatewayPaymentResult.reference || '') === String(refId)
+        const providerVerifiedAt = new Date()
+        const confirmedAmountKobo = Number.isFinite(gatewayPaymentResult.amount)
+          ? Math.round(Number(gatewayPaymentResult.amount) * 100)
+          : null
         const failed = await TransactionStatus.updateOne(
-          { refId, status: 'pending' },
+          {
+            refId,
+            status: 'pending',
+            ...(transactionStatus.type === 'gateway_test'
+              ? { type: 'gateway_test', provider: transactionStatus.provider }
+              : {}),
+            ...gatewayTestLeaseFilter
+          },
           {
             $set: {
               status: 'failed',
               errorMessage:
-                gatewayPaymentResult.message || 'Payment failed at gateway'
+                gatewayPaymentResult.message || 'Payment failed at gateway',
+              ...(exactGatewayTestFailure
+                ? {
+                    providerPaymentStatus,
+                    providerVerifiedAt,
+                    confirmedReference: String(gatewayPaymentResult.reference),
+                    ...(Number.isSafeInteger(confirmedAmountKobo)
+                      ? { confirmedAmountKobo }
+                      : {}),
+                    ...(gatewayPaymentResult.currency
+                      ? {
+                          confirmedCurrency: String(
+                            gatewayPaymentResult.currency
+                          ).toUpperCase()
+                        }
+                      : {})
+                  }
+                : {})
             }
           }
         )
+        if (failed.modifiedCount !== 1) {
+          const latest = await TransactionStatus.findOne({ refId })
+          return {
+            success: latest?.status === 'success',
+            status: latest?.status || 'pending',
+            providerStatus: latest?.providerPaymentStatus || undefined,
+            alreadyProcessed: true,
+            credited: false
+          }
+        }
         if (
-          failed.modifiedCount === 1 &&
           transactionStatus.userId &&
           transactionStatus.type !== 'gateway_test'
         ) {
@@ -1133,6 +1185,9 @@ class PaymentGatewayService {
         success: false,
         status:
           (gatewayPaymentResult && gatewayPaymentResult.status) || 'pending',
+        ...(gatewayPaymentResult?.providerStatus
+          ? { providerStatus: gatewayPaymentResult.providerStatus }
+          : {}),
         message:
           (gatewayPaymentResult && gatewayPaymentResult.message) ||
           'Payment provider did not confirm success'
@@ -1247,7 +1302,11 @@ class PaymentGatewayService {
     let claimResult
     try {
       claimResult = await TransactionStatus.updateOne(
-        { refId, status: transactionStatus.status },
+        {
+          refId,
+          status: transactionStatus.status,
+          ...gatewayTestLeaseFilter
+        },
         {
           $set: {
             status: 'processing',
@@ -1260,7 +1319,15 @@ class PaymentGatewayService {
                   reconciliationReason: `Authenticated webhook recovery at ${claim.claimedAt.toISOString()}`
                 }
               : {})
-          }
+          },
+          ...(transactionStatus.type === 'gateway_test'
+            ? {
+                $unset: {
+                  eligibilityVerificationLeaseToken: 1,
+                  eligibilityVerificationLeaseExpiresAt: 1
+                }
+              }
+            : {})
         }
       )
     } catch (error) {
@@ -1678,23 +1745,125 @@ class PaymentGatewayService {
   // CLIENT VERIFICATION
   // ─────────────────────────────────────────────────────────
 
+  async _claimGatewayTestVerificationLease (transaction) {
+    if (transaction?.type !== 'gateway_test' || transaction.status !== 'pending') {
+      return null
+    }
+    const claimedAt = new Date()
+    const token = crypto.randomBytes(32).toString('hex')
+    let query = TransactionStatus.findOneAndUpdate(
+      {
+        ...(transaction._id
+          ? { _id: transaction._id }
+          : { refId: transaction.refId }),
+        refId: transaction.refId,
+        status: 'pending',
+        type: 'gateway_test',
+        provider: transaction.provider,
+        gatewayId: transaction.gatewayId,
+        $or: [
+          { eligibilityVerificationLeaseExpiresAt: { $lte: claimedAt } },
+          { eligibilityVerificationLeaseExpiresAt: { $exists: false } },
+          { eligibilityVerificationLeaseToken: { $exists: false } }
+        ]
+      },
+      {
+        $set: {
+          eligibilityVerificationLeaseToken: token,
+          eligibilityVerificationLeaseExpiresAt: new Date(
+            claimedAt.getTime() + ELIGIBILITY_VERIFICATION_LEASE_MS
+          )
+        }
+      },
+      { new: true }
+    )
+    if (typeof query?.select === 'function') {
+      query = query.select(
+        '+gatewayConfigSnapshot +eligibilityVerificationLeaseToken +eligibilityVerificationLeaseExpiresAt'
+      )
+    }
+    const claimedTransaction = await query
+    return claimedTransaction
+      ? { transaction: claimedTransaction, token }
+      : null
+  }
+
+  async _releaseGatewayTestVerificationLease (reference, token) {
+    if (!reference || !token) return
+    await TransactionStatus.updateOne(
+      {
+        refId: reference,
+        status: 'pending',
+        type: 'gateway_test',
+        eligibilityVerificationLeaseToken: token
+      },
+      {
+        $unset: {
+          eligibilityVerificationLeaseToken: 1,
+          eligibilityVerificationLeaseExpiresAt: 1
+        }
+      }
+    )
+  }
+
   /**
    * Verifies payment via transaction reference (used by client return redirect and manual requery).
    */
-  async verifyFunding (reference) {
+  async verifyFunding (reference, { verificationLeaseToken = null } = {}) {
     if (!reference) {
       return { status: 'not_found', message: 'Reference is required' }
     }
 
     const transactionQuery = TransactionStatus.findOne({ refId: reference })
-    const transaction =
+    let transaction =
       typeof transactionQuery?.select === 'function'
-        ? await transactionQuery.select('+gatewayConfigSnapshot')
+        ? await transactionQuery.select(
+          '+gatewayConfigSnapshot +eligibilityVerificationLeaseToken +eligibilityVerificationLeaseExpiresAt'
+        )
         : await transactionQuery
     if (!transaction) {
       return { status: 'not_found', message: 'Transaction record not found' }
     }
     this._assertSettlementEnvironment(transaction)
+    if (transaction.type === 'gateway_test' && transaction.status === 'pending') {
+      if (verificationLeaseToken) {
+        const leaseExpiry = new Date(
+          transaction.eligibilityVerificationLeaseExpiresAt || 0
+        )
+        if (
+          transaction.eligibilityVerificationLeaseToken !==
+            verificationLeaseToken ||
+          !leaseExpiry.getTime() ||
+          leaseExpiry <= new Date()
+        ) {
+          return {
+            status: 'processing',
+            type: transaction.type,
+            reference,
+            message: 'This validation payment is already being verified.'
+          }
+        }
+      } else {
+        const claim = await this._claimGatewayTestVerificationLease(transaction)
+        if (!claim) {
+          return {
+            status: 'processing',
+            type: transaction.type,
+            reference,
+            message: 'This validation payment is already being verified.'
+          }
+        }
+        transaction = claim.transaction
+        verificationLeaseToken = claim.token
+      }
+    }
+    const releaseVerificationLease = async () => {
+      if (!verificationLeaseToken || transaction.type !== 'gateway_test') return
+      await this._releaseGatewayTestVerificationLease(
+        reference,
+        verificationLeaseToken
+      )
+    }
 
     // If already in a terminal or intermediate state, report without re-verifying
     if (transaction.status === 'success') {
@@ -1702,7 +1871,14 @@ class PaymentGatewayService {
     }
 
     if (transaction.status === 'failed') {
-      return { status: 'failed', type: transaction.type, reference }
+      return {
+        status: 'failed',
+        type: transaction.type,
+        reference,
+        ...(transaction.providerPaymentStatus
+          ? { providerStatus: transaction.providerPaymentStatus }
+          : {})
+      }
     }
 
     if (transaction.status === 'reconciliation_required') {
@@ -1731,23 +1907,34 @@ class PaymentGatewayService {
       : await this.getGateway(gatewayCode)
 
     if (!gateway) {
+      await releaseVerificationLease()
       return {
         status: 'pending',
         message: `Gateway '${gatewayCode}' configuration not available for verification`
       }
     }
 
-    const adapter = this.getAdapterInstance(gateway)
-    const verifyResult = await adapter.verifyPayment(reference)
+    let finalResult
+    try {
+      const adapter = this.getAdapterInstance(gateway)
+      const verifyResult = await adapter.verifyPayment(reference)
 
-    const finalResult = await this.finalizeFundingCredit({
-      transactionStatus: transaction,
-      gatewayPaymentResult: {
-        ...verifyResult,
-        gateway: gateway.code
-      },
-      source: 'client_verify'
-    })
+      finalResult = await this.finalizeFundingCredit({
+        transactionStatus: transaction,
+        gatewayPaymentResult: {
+          ...verifyResult,
+          gateway: gateway.code
+        },
+        source: 'client_verify',
+        verificationLeaseToken
+      })
+      if (!['success', 'failed'].includes(finalResult.status)) {
+        await releaseVerificationLease()
+      }
+    } catch (error) {
+      await releaseVerificationLease()
+      throw error
+    }
 
     return {
       status: finalResult.status,
@@ -1757,7 +1944,10 @@ class PaymentGatewayService {
       ...(finalResult.deferred !== undefined
         ? { deferred: finalResult.deferred }
         : {}),
-      ...(finalResult.message ? { message: finalResult.message } : {})
+      ...(finalResult.message ? { message: finalResult.message } : {}),
+      ...(finalResult.providerStatus
+        ? { providerStatus: finalResult.providerStatus }
+        : {})
     }
   }
 
@@ -2474,6 +2664,24 @@ class PaymentGatewayService {
       }
 
       if (transaction) {
+        let gatewayTestVerificationLeaseToken = null
+        if (transaction.type === 'gateway_test' && transaction.status === 'pending') {
+          const claim = await this._claimGatewayTestVerificationLease(transaction)
+          if (!claim) {
+            await this._setWebhookEventState(
+              webhookEvent,
+              'retryable',
+              'Gateway-test verification is already in progress'
+            )
+            return {
+              status: 503,
+              message: 'Gateway-test verification is already in progress'
+            }
+          }
+          transaction = claim.transaction
+          gatewayTestVerificationLeaseToken = claim.token
+        }
+
         // Secondary server-side verification before wallet credit (never trust webhook alone)
         let serverVerify
         try {
@@ -2522,15 +2730,34 @@ class PaymentGatewayService {
               snapshotAdapter === String(providerCode).toLowerCase()
                 ? transactionProvider
                 : providerCode
-            await this.finalizeFundingCredit({
+            const finalResult = await this.finalizeFundingCredit({
               transactionStatus: transaction,
               gatewayPaymentResult: {
                 ...serverVerify,
                 gateway: verifiedGatewayCode
               },
-              source: 'webhook'
+              source: 'webhook',
+              verificationLeaseToken: gatewayTestVerificationLeaseToken
             })
+            if (
+              gatewayTestVerificationLeaseToken &&
+              finalResult.status !== 'success'
+            ) {
+              await this._setWebhookEventState(
+                webhookEvent,
+                'retryable',
+                `Verified payment settlement is ${finalResult.status}`
+              )
+              return {
+                status: 503,
+                message: 'Verified payment settlement is not complete'
+              }
+            }
           } catch (settlementErr) {
+            await this._releaseGatewayTestVerificationLease(
+              refId,
+              gatewayTestVerificationLeaseToken
+            )
             const terminalSecurityFailure = [
               'PAYMENT_GATEWAY_MISMATCH',
               'PAYMENT_REFERENCE_MISMATCH',
@@ -2546,6 +2773,10 @@ class PaymentGatewayService {
             throw settlementErr
           }
         } else if (serverVerify.status === 'failed') {
+          await this._releaseGatewayTestVerificationLease(
+            refId,
+            gatewayTestVerificationLeaseToken
+          )
           // The provider authoritatively confirmed a terminal failure.
           // Preserve existing TransactionStatus handling and stop retries.
           await this._setWebhookEventState(
@@ -2558,6 +2789,10 @@ class PaymentGatewayService {
             message: 'Secondary verification confirmed payment failure'
           }
         } else {
+          await this._releaseGatewayTestVerificationLease(
+            refId,
+            gatewayTestVerificationLeaseToken
+          )
           await this._setWebhookEventState(
             webhookEvent,
             'retryable',

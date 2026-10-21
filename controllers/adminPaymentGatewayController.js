@@ -85,6 +85,8 @@ const MONNIFY_ELIGIBILITY_CONFIRMATIONS = Object.freeze({
 })
 const MONNIFY_CHECKOUT_EVIDENCE_TTL_MS = 24 * 60 * 60 * 1000
 const MONNIFY_CHECKOUT_INITIALIZATION_LEASE_MS = 5 * 60 * 1000
+const MONNIFY_ELIGIBILITY_VERIFICATION_LEASE_MS = 2 * 60 * 1000
+const MONNIFY_TERMINAL_VALIDATION_STATUSES = new Set(['FAILED', 'EXPIRED'])
 
 async function loadGatewayForMutation (id, session) {
   let query = PaymentGateway.findById(id)
@@ -2535,7 +2537,9 @@ const enableMonnifyCustomerFunding = async (req, res) => {
     const loadTransaction = async session => {
       let query = TransactionStatus.findOne({ refId: reference })
       if (typeof query?.select === 'function') {
-        query = query.select('+gatewayConfigSnapshot +administrativeValidationLeaseToken')
+        query = query.select(
+          '+gatewayConfigSnapshot +administrativeValidationLeaseToken +eligibilityVerificationLeaseToken +eligibilityVerificationLeaseExpiresAt'
+        )
       }
       return queryWithSession(query, session)
     }
@@ -2568,14 +2572,217 @@ const enableMonnifyCustomerFunding = async (req, res) => {
     let transaction = await loadTransaction(null)
     assertTransactionIdentity(transaction, gateway, initialEvidence)
 
-    const verification = await paymentGatewayService.verifyFunding(reference)
+    let verificationLeaseToken =
+      transaction.eligibilityVerificationLeaseToken || null
+    if (transaction.status === 'pending') {
+      const leaseStartedAt = new Date()
+      verificationLeaseToken = crypto.randomBytes(32).toString('hex')
+      let leaseQuery = TransactionStatus.findOneAndUpdate(
+        {
+          _id: transaction._id,
+          refId: reference,
+          status: 'pending',
+          type: 'gateway_test',
+          provider: transaction.provider,
+          gatewayId: transaction.gatewayId,
+          $or: [
+            {
+              eligibilityVerificationLeaseExpiresAt: {
+                $lte: leaseStartedAt
+              }
+            },
+            {
+              eligibilityVerificationLeaseToken: { $exists: false },
+              eligibilityVerificationLeaseExpiresAt: { $exists: false }
+            }
+          ]
+        },
+        {
+          $set: {
+            eligibilityVerificationLeaseToken: verificationLeaseToken,
+            eligibilityVerificationLeaseExpiresAt: new Date(
+              leaseStartedAt.getTime() +
+                MONNIFY_ELIGIBILITY_VERIFICATION_LEASE_MS
+            )
+          }
+        },
+        { new: true }
+      )
+      if (typeof leaseQuery?.select === 'function') {
+        leaseQuery = leaseQuery.select(
+          '+gatewayConfigSnapshot +administrativeValidationLeaseToken +eligibilityVerificationLeaseToken +eligibilityVerificationLeaseExpiresAt'
+        )
+      }
+      transaction = await leaseQuery
+      if (!transaction) {
+        return res.status(202).json({
+          success: false,
+          code: 'MONNIFY_VALIDATION_VERIFICATION_IN_PROGRESS',
+          status: 'processing',
+          reference,
+          retryAllowed: false,
+          message: 'This Monnify validation payment is already being verified.'
+        })
+      }
+      assertTransactionIdentity(transaction, gateway, initialEvidence)
+    }
+
+    const verification = await paymentGatewayService.verifyFunding(reference, {
+      verificationLeaseToken
+    })
     if (['pending', 'processing', 'settlement_pending'].includes(verification.status)) {
       return res.status(202).json({
         success: false,
         code: 'MONNIFY_VALIDATION_PAYMENT_PENDING',
         status: verification.status,
         reference,
+        retryAllowed: false,
         message: verification.message || 'Monnify has not conclusively verified this validation payment.'
+      })
+    }
+    const terminalProviderStatus = String(
+      verification.providerStatus || ''
+    ).trim().toUpperCase()
+    if (
+      verification.status === 'failed' &&
+      MONNIFY_TERMINAL_VALIDATION_STATUSES.has(terminalProviderStatus)
+    ) {
+      mutationSession = await mongoose.startSession()
+      mutationSession.startTransaction()
+      const lockedGateway = await loadGatewayForMutation(req.params.id, mutationSession)
+      if (!lockedGateway) {
+        const error = new Error('Payment gateway not found')
+        error.statusCode = 404
+        throw error
+      }
+
+      const releasedAt = new Date()
+      const lockedEvidence = assertGatewayEvidence(lockedGateway, releasedAt)
+      transaction = await loadTransaction(mutationSession)
+      assertTransactionIdentity(transaction, lockedGateway, lockedEvidence)
+      if (
+        transaction.status !== 'failed' ||
+        !MONNIFY_TERMINAL_VALIDATION_STATUSES.has(
+          String(transaction.providerPaymentStatus || '').toUpperCase()
+        ) ||
+        String(transaction.providerPaymentStatus || '').toUpperCase() !== terminalProviderStatus ||
+        !(transaction.providerVerifiedAt instanceof Date) ||
+        String(transaction.confirmedReference || '') !== reference
+      ) {
+        const error = new Error('Provider-confirmed terminal evidence is incomplete or no longer belongs to this validation attempt.')
+        error.code = 'MONNIFY_VALIDATION_TERMINAL_EVIDENCE_INVALID'
+        error.statusCode = 409
+        throw error
+      }
+
+      const releasedTransaction = await TransactionStatus.updateOne(
+        {
+          _id: transaction._id,
+          refId: reference,
+          status: 'failed',
+          type: 'gateway_test',
+          provider: transaction.provider,
+          eligibilityVerificationLeaseToken: verificationLeaseToken,
+          providerPaymentStatus: terminalProviderStatus,
+          confirmedReference: reference
+        },
+        {
+          $set: { eligibilityAttemptReleasedAt: releasedAt },
+          $unset: {
+            eligibilityVerificationLeaseToken: 1,
+            eligibilityVerificationLeaseExpiresAt: 1
+          }
+        },
+        { session: mutationSession }
+      )
+      if (!mutationMatched(releasedTransaction)) {
+        const error = new Error('The validation verification lease changed before terminal recovery completed.')
+        error.code = 'MONNIFY_VALIDATION_TERMINAL_RELEASE_CONFLICT'
+        error.statusCode = 409
+        throw error
+      }
+
+      const releaseFilter = {
+        _id: lockedGateway._id,
+        status: 'inactive',
+        isDefault: false,
+        environment: lockedEvidence.environment,
+        baseUrl: MONNIFY_BASE_URLS[lockedEvidence.environment],
+        'metadata.administrativeSandboxOnly': true,
+        'metadata.checkoutValidation.status': lockedEvidence.checkout.status,
+        'metadata.checkoutValidation.gatewayId': String(lockedGateway._id),
+        'metadata.checkoutValidation.environment': lockedEvidence.environment,
+        'metadata.checkoutValidation.configurationVersion': lockedEvidence.version,
+        'metadata.checkoutValidation.expiresAt': { $gt: releasedAt },
+        ...(lockedEvidence.checkout.status === 'initializing'
+          ? {
+              'metadata.checkoutValidation.leaseToken': lockedEvidence.checkout.leaseToken,
+              'metadata.checkoutValidation.reference': { $exists: false }
+            }
+          : { 'metadata.checkoutValidation.reference': reference }),
+        ...(lockedEvidence.version === 0
+          ? {
+              $or: [
+                { virtualAccountMutationVersion: 0 },
+                { virtualAccountMutationVersion: { $exists: false } }
+              ]
+            }
+          : { virtualAccountMutationVersion: lockedEvidence.version })
+      }
+      const released = await PaymentGateway.updateOne(
+        releaseFilter,
+        {
+          $unset: {
+            'metadata.checkoutValidation': 1,
+            'metadata.customerFundingEligibility': 1
+          },
+          $set: {
+            lastHealthCheck: {
+              status: 'unknown',
+              checkedAt: releasedAt,
+              message: `Monnify ${lockedEvidence.environment} validation payment ${terminalProviderStatus.toLowerCase()}; a new validation checkout is permitted`
+            }
+          }
+        },
+        { session: mutationSession }
+      )
+      if (!mutationMatched(released)) {
+        const error = new Error('The Monnify configuration or validation attempt changed before terminal recovery completed.')
+        error.code = 'MONNIFY_VALIDATION_TERMINAL_RELEASE_CONFLICT'
+        error.statusCode = 409
+        throw error
+      }
+
+      await AuditLog.create([{
+        adminId: req.user?._id || req.user?.id,
+        operatorName: admin.name || req.user?.name || 'SuperAdmin',
+        action: 'MONNIFY_VALIDATION_CHECKOUT_TERMINAL',
+        target: `Gateway: ${lockedGateway.name}`,
+        details: {
+          gatewayId: lockedGateway._id,
+          reference,
+          environment: lockedEvidence.environment,
+          configurationVersion: lockedEvidence.version,
+          providerStatus: terminalProviderStatus,
+          retryAllowed: true,
+          defaultGatewayChanged: false
+        },
+        result: 'warning',
+        ipAddress: req.ip || req.headers?.['x-forwarded-for'],
+        userAgent: req.headers?.['user-agent']
+      }], { session: mutationSession })
+      await mutationSession.commitTransaction()
+      mutationFinished = true
+
+      return res.status(422).json({
+        success: false,
+        code: 'MONNIFY_VALIDATION_PAYMENT_TERMINAL',
+        status: 'failed',
+        providerStatus: terminalProviderStatus,
+        reference,
+        attemptReleased: true,
+        retryAllowed: true,
+        message: `Monnify reports this validation payment as ${terminalProviderStatus}. The historical attempt was retained and a new validation checkout may be started explicitly.`
       })
     }
     if (verification.status !== 'success') {
@@ -2584,6 +2791,7 @@ const enableMonnifyCustomerFunding = async (req, res) => {
         code: 'MONNIFY_VALIDATION_PAYMENT_NOT_SUCCESSFUL',
         status: verification.status,
         reference,
+        retryAllowed: false,
         message: verification.message || 'Monnify did not verify this validation payment as successful.'
       })
     }
@@ -2719,10 +2927,22 @@ const enableMonnifyCustomerFunding = async (req, res) => {
       } catch (_) {}
       mutationFinished = true
     }
-    return res.status(error.statusCode || 400).json({
+    const transactionConflict =
+      error?.code === 112 ||
+      error?.codeName === 'WriteConflict' ||
+      error?.errorLabels?.includes?.('TransientTransactionError') ||
+      error?.errorLabels?.includes?.('UnknownTransactionCommitResult')
+    return res.status(transactionConflict ? 409 : (error.statusCode || 400)).json({
       success: false,
-      ...(error.code ? { code: error.code } : {}),
-      message: error.message
+      ...(transactionConflict
+        ? {
+            code: 'MONNIFY_VALIDATION_TRANSACTION_CONFLICT',
+            refreshRequired: true
+          }
+        : (error.code ? { code: error.code } : {})),
+      message: transactionConflict
+        ? 'The validation state changed while the result was being saved. Refresh the gateway state before continuing.'
+        : error.message
     })
   } finally {
     if (mutationSession) {

@@ -326,6 +326,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
                     reference,
                     amount: 0,
                     currency: 'NGN',
+                    providerStatus: 'UNKNOWN',
                     message: resData?.responseMessage || 'Monnify verification returned no data'
                 };
             }
@@ -333,6 +334,10 @@ class MonnifyAdapter extends BasePaymentAdapter {
             const body = resData.responseBody;
             let normalizedStatus = 'pending';
             const payStatus = String(body.paymentStatus || '').toUpperCase();
+            const providerStatus = ['PAID', 'OVERPAID', 'PENDING', 'FAILED', 'EXPIRED', 'CANCELLED'].includes(payStatus)
+                ? payStatus
+                : 'UNKNOWN';
+            const returnedReference = String(body.paymentReference || '');
 
             if (payStatus === 'PAID' || payStatus === 'OVERPAID') {
                 normalizedStatus = 'success';
@@ -340,17 +345,22 @@ class MonnifyAdapter extends BasePaymentAdapter {
                 normalizedStatus = 'failed';
             }
 
+            if (returnedReference !== String(reference)) normalizedStatus = 'pending';
+
             const amountPaid = Number(body.amountPaid ?? body.payableAmount ?? 0);
             const currency = String(body.currencyCode || '').toUpperCase();
 
             return {
                 success: normalizedStatus === 'success',
                 status: normalizedStatus,
-                reference: String(body.paymentReference || ''),
+                reference: returnedReference,
                 providerTransactionId: String(body.transactionReference || ''),
                 amount: amountPaid,
                 currency,
-                message: body.paymentStatus || resData.responseMessage || '',
+                providerStatus,
+                message: returnedReference === String(reference)
+                    ? (body.paymentStatus || resData.responseMessage || '')
+                    : 'Monnify returned a mismatched payment reference',
                 metadata: body.metaData,
                 raw: body
             };
@@ -369,15 +379,24 @@ class MonnifyAdapter extends BasePaymentAdapter {
                 if (queryRes.data && queryRes.data.requestSuccessful && queryRes.data.responseBody) {
                     const body = queryRes.data.responseBody;
                     const payStatus = String(body.paymentStatus || '').toUpperCase();
+                    const providerStatus = ['PAID', 'OVERPAID', 'PENDING', 'FAILED', 'EXPIRED', 'CANCELLED'].includes(payStatus)
+                        ? payStatus
+                        : 'UNKNOWN';
+                    const returnedReference = String(body.paymentReference || '');
+                    const referenceMatches = returnedReference === String(reference);
                     const isPaid = payStatus === 'PAID' || payStatus === 'OVERPAID';
                     const isFailed = ['FAILED', 'EXPIRED', 'CANCELLED'].includes(payStatus);
                     return {
-                        success: isPaid,
-                        status: isPaid ? 'success' : (isFailed ? 'failed' : 'pending'),
-                        reference: String(body.paymentReference || ''),
+                        success: referenceMatches && isPaid,
+                        status: referenceMatches ? (isPaid ? 'success' : (isFailed ? 'failed' : 'pending')) : 'pending',
+                        reference: returnedReference,
                         providerTransactionId: String(body.transactionReference || ''),
                         amount: Number(body.amountPaid ?? 0),
                         currency: String(body.currencyCode || '').toUpperCase(),
+                        providerStatus,
+                        message: referenceMatches
+                            ? (body.paymentStatus || queryRes.data.responseMessage || '')
+                            : 'Monnify returned a mismatched payment reference',
                         raw: body
                     };
                 }
@@ -392,6 +411,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
                 reference,
                 amount: 0,
                 currency: 'NGN',
+                providerStatus: 'UNKNOWN',
                 message: `Monnify verify error: ${msg}`
             };
         }
