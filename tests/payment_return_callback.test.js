@@ -1,14 +1,14 @@
 const assert = require('assert');
+const axios = require('axios');
 
 const PaymentGateway = require('../models/PaymentGateway');
 const TransactionStatus = require('../models/TransactionStatus');
 const paymentGatewayService = require('../services/paymentGateway.service');
 const { fundWallet } = require('../controllers/walletFundingController');
+const MonnifyAdapter = require('../adapters/payment/monnify.adapter');
 
-// Guarantees the WEB change: when the client sends NO callback_url override,
-// the backend derives the gateway-specific return URL (CLIENT_BASE_URL/<gateway>/return)
-// for paystack / monnify / flutterwave — identical to the value each adapter uses
-// as its redirectUrl. Also verifies the controller exposes callbackUrl + returnHost.
+// Guarantees that every hosted checkout receives the trusted provider-specific
+// return URL and that a client cannot replace it with an external destination.
 async function runPaymentReturnCallbackTests() {
     console.log('====================================================');
     console.log('   PAYMENT RETURN CALLBACK DERIVATION TEST SUITE     ');
@@ -116,7 +116,11 @@ async function runPaymentReturnCallbackTests() {
         return mockQuery(found || null);
     };
     PaymentGateway.countDocuments = () => Promise.resolve(mockGateways.length);
-    TransactionStatus.create = (doc) => ({ ...doc, _id: 'tx', save: async () => this });
+    let transactionCreateCount = 0;
+    TransactionStatus.create = (doc) => {
+        transactionCreateCount++;
+        return { ...doc, _id: 'tx', save: async () => this };
+    };
     TransactionStatus.findOne = () => Promise.resolve(null);
 
     const captured = {};
@@ -177,7 +181,7 @@ async function runPaymentReturnCallbackTests() {
         restore();
         assert.strictEqual(res.callbackUrl, 'https://dahavtu.netlify.app/paystack/return');
         assert.strictEqual(res.returnHost, undefined);
-        assert.strictEqual(captured.paystack.callbackUrl, undefined, 'adapter must apply its own default');
+        assert.strictEqual(captured.paystack.callbackUrl, res.callbackUrl);
     });
 
     await test('2. Monnify funding callback derives /monnify/return (no override)', async () => {
@@ -188,7 +192,7 @@ async function runPaymentReturnCallbackTests() {
         });
         restore();
         assert.strictEqual(res.callbackUrl, 'https://dahavtu.netlify.app/monnify/return');
-        assert.strictEqual(captured.monnify.callbackUrl, undefined, 'adapter must apply its own default');
+        assert.strictEqual(captured.monnify.callbackUrl, res.callbackUrl);
     });
 
     await test('3. Flutterwave funding callback derives /flutterwave/return (no override)', async () => {
@@ -199,21 +203,91 @@ async function runPaymentReturnCallbackTests() {
         });
         restore();
         assert.strictEqual(res.callbackUrl, 'https://dahavtu.netlify.app/flutterwave/return');
-        assert.strictEqual(captured.flutterwave.callbackUrl, undefined, 'adapter must apply its own default');
+        assert.strictEqual(captured.flutterwave.callbackUrl, res.callbackUrl);
     });
 
-    await test('4. Explicit client callbackUrl is preserved (never silently overridden)', async () => {
+    await test('4. An exact canonical callback override is accepted', async () => {
         const restore = stubAdapter('paystack');
         const res = await paymentGatewayService.initializeFunding({
             gatewayCode: 'paystack', user: { _id: 'u1', email: 'a@z.ng' }, amount: 1000,
-            callbackUrl: 'https://custom.example/back'
+            callbackUrl: 'https://dahavtu.netlify.app/paystack/return'
         });
         restore();
-        assert.strictEqual(res.callbackUrl, 'https://custom.example/back');
-        assert.strictEqual(captured.paystack.callbackUrl, 'https://custom.example/back');
+        assert.strictEqual(res.callbackUrl, 'https://dahavtu.netlify.app/paystack/return');
+        assert.strictEqual(captured.paystack.callbackUrl, res.callbackUrl);
     });
 
-    await test('5. Missing CLIENT_BASE_URL defaults to localhost (must be flagged in prod)', async () => {
+    await test('5. Monnify request receives the exact trusted redirectUrl', async () => {
+        const adapter = new MonnifyAdapter({
+            baseUrl: 'https://sandbox.monnify.com',
+            publicKey: 'MK',
+            secretKey: 'sk',
+            metadata: { contractCode: '123456' }
+        });
+        adapter.getAccessToken = async () => 'token';
+        const originalPost = axios.post;
+        let requestBody;
+        axios.post = async (_url, body) => {
+            requestBody = body;
+            return {
+                data: {
+                    requestSuccessful: true,
+                    responseBody: {
+                        checkoutUrl: 'https://sandbox.sdk.monnify.com/checkout/test',
+                        paymentReference: body.paymentReference
+                    }
+                }
+            };
+        };
+        try {
+            await adapter.initializePayment({
+                user: { _id: 'u1', email: 'a@z.ng' },
+                amount: 1000,
+                reference: 'MNFY_REDIRECT_TEST',
+                callbackUrl: 'https://dahavtu.netlify.app/monnify/return'
+            });
+        } finally {
+            axios.post = originalPost;
+        }
+        assert.strictEqual(requestBody.redirectUrl, 'https://dahavtu.netlify.app/monnify/return');
+    });
+
+    await test('6. External callback override is rejected before persistence or provider dispatch', async () => {
+        delete captured.monnify;
+        const beforeCreateCount = transactionCreateCount;
+        const restore = stubAdapter('monnify');
+        try {
+            await assert.rejects(
+                paymentGatewayService.initializeFunding({
+                    gatewayCode: 'monnify',
+                    user: { _id: 'u1', email: 'a@z.ng' },
+                    amount: 1000,
+                    callbackUrl: 'https://attacker.example/payment-complete'
+                }),
+                { code: 'PAYMENT_CALLBACK_URL_INVALID' }
+            );
+        } finally {
+            restore();
+        }
+        assert.strictEqual(transactionCreateCount, beforeCreateCount);
+        assert.strictEqual(captured.monnify, undefined);
+    });
+
+    await test('7. CLIENT_BASE_URL trailing slash is normalized', async () => {
+        process.env[envKey] = 'https://dahavtu.netlify.app/';
+        try {
+            const res = await withStubbedAdapter('monnify', () =>
+                paymentGatewayService.initializeFunding({
+                    gatewayCode: 'monnify', user: { _id: 'u1', email: 'a@z.ng' }, amount: 1000
+                }));
+            assert.strictEqual(res.callbackUrl, 'https://dahavtu.netlify.app/monnify/return');
+            assert.strictEqual(captured.monnify.callbackUrl, res.callbackUrl);
+        } finally {
+            process.env[envKey] = 'https://dahavtu.netlify.app';
+        }
+    });
+
+    await test('8. Missing CLIENT_BASE_URL defaults to localhost (must be flagged in prod)', async () => {
         delete process.env[envKey];
         try {
             const res = await withStubbedAdapter('monnify', () =>
@@ -226,7 +300,7 @@ async function runPaymentReturnCallbackTests() {
         }
     });
 
-    await test('6. /wallet/fund ignores provider compatibility input and exposes the default callback', async () => {
+    await test('9. /wallet/fund ignores provider compatibility input and exposes the default callback', async () => {
         const restore = stubAdapter('paystack');
         let json = null;
         const req = { body: { amount: 1000, channel: 'card', provider: 'monnify' }, user: { id: 'u1', email: 'a@z.ng' } };
@@ -239,7 +313,7 @@ async function runPaymentReturnCallbackTests() {
         assert.strictEqual(json.returnHost, 'dahavtu.netlify.app');
     });
 
-    await test('7. Amount-only funding uses an active customer-eligible Paystack default', async () => {
+    await test('10. Amount-only funding uses an active customer-eligible Paystack default', async () => {
         mockGateways.forEach(g => { g.isDefault = g.code === 'paystack'; });
         const result = await withStubbedAdapter('paystack', () =>
             paymentGatewayService.initializeFunding({
@@ -248,7 +322,7 @@ async function runPaymentReturnCallbackTests() {
         assert.strictEqual(result.provider, 'paystack');
     });
 
-    await test('8. Amount-only funding uses a normal active Monnify default', async () => {
+    await test('11. Amount-only funding uses a normal active Monnify default', async () => {
         const monnify = mockGateways.find(g => g.code === 'monnify');
         mockGateways.forEach(g => { g.isDefault = g.code === 'monnify'; });
         monnify.metadata = eligibleMonnifyMetadata();
@@ -259,7 +333,7 @@ async function runPaymentReturnCallbackTests() {
         assert.strictEqual(result.provider, 'monnify');
     });
 
-    await test('9. Administrative Monnify default falls back to eligible Paystack', async () => {
+    await test('12. Administrative Monnify default falls back to eligible Paystack', async () => {
         const monnify = mockGateways.find(g => g.code === 'monnify');
         mockGateways.forEach(g => { g.isDefault = g.code === 'monnify'; });
         monnify.metadata = { contractCode: '123456', administrativeSandboxOnly: true };
@@ -270,7 +344,7 @@ async function runPaymentReturnCallbackTests() {
         assert.strictEqual(result.provider, 'paystack');
     });
 
-    await test('10. Switching the eligible default changes amount-only routing', async () => {
+    await test('13. Switching the eligible default changes amount-only routing', async () => {
         const monnify = mockGateways.find(g => g.code === 'monnify');
         monnify.metadata = eligibleMonnifyMetadata();
         mockGateways.forEach(g => { g.isDefault = g.code === 'paystack'; });
@@ -287,7 +361,7 @@ async function runPaymentReturnCallbackTests() {
         assert.strictEqual(after.provider, 'monnify');
     });
 
-    await test('11. Missing eligible default falls back by active gateway priority', async () => {
+    await test('14. Missing eligible default falls back by active gateway priority', async () => {
         const paystack = mockGateways.find(g => g.code === 'paystack');
         const monnify = mockGateways.find(g => g.code === 'monnify');
         const flutterwave = mockGateways.find(g => g.code === 'flutterwave');
@@ -307,7 +381,7 @@ async function runPaymentReturnCallbackTests() {
         }
     });
 
-    await test('12. Channel routing skips higher-priority administrative sandboxes', async () => {
+    await test('15. Channel routing skips higher-priority administrative sandboxes', async () => {
         const paystack = mockGateways.find(g => g.code === 'paystack');
         const monnify = mockGateways.find(g => g.code === 'monnify');
         const originalPaystackPriority = paystack.priority;

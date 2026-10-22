@@ -530,17 +530,17 @@ async function runPaymentGatewayTests() {
             assert.ok(jsonSent.reference, 'Reference must exist');
         });
 
-        await test('11. Existing Web flow remains compatible', async () => {
-            // Web client sends { amount: 5000, provider: 'paystack', callback_url: 'http://localhost/paystack/return' }
+        await test('11. Wallet funding rejects an untrusted callback override', async () => {
             const { fundWallet } = require('../controllers/walletFundingController');
             let jsonSent = null;
+            let statusCode = 200;
             const req = {
-                body: { amount: 5000, provider: 'paystack', callback_url: 'http://localhost/paystack/return' },
+                body: { amount: 5000, callback_url: 'https://attacker.example/payment-complete' },
                 user: { id: 'u-web', email: 'web@zantara.ng' }
             };
             const res = {
                 json: (d) => { jsonSent = d; return res; },
-                status: () => res
+                status: (code) => { statusCode = code; return res; }
             };
 
             const paystackAdapter = paymentGatewayService.adapters.paystack.prototype;
@@ -554,8 +554,9 @@ async function runPaymentGatewayTests() {
             await fundWallet(req, res);
             paystackAdapter.initializePayment = origInit;
 
-            assert.strictEqual(jsonSent.authorization_url, 'https://checkout.paystack.com/web-flow');
-            assert.strictEqual(jsonSent.provider, 'paystack');
+            assert.strictEqual(statusCode, 400);
+            assert.strictEqual(jsonSent.code, 'PAYMENT_CALLBACK_URL_INVALID');
+            assert.strictEqual(jsonSent.authorization_url, undefined);
         });
 
         await test('12. Existing Mobile flow remains compatible', async () => {

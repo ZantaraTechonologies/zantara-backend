@@ -588,6 +588,42 @@ class PaymentGatewayService {
       ? gateway.supportedChannels
       : ['card', 'bank_transfer', 'ussd'])
 
+    const checkoutProvider = String(gateway.adapterType || gateway.code)
+      .trim()
+      .toLowerCase()
+    let effectiveCallbackUrl
+    try {
+      effectiveCallbackUrl = new URL(
+        `/${checkoutProvider}/return`,
+        process.env.CLIENT_BASE_URL || 'http://localhost:5173'
+      ).toString()
+    } catch (error) {
+      const configurationError = new Error(
+        'Payment return URL configuration is invalid'
+      )
+      configurationError.code = 'PAYMENT_CONFIGURATION_ERROR'
+      throw configurationError
+    }
+
+    if (callbackUrl !== undefined && callbackUrl !== null && callbackUrl !== '') {
+      let requestedCallbackUrl
+      try {
+        if (typeof callbackUrl !== 'string') throw new Error('Invalid callback')
+        requestedCallbackUrl = new URL(callbackUrl).toString()
+      } catch (error) {
+        const callbackError = new Error('Payment callback URL is invalid')
+        callbackError.code = 'PAYMENT_CALLBACK_URL_INVALID'
+        throw callbackError
+      }
+      if (requestedCallbackUrl !== effectiveCallbackUrl) {
+        const callbackError = new Error(
+          'Payment callback URL must match the configured application return URL'
+        )
+        callbackError.code = 'PAYMENT_CALLBACK_URL_INVALID'
+        throw callbackError
+      }
+    }
+
     // Authoritative share price snapshot for investment-buy payments: read the
     // CURRENT server-side price at INIT time. Fulfillment must bind to this
     // snapshot used by the authoritative settlement transaction, eliminating
@@ -694,15 +730,6 @@ class PaymentGatewayService {
     })
 
     // 5. Delegate to Adapter
-    // Resolve the effective callback URL exactly as the adapter will (the
-    // adapter defaults to CLIENT_BASE_URL/<gateway>/return). The mobile
-    // WebView needs this host to distinguish the definitive final RETURN
-    // navigation from intermediate 3DS/issuer/card-auth navigation.
-    const effectiveCallbackUrl =
-      callbackUrl ||
-      `${process.env.CLIENT_BASE_URL || 'http://localhost:5173'}/${
-        gateway.adapterType || gateway.code
-      }/return`
     let initResult
     try {
       const adapter = this.getAdapterInstance(gateway)
@@ -715,7 +742,10 @@ class PaymentGatewayService {
         // restricted legacy flows continue to pass their requested channels.
         channels: restrictedChannels || undefined,
         reference,
-        callbackUrl,
+        // The adapter and clients receive the same trusted return URL. The
+        // mobile WebView uses it to distinguish the final provider return from
+        // intermediate issuer and 3DS navigation.
+        callbackUrl: effectiveCallbackUrl,
         metadata: {
           ...metadata,
           userId: user._id || user.id,
@@ -766,7 +796,7 @@ class PaymentGatewayService {
       authorizationUrl: initResult.authorizationUrl,
       reference,
       provider: gateway.code,
-      checkoutProvider: gateway.adapterType || gateway.code,
+      checkoutProvider,
       gateway: gateway.code,
       callbackUrl: effectiveCallbackUrl,
       raw: initResult.raw,

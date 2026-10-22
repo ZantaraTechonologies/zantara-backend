@@ -6,6 +6,7 @@ const MIN_AMOUNT = 50; // ₦
 
 const publicInitializationError = (err) => {
     const configured = err.code === 'PAYMENT_CONFIGURATION_ERROR';
+    const invalidCallback = err.code === 'PAYMENT_CALLBACK_URL_INVALID';
     const unavailable = configured || [
         'PAYMENT_GATEWAY_NOT_FOUND',
         'PAYMENT_GATEWAY_INACTIVE',
@@ -17,14 +18,18 @@ const publicInitializationError = (err) => {
         'PAYMENT_GATEWAY_ADAPTER_UNSUPPORTED'
     ].includes(err.code);
     return {
-        status: configured ? 503 : unavailable ? 400 : err.code === 'PAYMENT_CHANNEL_UNSUPPORTED' ? 400 : 502,
+        status: configured ? 503 : unavailable || invalidCallback ? 400 : err.code === 'PAYMENT_CHANNEL_UNSUPPORTED' ? 400 : 502,
         body: {
-            message: unavailable
+            message: invalidCallback
+                ? 'The payment return address is invalid.'
+                : unavailable
                 ? 'Online payment is temporarily unavailable. Please try again later.'
                 : err.code === 'PAYMENT_CHANNEL_UNSUPPORTED'
                     ? 'The requested payment method is unavailable.'
                     : 'Unable to start payment securely. Please try again later.',
-            code: configured || unavailable
+            code: invalidCallback
+                ? err.code
+                : configured || unavailable
                 ? 'PAYMENT_GATEWAY_UNAVAILABLE'
                 : err.code === 'PAYMENT_CHANNEL_UNSUPPORTED'
                     ? err.code
