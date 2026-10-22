@@ -8,6 +8,7 @@ const Transaction = require('../models/Transaction')
 const User = require('../models/User')
 const WebhookEvent = require('../models/WebhookEvent')
 const WalletLedger = require('../models/WalletLedger')
+const AuditLog = require('../models/AuditLog')
 const walletService = require('./wallet.service')
 const notificationService = require('./notification.service')
 const investmentService = require('./investment.service')
@@ -19,8 +20,18 @@ const {
 } = require('../config/publicShareholding')
 const { generatePaymentReference } = require('../utils/generateID')
 const { createWithIdentifierRetry } = require('../utils/identifierRetry')
-const { decryptSecret, encryptSecret, isEncrypted } = require('../utils/crypto')
 const {
+  decryptSecret,
+  decryptSecretStrict,
+  encryptSecret,
+  isEncrypted
+} = require('../utils/crypto')
+const {
+  MONNIFY_BASE_URLS,
+  plainMetadata,
+  configurationVersion,
+  isCanonicalMonnify,
+  hasExactMonnifyEligibility,
   isCustomerFundingEligible,
   resolveCustomerFundingEnvironment
 } = require('../utils/paymentGatewayEligibility')
@@ -1018,6 +1029,7 @@ class PaymentGatewayService {
       `Provider transaction '${provider}:${providerTransactionId}' already belongs to local reference '${ownerRefId}' and cannot settle '${attemptedRefId}'`
     )
     error.code = 'PAYMENT_PROVIDER_TRANSACTION_REUSED'
+    error.statusCode = 409
     return error
   }
 
@@ -1737,6 +1749,595 @@ class PaymentGatewayService {
       }
     }
     return { scanned: stranded.length, settled, skipped }
+  }
+
+  _gatewayTestRecoveryError (message, code, statusCode = 409) {
+    const error = new Error(message)
+    error.code = code
+    error.statusCode = statusCode
+    return error
+  }
+
+  async _loadGatewayTestRecoveryTransaction (reference, session = null) {
+    let query = TransactionStatus.findOne({ refId: reference })
+    if (typeof query?.select === 'function') {
+      query = query.select(
+        '+gatewayConfigSnapshot +administrativeValidationLeaseToken +eligibilityVerificationLeaseToken +eligibilityVerificationLeaseExpiresAt +eligibilityRecoveryOriginalEvidence'
+      )
+    }
+    if (session && typeof query?.session === 'function') query = query.session(session)
+    return query
+  }
+
+  async _loadGatewayTestRecoveryGateway (gatewayId, session = null) {
+    let query = PaymentGateway.findById(gatewayId)
+    if (typeof query?.select === 'function') {
+      query = query.select(
+        '+virtualAccountMutationVersion +virtualAccountClaimVersion'
+      )
+    }
+    if (session && typeof query?.session === 'function') query = query.session(session)
+    return query
+  }
+
+  _assertGatewayTestRecoveryContext ({
+    transaction,
+    gateway,
+    reference,
+    at = new Date(),
+    recovered = false
+  }) {
+    const invalid = (message, code = 'MONNIFY_GATEWAY_TEST_RECOVERY_CONTEXT_INVALID') => {
+      throw this._gatewayTestRecoveryError(message, code, 409)
+    }
+    if (!transaction) invalid('The gateway-test transaction was not found.', 'MONNIFY_GATEWAY_TEST_RECOVERY_NOT_FOUND')
+    if (!gateway) invalid('The payment gateway was not found.', 'MONNIFY_GATEWAY_TEST_RECOVERY_GATEWAY_NOT_FOUND')
+
+    const metadata = plainMetadata(gateway)
+    const checkout = metadata.checkoutValidation
+    const snapshot = transaction.gatewayConfigSnapshot
+    const snapshotMetadata = plainMetadata(snapshot)
+    const version = configurationVersion(gateway)
+    const gatewayId = String(gateway._id || '')
+    const expectedReference = String(reference || '')
+    const expectedAmountKobo = transaction.amountKobo
+    const recoveringInitialization = Boolean(
+      checkout?.status === 'initializing' &&
+      !checkout.reference &&
+      checkout.leaseToken &&
+      transaction.administrativeValidationLeaseToken === checkout.leaseToken
+    )
+    let merchantSecretMatches = false
+    try {
+      const snapshotSecret = decryptSecretStrict(snapshot?.secretKey)
+      const currentSecret = decryptSecretStrict(gateway?.secretKey)
+      const snapshotSecretBuffer = Buffer.from(snapshotSecret)
+      const currentSecretBuffer = Buffer.from(currentSecret)
+      merchantSecretMatches =
+        snapshotSecretBuffer.length === currentSecretBuffer.length &&
+        crypto.timingSafeEqual(snapshotSecretBuffer, currentSecretBuffer)
+    } catch (_) {}
+
+    if (
+      transaction.refId !== expectedReference ||
+      transaction.type !== 'gateway_test' ||
+      !transaction.userId ||
+      String(transaction.provider || '').toLowerCase() !== 'monnify' ||
+      String(transaction.gatewayId || '') !== gatewayId ||
+      !Number.isSafeInteger(expectedAmountKobo) ||
+      expectedAmountKobo <= 0 ||
+      String(transaction.expectedCurrency || '').trim().toUpperCase() !== 'NGN'
+    ) {
+      invalid('The transaction is not the exact recoverable Monnify gateway-test payment.')
+    }
+    if (!transaction.reconciliationReason) {
+      invalid('The transaction has no retained manual-review evidence.')
+    }
+    if (
+      !isCanonicalMonnify(gateway) ||
+      gateway.environment !== 'test' ||
+      gateway.baseUrl !== MONNIFY_BASE_URLS.test ||
+      !Number.isSafeInteger(version) ||
+      version < 0
+    ) {
+      invalid('Recovery requires the canonical TEST Monnify gateway configuration.')
+    }
+    if (
+      !snapshot ||
+      String(snapshot.gatewayId || '') !== gatewayId ||
+      String(snapshot.code || '').toLowerCase() !== 'monnify' ||
+      String(snapshot.adapterType || '').toLowerCase() !== 'monnify' ||
+      snapshot.environment !== 'test' ||
+      snapshot.baseUrl !== MONNIFY_BASE_URLS.test ||
+      Number(snapshot.configurationVersion) !== version ||
+      !String(snapshot.publicKey || '').trim() ||
+      !snapshot.secretKey ||
+      !isEncrypted(snapshot.secretKey) ||
+      !gateway.secretKey ||
+      !isEncrypted(gateway.secretKey) ||
+      String(snapshot.publicKey) !== String(gateway.publicKey || '') ||
+      !merchantSecretMatches ||
+      !String(snapshotMetadata.contractCode || '').trim() ||
+      String(snapshotMetadata.contractCode) !== String(metadata.contractCode || '')
+    ) {
+      invalid('The pinned encrypted Monnify snapshot is missing or no longer matches the original merchant configuration.', 'MONNIFY_GATEWAY_TEST_RECOVERY_SNAPSHOT_INVALID')
+    }
+
+    const checkoutMatches = Boolean(
+      checkout &&
+      (checkout.reference === expectedReference || recoveringInitialization) &&
+      String(checkout.gatewayId || '') === gatewayId &&
+      checkout.environment === 'test' &&
+      Number(checkout.configurationVersion) === version &&
+      checkout.amountKobo === expectedAmountKobo &&
+      String(checkout.currency || '').trim().toUpperCase() === 'NGN'
+    )
+    if (!checkoutMatches) {
+      invalid('The original eligibility checkout context no longer matches this transaction.', 'MONNIFY_GATEWAY_TEST_RECOVERY_CHECKOUT_INVALID')
+    }
+
+    if (recovered) {
+      const retainedContext =
+        (metadata.administrativeSandboxOnly === true &&
+          ['initializing', 'initialized', 'ambiguous', 'verified'].includes(checkout.status)) ||
+        (checkout.status === 'verified' && hasExactMonnifyEligibility(gateway))
+      if (!retainedContext) {
+        invalid('The recovered eligibility context no longer belongs to this gateway.')
+      }
+    } else {
+      const expiresAt = new Date(checkout.expiresAt)
+      if (
+        gateway.status !== 'inactive' ||
+        gateway.isDefault ||
+        metadata.administrativeSandboxOnly !== true ||
+        !['initializing', 'initialized', 'ambiguous'].includes(checkout.status) ||
+        !expiresAt.getTime() ||
+        expiresAt <= at
+      ) {
+        invalid('The original TEST eligibility context is inactive, expired, or no longer isolated.', 'MONNIFY_GATEWAY_TEST_RECOVERY_CHECKOUT_EXPIRED')
+      }
+    }
+
+    return { metadata, checkout, snapshot, version, recoveringInitialization }
+  }
+
+  async _releaseGatewayTestRecoveryLease (reference, token) {
+    if (!reference || !token) return
+    await TransactionStatus.updateOne(
+      {
+        refId: reference,
+        status: 'reconciliation_required',
+        type: 'gateway_test',
+        eligibilityVerificationLeaseToken: token
+      },
+      {
+        $unset: {
+          eligibilityVerificationLeaseToken: 1,
+          eligibilityVerificationLeaseExpiresAt: 1
+        }
+      }
+    )
+  }
+
+  async _alreadyRecoveredGatewayTest ({ transaction, gateway, reference }) {
+    if (
+      transaction?.status !== 'success' ||
+      !(transaction.eligibilityRecoveredAt instanceof Date)
+    ) {
+      throw this._gatewayTestRecoveryError(
+        `Reference '${reference}' is not eligible for gateway-test recovery.`,
+        'MONNIFY_GATEWAY_TEST_RECOVERY_STATUS_INVALID',
+        409
+      )
+    }
+    this._assertGatewayTestRecoveryContext({
+      transaction,
+      gateway,
+      reference,
+      recovered: true
+    })
+    const evidence = this._assertPersistedSettlementEvidence(transaction)
+    if (
+      String(transaction.providerPaymentStatus || '').toUpperCase() !== 'PAID' ||
+      !(transaction.providerVerifiedAt instanceof Date)
+    ) {
+      throw this._gatewayTestRecoveryError(
+        'The recovered transaction is missing authoritative PAID verification evidence.',
+        'MONNIFY_GATEWAY_TEST_RECOVERY_EVIDENCE_INVALID',
+        409
+      )
+    }
+    await this._assertProviderTransactionOwner({
+      provider: evidence.provider,
+      providerTransactionId: evidence.confirmedProviderRef,
+      refId: reference
+    })
+    return {
+      success: true,
+      status: 'success',
+      reference,
+      recovered: true,
+      alreadyRecovered: true,
+      credited: false,
+      nextAction: 'check_eligibility'
+    }
+  }
+
+  _assertGatewayTestRecoveryProviderIdentity (transaction, evidence) {
+    const retainedProvider = String(
+      transaction?.confirmedProvider || ''
+    ).trim().toLowerCase()
+    const retainedProviderRef = String(
+      transaction?.confirmedProviderRef || ''
+    ).trim()
+    if (
+      (retainedProvider && retainedProvider !== evidence.confirmedProvider) ||
+      (retainedProviderRef && retainedProviderRef !== evidence.confirmedProviderRef)
+    ) {
+      throw this._gatewayTestRecoveryError(
+        'Fresh Monnify evidence does not match the provider identity retained for manual review.',
+        'MONNIFY_GATEWAY_TEST_RECOVERY_EVIDENCE_MISMATCH',
+        422
+      )
+    }
+  }
+
+  async recoverGatewayTestReconciliation ({
+    gatewayId,
+    reference,
+    adminId,
+    operatorName = 'SuperAdmin',
+    note = '',
+    ipAddress,
+    userAgent
+  }) {
+    if (!gatewayId || !reference || !adminId) {
+      throw this._gatewayTestRecoveryError(
+        'Gateway, reference, and SuperAdmin identity are required.',
+        'MONNIFY_GATEWAY_TEST_RECOVERY_REQUEST_INVALID',
+        400
+      )
+    }
+
+    let transaction = await this._loadGatewayTestRecoveryTransaction(reference)
+    let gateway = await this._loadGatewayTestRecoveryGateway(gatewayId)
+    if (
+      transaction &&
+      String(transaction.userId || '') !== String(adminId)
+    ) {
+      throw this._gatewayTestRecoveryError(
+        'Only the SuperAdmin who initialized this gateway-test payment can recover it.',
+        'MONNIFY_GATEWAY_TEST_RECOVERY_OWNER_MISMATCH',
+        403
+      )
+    }
+    if (transaction?.status === 'success') {
+      return this._alreadyRecoveredGatewayTest({ transaction, gateway, reference })
+    }
+    if (transaction?.status !== 'reconciliation_required') {
+      throw this._gatewayTestRecoveryError(
+        `Reference '${reference}' is not under gateway-test manual review.`,
+        'MONNIFY_GATEWAY_TEST_RECOVERY_STATUS_INVALID',
+        409
+      )
+    }
+    this._assertGatewayTestRecoveryContext({ transaction, gateway, reference })
+
+    const claimedAt = new Date()
+    const leaseToken = crypto.randomBytes(32).toString('hex')
+    const leaseExpiresAt = new Date(
+      claimedAt.getTime() + ELIGIBILITY_VERIFICATION_LEASE_MS
+    )
+    let claimQuery = TransactionStatus.findOneAndUpdate(
+      {
+        _id: transaction._id,
+        refId: reference,
+        status: 'reconciliation_required',
+        type: 'gateway_test',
+        provider: 'monnify',
+        gatewayId: transaction.gatewayId,
+        $or: [
+          { eligibilityVerificationLeaseExpiresAt: { $lte: claimedAt } },
+          {
+            eligibilityVerificationLeaseToken: { $exists: false },
+            eligibilityVerificationLeaseExpiresAt: { $exists: false }
+          }
+        ]
+      },
+      {
+        $set: {
+          eligibilityVerificationLeaseToken: leaseToken,
+          eligibilityVerificationLeaseExpiresAt: leaseExpiresAt
+        }
+      },
+      { new: true }
+    )
+    if (typeof claimQuery?.select === 'function') {
+      claimQuery = claimQuery.select(
+        '+gatewayConfigSnapshot +administrativeValidationLeaseToken +eligibilityVerificationLeaseToken +eligibilityVerificationLeaseExpiresAt +eligibilityRecoveryOriginalEvidence'
+      )
+    }
+    transaction = await claimQuery
+    if (!transaction) {
+      const latest = await this._loadGatewayTestRecoveryTransaction(reference)
+      if (latest?.status === 'success') {
+        gateway = await this._loadGatewayTestRecoveryGateway(gatewayId)
+        return this._alreadyRecoveredGatewayTest({ transaction: latest, gateway, reference })
+      }
+      const latestExpiry = new Date(latest?.eligibilityVerificationLeaseExpiresAt || 0)
+      if (
+        latest?.status === 'reconciliation_required' &&
+        latest?.eligibilityVerificationLeaseToken &&
+        latestExpiry.getTime() > claimedAt.getTime()
+      ) {
+        return {
+          success: false,
+          status: 'processing',
+          reference,
+          recovered: false,
+          credited: false,
+          retryAllowed: true,
+          message: 'This gateway-test recovery is already in progress.'
+        }
+      }
+      throw this._gatewayTestRecoveryError(
+        'The recovery lease is unavailable or malformed. Refresh before retrying.',
+        'MONNIFY_GATEWAY_TEST_RECOVERY_LEASE_CONFLICT',
+        409
+      )
+    }
+
+    let committed = false
+    let session = null
+    let evidence = null
+    try {
+      const context = this._assertGatewayTestRecoveryContext({ transaction, gateway, reference })
+      const hydratedSnapshot = this._hydrateGatewayCredentials(context.snapshot)
+      if (
+        !hydratedSnapshot?.publicKey ||
+        !hydratedSnapshot?.secretKey ||
+        isEncrypted(hydratedSnapshot.secretKey) ||
+        !String(hydratedSnapshot.metadata?.contractCode || '').trim()
+      ) {
+        throw this._gatewayTestRecoveryError(
+          'The pinned Monnify snapshot cannot be authenticated.',
+          'MONNIFY_GATEWAY_TEST_RECOVERY_SNAPSHOT_UNREADABLE',
+          409
+        )
+      }
+
+      const adapter = this.getAdapterInstance(hydratedSnapshot)
+      const verification = await adapter.verifyPayment(reference)
+      const providerStatus = String(verification?.providerStatus || '').trim().toUpperCase()
+      if (
+        verification?.success !== true ||
+        verification?.status !== 'success' ||
+        providerStatus !== 'PAID'
+      ) {
+        const error = this._gatewayTestRecoveryError(
+          'Monnify did not authoritatively confirm this transaction as PAID.',
+          'MONNIFY_GATEWAY_TEST_RECOVERY_NOT_PAID',
+          422
+        )
+        if (providerStatus) error.providerStatus = providerStatus
+        throw error
+      }
+
+      try {
+        evidence = this._validatedGatewayEvidence(transaction, {
+          ...verification,
+          gateway: 'monnify'
+        })
+      } catch (_) {
+        throw this._gatewayTestRecoveryError(
+          'Fresh Monnify evidence does not match the original reference, amount, currency, or provider identity.',
+          'MONNIFY_GATEWAY_TEST_RECOVERY_EVIDENCE_MISMATCH',
+          422
+        )
+      }
+      this._assertGatewayTestRecoveryProviderIdentity(transaction, evidence)
+      await this._assertProviderTransactionOwner({
+        provider: evidence.confirmedProvider,
+        providerTransactionId: evidence.confirmedProviderRef,
+        refId: reference
+      })
+
+      session = await mongoose.startSession()
+      session.startTransaction()
+      const finalAt = new Date()
+      const lockedTransaction = await this._loadGatewayTestRecoveryTransaction(reference, session)
+      const lockedGateway = await this._loadGatewayTestRecoveryGateway(gatewayId, session)
+      const lockedContext = this._assertGatewayTestRecoveryContext({
+        transaction: lockedTransaction,
+        gateway: lockedGateway,
+        reference,
+        at: finalAt
+      })
+      const lockedLeaseExpiry = new Date(
+        lockedTransaction.eligibilityVerificationLeaseExpiresAt || 0
+      )
+      if (
+        String(lockedTransaction.userId || '') !== String(adminId) ||
+        lockedTransaction.eligibilityVerificationLeaseToken !== leaseToken ||
+        !lockedLeaseExpiry.getTime() ||
+        lockedLeaseExpiry <= finalAt
+      ) {
+        throw this._gatewayTestRecoveryError(
+          'Recovery lease ownership was lost before verification completed.',
+          'MONNIFY_GATEWAY_TEST_RECOVERY_LEASE_LOST',
+          409
+        )
+      }
+
+      evidence = this._validatedGatewayEvidence(lockedTransaction, {
+        ...verification,
+        gateway: 'monnify'
+      })
+      this._assertGatewayTestRecoveryProviderIdentity(lockedTransaction, evidence)
+      await this._assertProviderTransactionOwner({
+        provider: evidence.confirmedProvider,
+        providerTransactionId: evidence.confirmedProviderRef,
+        refId: reference,
+        session
+      })
+
+      const versionClause = lockedContext.version === 0
+        ? {
+            $or: [
+              { virtualAccountMutationVersion: 0 },
+              { virtualAccountMutationVersion: { $exists: false } }
+            ]
+          }
+        : { virtualAccountMutationVersion: lockedContext.version }
+      const gatewayFence = await PaymentGateway.updateOne(
+        {
+          _id: lockedGateway._id,
+          code: 'monnify',
+          adapterType: 'monnify',
+          status: 'inactive',
+          isDefault: false,
+          environment: 'test',
+          baseUrl: MONNIFY_BASE_URLS.test,
+          publicKey: lockedContext.snapshot.publicKey,
+          secretKey: lockedGateway.secretKey,
+          'metadata.contractCode': lockedContext.snapshot.metadata.contractCode,
+          'metadata.administrativeSandboxOnly': true,
+          'metadata.checkoutValidation.status': lockedContext.checkout.status,
+          ...(lockedContext.recoveringInitialization
+            ? {
+                'metadata.checkoutValidation.leaseToken': lockedContext.checkout.leaseToken,
+                'metadata.checkoutValidation.reference': { $exists: false }
+              }
+            : { 'metadata.checkoutValidation.reference': reference }),
+          'metadata.checkoutValidation.gatewayId': String(lockedGateway._id),
+          'metadata.checkoutValidation.environment': 'test',
+          'metadata.checkoutValidation.configurationVersion': lockedContext.version,
+          'metadata.checkoutValidation.amountKobo': lockedTransaction.amountKobo,
+          'metadata.checkoutValidation.currency': 'NGN',
+          'metadata.checkoutValidation.expiresAt': { $gt: finalAt },
+          ...versionClause
+        },
+        { $inc: { virtualAccountClaimVersion: 1 } },
+        { session }
+      )
+      if (Number(gatewayFence?.matchedCount ?? gatewayFence?.n ?? 0) !== 1) {
+        throw this._gatewayTestRecoveryError(
+          'The Monnify gateway or checkout context changed during recovery.',
+          'MONNIFY_GATEWAY_TEST_RECOVERY_CONFIGURATION_CONFLICT',
+          409
+        )
+      }
+
+      const recovered = await TransactionStatus.updateOne(
+        {
+          _id: lockedTransaction._id,
+          refId: reference,
+          status: 'reconciliation_required',
+          type: 'gateway_test',
+          provider: 'monnify',
+          gatewayId: lockedTransaction.gatewayId,
+          userId: lockedTransaction.userId,
+          eligibilityVerificationLeaseToken: leaseToken,
+          eligibilityVerificationLeaseExpiresAt: { $gt: finalAt }
+        },
+        {
+          $set: {
+            status: 'success',
+            eligibilityRecoveryOriginalEvidence: {
+              confirmedAmountKobo: lockedTransaction.confirmedAmountKobo ?? null,
+              confirmedCurrency: lockedTransaction.confirmedCurrency ?? null,
+              confirmedProvider: lockedTransaction.confirmedProvider ?? null,
+              confirmedReference: lockedTransaction.confirmedReference ?? null,
+              confirmedProviderRef: lockedTransaction.confirmedProviderRef ?? null,
+              providerPaymentStatus: lockedTransaction.providerPaymentStatus ?? null,
+              providerVerifiedAt: lockedTransaction.providerVerifiedAt ?? null,
+              reconciliationReason: lockedTransaction.reconciliationReason,
+              capturedAt: finalAt
+            },
+            ...evidence,
+            providerPaymentStatus: 'PAID',
+            providerVerifiedAt: finalAt,
+            eligibilityRecoveredAt: finalAt,
+            lastAttempt: finalAt
+          },
+          $unset: {
+            eligibilityVerificationLeaseToken: 1,
+            eligibilityVerificationLeaseExpiresAt: 1,
+            settlementClaimToken: 1,
+            settlementLeaseExpiresAt: 1
+          }
+        },
+        { session }
+      )
+      if (Number(recovered?.matchedCount ?? recovered?.n ?? 0) !== 1) {
+        throw this._gatewayTestRecoveryError(
+          'The gateway-test transaction changed before recovery completed.',
+          'MONNIFY_GATEWAY_TEST_RECOVERY_TRANSACTION_CONFLICT',
+          409
+        )
+      }
+
+      const providerTransactionIdHash = crypto
+        .createHash('sha256')
+        .update(evidence.confirmedProviderRef)
+        .digest('hex')
+        .slice(0, 16)
+      await AuditLog.create([{
+        adminId,
+        operatorName,
+        action: 'MONNIFY_GATEWAY_TEST_RECOVERED',
+        target: `Gateway: ${lockedGateway.name}`,
+        details: {
+          gatewayId: lockedGateway._id,
+          reference,
+          environment: 'test',
+          configurationVersion: lockedContext.version,
+          amountKobo: evidence.confirmedAmountKobo,
+          currency: evidence.confirmedCurrency,
+          providerStatus: 'PAID',
+          providerTransactionIdHash,
+          previousReconciliationReason: lockedTransaction.reconciliationReason,
+          note: String(note || '').trim().slice(0, 500),
+          walletCredited: false,
+          gatewayActivated: false,
+          defaultGatewayChanged: false
+        },
+        result: 'success',
+        ipAddress,
+        userAgent
+      }], { session })
+
+      await session.commitTransaction()
+      committed = true
+      return {
+        success: true,
+        status: 'success',
+        reference,
+        recovered: true,
+        alreadyRecovered: false,
+        credited: false,
+        nextAction: 'check_eligibility'
+      }
+    } catch (error) {
+      if (session && !committed) {
+        try {
+          await session.abortTransaction()
+        } catch (_) {}
+      }
+      if (error?.code === 11000 && evidence) {
+        await this._assertProviderTransactionOwner({
+          provider: evidence.confirmedProvider,
+          providerTransactionId: evidence.confirmedProviderRef,
+          refId: reference
+        })
+      }
+      throw error
+    } finally {
+      if (session) await session.endSession()
+      if (!committed) {
+        await this._releaseGatewayTestRecoveryLease(reference, leaseToken)
+      }
+    }
   }
 
 

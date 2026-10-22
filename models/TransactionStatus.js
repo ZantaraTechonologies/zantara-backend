@@ -32,6 +32,8 @@ const transactionStatusSchema = new mongoose.Schema({
     eligibilityVerificationLeaseToken: { type: String, select: false },
     eligibilityVerificationLeaseExpiresAt: { type: Date, select: false },
     eligibilityAttemptReleasedAt: { type: Date },
+    eligibilityRecoveredAt: { type: Date },
+    eligibilityRecoveryOriginalEvidence: { type: mongoose.Schema.Types.Mixed, select: false },
     initializationOutcome: {
         type: String,
         enum: ['pending', 'ambiguous', 'definitive_failure'],

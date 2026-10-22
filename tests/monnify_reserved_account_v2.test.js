@@ -364,6 +364,113 @@ test('successful Monnify verification does not invent missing currency', async t
     assert.equal(result.currency, '');
 });
 
+test('inconclusive Monnify verification does not invent currency', async t => {
+    const originalGet = axios.get;
+    t.after(() => { axios.get = originalGet; });
+    axios.get = async () => ({
+        data: {
+            requestSuccessful: false,
+            responseMessage: 'No transaction data'
+        }
+    });
+
+    const result = await makeAdapter().verifyPayment('MONNIFY-23456789ABCDEFGH');
+
+    assert.equal(result.status, 'pending');
+    assert.equal(result.providerStatus, 'UNKNOWN');
+    assert.equal(result.currency, '');
+});
+
+test('Monnify transport failure does not invent currency', async t => {
+    const originalGet = axios.get;
+    t.after(() => { axios.get = originalGet; });
+    axios.get = async () => { throw new Error('provider unavailable'); };
+
+    const result = await makeAdapter().verifyPayment('MONNIFY-23456789ABCDEFGH');
+
+    assert.equal(result.status, 'pending');
+    assert.equal(result.providerStatus, 'UNKNOWN');
+    assert.equal(result.currency, '');
+});
+
+for (const testCase of [
+    { name: 'currencyCode', fields: { currencyCode: 'NGN' }, expected: 'NGN' },
+    { name: 'currency', fields: { currency: 'NGN' }, expected: 'NGN' },
+    { name: 'incorrect currency', fields: { currency: 'USD' }, expected: 'USD' },
+    {
+        name: 'conflicting currency fields',
+        fields: { currency: 'NGN', currencyCode: 'USD' },
+        expected: ''
+    }
+]) {
+    test(`Monnify V2 verification normalizes ${testCase.name} without a default`, async t => {
+        const originalGet = axios.get;
+        t.after(() => { axios.get = originalGet; });
+        axios.get = async () => ({
+            data: {
+                requestSuccessful: true,
+                responseBody: {
+                    paymentReference: 'MONNIFY-23456789ABCDEFGH',
+                    transactionReference: 'MNFY_PROVIDER_REFERENCE',
+                    paymentStatus: 'PAID',
+                    amountPaid: '100.00',
+                    ...testCase.fields
+                }
+            }
+        });
+
+        const result = await makeAdapter().verifyPayment('MONNIFY-23456789ABCDEFGH');
+
+        assert.equal(result.status, 'success');
+        assert.equal(result.providerStatus, 'PAID');
+        assert.equal(result.amount, 100);
+        assert.equal(result.currency, testCase.expected);
+    });
+}
+
+test('Monnify webhook currency normalization accepts currencyCode and rejects conflicts', () => {
+    const adapter = makeAdapter();
+    const currencyCodeOnly = adapter.normalizeWebhook({
+        eventType: 'SUCCESSFUL_TRANSACTION',
+        eventData: { currencyCode: ' ngn ' }
+    });
+    const conflicting = adapter.normalizeWebhook({
+        eventType: 'SUCCESSFUL_TRANSACTION',
+        eventData: { currency: 'NGN', currencyCode: 'USD' }
+    });
+
+    assert.equal(currencyCodeOnly.currency, 'NGN');
+    assert.equal(conflicting.currency, '');
+});
+
+test('Monnify V1 fallback uses the same strict currency normalization', async t => {
+    const originalGet = axios.get;
+    t.after(() => { axios.get = originalGet; });
+    let calls = 0;
+    axios.get = async () => {
+        calls++;
+        if (calls === 1) throw new Error('V2 unavailable');
+        return {
+            data: {
+                requestSuccessful: true,
+                responseBody: {
+                    paymentReference: 'MONNIFY-23456789ABCDEFGH',
+                    transactionReference: 'MNFY_V1_PROVIDER_REFERENCE',
+                    paymentStatus: 'PAID',
+                    amountPaid: '100.00',
+                    currency: ' ngn '
+                }
+            }
+        };
+    };
+
+    const result = await makeAdapter().verifyPayment('MONNIFY-23456789ABCDEFGH');
+
+    assert.equal(calls, 2);
+    assert.equal(result.status, 'success');
+    assert.equal(result.currency, 'NGN');
+});
+
 for (const providerStatus of ['FAILED', 'EXPIRED']) {
     test(`Monnify verification preserves provider-confirmed ${providerStatus}`, async t => {
         const originalGet = axios.get;

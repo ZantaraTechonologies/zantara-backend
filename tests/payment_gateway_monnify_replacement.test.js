@@ -1974,6 +1974,39 @@ test('direct gateway-test verification claims and releases the shared lease arou
   assert.equal(releaseWrite.update.$unset.eligibilityVerificationLeaseToken, 1)
 })
 
+for (const existingStatus of ['success', 'reconciliation_required']) {
+  test(`duplicate verification preserves an existing ${existingStatus} gateway test without querying Monnify`, async t => {
+    const transaction = {
+      refId: `MNFY_EXISTING_${existingStatus.toUpperCase()}`,
+      type: 'gateway_test',
+      status: existingStatus,
+      provider: 'monnify'
+    }
+    const originals = {
+      transactionFindOne: TransactionStatus.findOne,
+      getAdapter: paymentGatewayService.getAdapterInstance
+    }
+    let providerQueries = 0
+    TransactionStatus.findOne = () => queryResult(transaction)
+    paymentGatewayService.getAdapterInstance = () => {
+      providerQueries++
+      throw new Error('Existing terminal state must not query Monnify')
+    }
+    t.after(() => {
+      TransactionStatus.findOne = originals.transactionFindOne
+      paymentGatewayService.getAdapterInstance = originals.getAdapter
+    })
+
+    const result = await paymentGatewayService.verifyFunding(transaction.refId)
+
+    assert.equal(result.status, existingStatus)
+    assert.equal(providerQueries, 0)
+    if (existingStatus === 'reconciliation_required') {
+      assert.match(result.message, /manual review/i)
+    }
+  })
+}
+
 test('terminal gateway-test verification preserves sanitized provider evidence without wallet effects', async t => {
   const transaction = {
     refId: 'MNFY_TERMINAL_GATEWAY_TEST',

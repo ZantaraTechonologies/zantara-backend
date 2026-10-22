@@ -2,6 +2,13 @@ const axios = require('axios');
 const crypto = require('crypto');
 const BasePaymentAdapter = require('./base-payment.adapter');
 
+function normalizeTransactionCurrency(body = {}) {
+    const currency = String(body.currency || '').trim().toUpperCase();
+    const currencyCode = String(body.currencyCode || '').trim().toUpperCase();
+    if (currency && currencyCode && currency !== currencyCode) return '';
+    return currency || currencyCode;
+}
+
 class MonnifyAdapter extends BasePaymentAdapter {
     constructor(gatewayConfig = {}) {
         super(gatewayConfig);
@@ -325,7 +332,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
                     status: 'pending',
                     reference,
                     amount: 0,
-                    currency: 'NGN',
+                    currency: '',
                     providerStatus: 'UNKNOWN',
                     message: resData?.responseMessage || 'Monnify verification returned no data'
                 };
@@ -348,7 +355,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
             if (returnedReference !== String(reference)) normalizedStatus = 'pending';
 
             const amountPaid = Number(body.amountPaid ?? body.payableAmount ?? 0);
-            const currency = String(body.currencyCode || '').toUpperCase();
+            const currency = normalizeTransactionCurrency(body);
 
             return {
                 success: normalizedStatus === 'success',
@@ -392,7 +399,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
                         reference: returnedReference,
                         providerTransactionId: String(body.transactionReference || ''),
                         amount: Number(body.amountPaid ?? 0),
-                        currency: String(body.currencyCode || '').toUpperCase(),
+                        currency: normalizeTransactionCurrency(body),
                         providerStatus,
                         message: referenceMatches
                             ? (body.paymentStatus || queryRes.data.responseMessage || '')
@@ -410,7 +417,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
                 status: 'pending',
                 reference,
                 amount: 0,
-                currency: 'NGN',
+                currency: '',
                 providerStatus: 'UNKNOWN',
                 message: `Monnify verify error: ${msg}`
             };
@@ -461,7 +468,7 @@ class MonnifyAdapter extends BasePaymentAdapter {
             reference: data.paymentReference || accountRef,
             providerTransactionId: String(data.transactionReference || ''),
             amount: Number(data.amountPaid || 0),
-            currency: String(data.currency || data.currencyCode || '').toUpperCase(),
+            currency: normalizeTransactionCurrency(data),
             userId,
             virtualAccountReference,
             destinationAccountNumber,

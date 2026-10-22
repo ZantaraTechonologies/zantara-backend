@@ -83,6 +83,8 @@ const MONNIFY_ELIGIBILITY_CONFIRMATIONS = Object.freeze({
   test: 'enable-monnify-test-customer-funding',
   live: 'enable-monnify-live-customer-funding'
 })
+const MONNIFY_GATEWAY_TEST_RECOVERY_CONFIRMATION =
+  'recover-monnify-test-gateway-payment'
 const MONNIFY_CHECKOUT_EVIDENCE_TTL_MS = 24 * 60 * 60 * 1000
 const MONNIFY_CHECKOUT_INITIALIZATION_LEASE_MS = 5 * 60 * 1000
 const MONNIFY_ELIGIBILITY_VERIFICATION_LEASE_MS = 2 * 60 * 1000
@@ -2956,6 +2958,86 @@ const enableMonnifyCustomerFunding = async (req, res) => {
   }
 }
 
+/** Freshly verifies and recovers an exact TEST gateway payment from manual review. */
+const recoverMonnifyGatewayTest = async (req, res) => {
+  try {
+    const reference = String(req.body?.reference || '').trim()
+    const note = String(req.body?.note || '').trim()
+    if (!reference || reference.length > 200) {
+      return res.status(400).json({
+        success: false,
+        code: 'MONNIFY_GATEWAY_TEST_RECOVERY_REFERENCE_INVALID',
+        message: 'A valid gateway-test payment reference is required.'
+      })
+    }
+    if (note.length > 500) {
+      return res.status(400).json({
+        success: false,
+        code: 'MONNIFY_GATEWAY_TEST_RECOVERY_NOTE_INVALID',
+        message: 'Recovery note cannot exceed 500 characters.'
+      })
+    }
+    if (
+      req.body?.confirmation !== MONNIFY_GATEWAY_TEST_RECOVERY_CONFIRMATION
+    ) {
+      return res.status(409).json({
+        success: false,
+        code: 'MONNIFY_GATEWAY_TEST_RECOVERY_CONFIRMATION_REQUIRED',
+        message: 'Recovering a TEST Monnify gateway payment requires explicit confirmation.',
+        details: {
+          requiredConfirmation: MONNIFY_GATEWAY_TEST_RECOVERY_CONFIRMATION
+        }
+      })
+    }
+
+    const admin = await reauthenticateSuperAdmin(req)
+    const result = await paymentGatewayService.recoverGatewayTestReconciliation({
+      gatewayId: req.params.id,
+      reference,
+      adminId: req.user?._id || req.user?.id,
+      operatorName: admin.name || req.user?.name || 'SuperAdmin',
+      note,
+      ipAddress: req.ip || req.headers?.['x-forwarded-for'],
+      userAgent: req.headers?.['user-agent']
+    })
+    if (result.status === 'processing') {
+      return res.status(202).json({
+        ...result,
+        code: 'MONNIFY_GATEWAY_TEST_RECOVERY_IN_PROGRESS'
+      })
+    }
+    return res.json({
+      ...result,
+      code: result.alreadyRecovered
+        ? 'MONNIFY_GATEWAY_TEST_ALREADY_RECOVERED'
+        : 'MONNIFY_GATEWAY_TEST_RECOVERED',
+      message: result.alreadyRecovered
+        ? 'This gateway-test payment was already recovered. Continue with Check Eligibility.'
+        : 'The paid gateway-test transaction was recovered without wallet credit. Continue with Check Eligibility.'
+    })
+  } catch (error) {
+    const transactionConflict =
+      error?.code === 112 ||
+      error?.codeName === 'WriteConflict' ||
+      error?.errorLabels?.includes?.('TransientTransactionError') ||
+      error?.errorLabels?.includes?.('UnknownTransactionCommitResult')
+    const providerStatus = String(error?.providerStatus || '').toUpperCase()
+    return res.status(transactionConflict ? 409 : (error.statusCode || 400)).json({
+      success: false,
+      code: transactionConflict
+        ? 'MONNIFY_GATEWAY_TEST_RECOVERY_TRANSACTION_CONFLICT'
+        : (error.code || 'MONNIFY_GATEWAY_TEST_RECOVERY_FAILED'),
+      ...(transactionConflict ? { refreshRequired: true } : {}),
+      ...(['PAID', 'PENDING', 'FAILED', 'EXPIRED', 'CANCELLED', 'UNKNOWN'].includes(providerStatus)
+        ? { providerStatus }
+        : {}),
+      message: transactionConflict
+        ? 'The recovery state changed while evidence was being saved. Refresh before retrying.'
+        : error.message
+    })
+  }
+}
+
 /**
  * DELETE /api/admin/payment-gateways/:id
  * Retained for API compatibility, but persisted gateway configurations are
@@ -3012,7 +3094,14 @@ const getReconciliationTransactions = async (req, res) => {
         _id: tx._id,
         reference: tx.refId,
         gateway: tx.provider || 'unknown',
+        gatewayId: tx.gatewayId || null,
+        type: tx.type,
         status: tx.status,
+        recoveryAvailable:
+          tx.status === 'reconciliation_required' &&
+          tx.type === 'gateway_test' &&
+          String(tx.provider || '').toLowerCase() === 'monnify' &&
+          Boolean(tx.gatewayId),
         user: tx.userId
           ? {
               _id: tx.userId._id,
@@ -3158,6 +3247,7 @@ module.exports = {
   replaceMonnifyMerchant,
   testMonnifyHostedCheckout,
   enableMonnifyCustomerFunding,
+  recoverMonnifyGatewayTest,
   deleteGateway,
   getReconciliationTransactions,
   resolveReconciliationTransaction,
